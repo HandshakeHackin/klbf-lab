@@ -1,30 +1,36 @@
-name: Verify PR 41 with the queued beta changes on Windows
+name: Verify shader parity on WARP
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  windows:
+  parity:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: a9e0c53c7f6c1741f8f4330013e5bed8ea1d2ef8
-          fetch-depth: 0
+          repository: PastiiJay/klbf-lab
+          ref: refs/pull/41/head
           persist-credentials: false
-      - name: Combine the exact PR and queued fixes
-        shell: bash
+      - name: Check reviewed revision
         run: |
-          set -euo pipefail
-          git fetch https://github.com/PastiiJay/klbf-lab.git refs/pull/41/head 448b737fa8f4e669c3a9cede26c08a04d4cacd96
-          git -c user.name=CI -c user.email=ci@localhost merge --no-edit ba88ab0607c7cc1b7fa83b3c6f3a4a9beb1093be
-          test "$(git rev-parse 'HEAD^{tree}')" = 516e533e3d23bc7c06bdd2874669a91819ba40dd
-          git cherry-pick --no-commit 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          if ((git rev-parse HEAD) -ne 'ba88ab0607c7cc1b7fa83b3c6f3a4a9beb1093be') { throw 'Pull request revision changed' }
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo xtask policy
-      - run: cargo test --workspace --locked
+      - name: Require the SDK validator in the test harness
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("crates/victory-shader/src/emit/bitcode/opt.rs")
+          data = p.read_text(encoding="utf-8")
+          optional = "if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {"
+          strict = '{ let mut v = validator::Validator::load(validator::Validator::default_path().as_deref()).expect("Windows SDK DXIL validator required");'
+          assert data.count(optional) == 1
+          p.write_text(data.replace(optional, strict), encoding="utf-8")
+      - name: Compare optimized and unoptimized dispatches on WARP
+        env:
+          VICTORY_WARP: "1"
+          VICTORY_REQUIRE_HW_GPU: "1"
+          VICTORY_D3D12_DEBUG: "1"
+        run: cargo test --locked -p victory-shader --lib dxil_opt_hw_gpu_bit_exact_parity_and_validation -- --nocapture --test-threads=1
