@@ -29,6 +29,8 @@ pub(crate) struct Pending {
     pub(crate) graphics: Option<Box<GraphicsState>>,
     queue_state: AtomicU8,
     made: OnceLock<Option<HostPipeline>>,
+    #[cfg(feature = "diagnostics")]
+    refusal: OnceLock<&'static str>,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw or dispatch has requested it yet.
     pub(crate) key: String,
@@ -67,6 +69,8 @@ impl Pending {
             graphics,
             queue_state: AtomicU8::new(NOT_QUEUED),
             made: OnceLock::new(),
+            #[cfg(feature = "diagnostics")]
+            refusal: OnceLock::new(),
             used: AtomicBool::new(false),
             begun: OnceLock::new(),
         }
@@ -74,22 +78,29 @@ impl Pending {
 
     fn make(&self) {
         let _ = self.begun.set(Instant::now());
-        self.made
-            .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
+        self.made.get_or_init(|| {
+            HostPipeline::new(&self.shaders, self.graphics.as_deref(), |_reason| {
+                #[cfg(feature = "diagnostics")]
+                let _ = self.refusal.set(_reason);
+            })
+        });
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
     }
 }
 
-/// Why a pipeline has no host pipeline (diagnostics): its shaders that do
-/// not translate, else "refused" or "being made"; `None` if it has one.
+/// Why a draw lacks a host pipeline: still building, a known refusal, or
+/// the shaders that failed. A ready pipeline has no drop reason.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn missing(p: &Pending) -> Option<String> {
     match p.made.get() {
         Some(Some(_)) => None,
         None => Some("being made".into()),
         Some(None) => {
+            if let Some(reason) = p.refusal.get() {
+                return Some((*reason).to_owned());
+            }
             let failed: Vec<String> = p
                 .shaders
                 .iter()
@@ -420,6 +431,8 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
+        #[cfg(feature = "diagnostics")]
+        assert_eq!(missing(&p).as_deref(), Some("no vertex or mesh shader"));
     }
 
     #[test]
