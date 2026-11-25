@@ -12,16 +12,16 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: HandshakeHackin/klbf-lab
-          ref: d2b79145c624c0762fae7b4f8ae5b3d66734484d
+          ref: 8aea65cc7325507b2bceafca58bd21f6253cb4bc
           persist-credentials: false
-      - name: Isolate the test target from five unrelated stale test bodies in this CI checkout
+      - name: Isolate the test target from three unrelated descriptor test bodies in this CI checkout
         run: |
           @'
           from pathlib import Path
           root = Path("crates/victory-gpu/src")
           for file, names in {
-              "descriptor/host.rs": ["a_newer_view_of_other_memory_makes_the_older_stale", "a_texture_of_which_the_smaller_mips_are_there_ends_behind_them", "spans_say_whose_memory_a_view_is", "a_texture_sweep_finds_views_nothing_brings_up_to_date"],
-              "pipeline/host.rs": ["a_pipeline_with_depth_bounds_is_made"],
+              "descriptor/host.rs": ["a_texture_of_which_the_smaller_mips_are_there_ends_behind_them", "spans_say_whose_memory_a_view_is", "a_texture_sweep_finds_views_nothing_brings_up_to_date"],
+
           }.items():
               p = root / file
               text = p.read_text(encoding="utf-8")
@@ -32,13 +32,32 @@ jobs:
               p.write_text(text, encoding="utf-8")
           '@ | python -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run the overlap and depth-only pipeline checks on WARP
+        env:
+          VICTORY_D3D12_WARP: '1'
+        run: |
+          @'
+          from pathlib import Path
+          import subprocess
+          p = Path("crates/victory-gpu/src/pipeline/host.rs")
+          s = p.read_text(encoding="utf-8")
+          start = s.index("    fn a_pipeline_with_depth_bounds_is_made()")
+          end = s.index("\n    }", start)
+          original = s[start:end]
+          assert original.count("return;") == 1
+          p.write_text(s[:start] + original.replace("return;", 'panic!("WARP depth support required");') + s[end:], encoding="utf-8")
+          for name in ["a_newer_view_of_other_memory_makes_the_older_stale", "a_pipeline_with_depth_bounds_is_made"]:
+              run = subprocess.run(["cargo","test","--locked","-p","victory-gpu","--features","diagnostics","--lib",name,"--","--test-threads=1"],capture_output=True,text=True)
+              print(run.stdout, run.stderr[-1800:],flush=True)
+              assert run.returncode == 0 and "1 passed; 0 failed" in run.stdout, name
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run the retained indirect-dispatch tests
         env:
           VICTORY_D3D12_WARP: '1'
         run: |
           cargo test --locked -p victory-gpu --features diagnostics --lib indirect::tests:: -- --test-threads=1
       - name: Require a real WARP device and live heaps in each descriptor test
-        if: ${{ !cancelled() }}
         env:
           VICTORY_D3D12_WARP: '1'
         run: |
