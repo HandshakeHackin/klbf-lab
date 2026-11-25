@@ -27,6 +27,13 @@ const ALLOWED_NAMES: &[&str] = &[
     "LICENSE-APACHE",
 ];
 
+// Project-authored files with other extensions. Size and content checks still apply.
+const ALLOWED_PATHS: &[&str] = &[
+    "docs/klbf/logo.svg",
+    "docs/klbf/summarize_log.py",
+    "tests/check_cold_cache.py",
+];
+
 /// Paths explicitly exempted, with a reason. Keep this empty if at all possible.
 const EXCEPTIONS: &[(&str, &str)] = &[(
     "crates/victory-formats/src/bcpack-tables.bin",
@@ -147,7 +154,8 @@ pub fn check(path: &str, content: &[u8]) -> Vec<String> {
     let mut problems = Vec::new();
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    let allowed = ALLOWED_NAMES.contains(&name)
+    let allowed = ALLOWED_PATHS.contains(&path)
+        || ALLOWED_NAMES.contains(&name)
         || ext
             .as_deref()
             .is_some_and(|e| ALLOWED_EXTENSIONS.contains(&e));
@@ -196,6 +204,17 @@ mod tests {
         assert!(check("crates/x/src/lib.rs", b"fn main() {}\n").is_empty());
         assert!(check(".gitignore", b"/target/\n").is_empty());
         assert!(check(".githooks/pre-commit", b"#!/bin/sh\n").is_empty());
+    }
+
+    #[test]
+    fn project_tooling_and_logo_still_pass_through_content_checks() {
+        for &path in super::ALLOWED_PATHS {
+            assert!(check(path, b"small text").is_empty());
+            assert!(!check(path, b"data\0").is_empty());
+            assert!(!check(path, &[b'A'; 513]).is_empty());
+        }
+        assert!(!check("assets/logo.svg", b"<svg/>").is_empty());
+        assert!(!check("elsewhere/summarize_log.py", b"pass").is_empty());
     }
 
     #[test]
