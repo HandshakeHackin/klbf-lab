@@ -1,103 +1,17 @@
-name: Check the shader input fix and pending beta contributions
+name: Verify final shader input regression script
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
-defaults:
-  run:
-    shell: pwsh
 jobs:
-  explicit-inputs:
-    strategy:
-      matrix:
-        revision: [c71c7d6bc627758ad858a736233cc2a4b14bd717, d178fe7d1476f30c6ab3b791ef6945efcd47158e]
+  test:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ matrix.revision }}
+          ref: cbb00fd84464e5ede6fbd8378cedc9b8b001a9e7
           persist-credentials: false
       - run: cargo build --locked -p victory
-      - name: Check empty, missing, and mixed inputs with the real CLI
-        env:
-          TEST_REVISION: ${{ matrix.revision }}
-        run: |
-          @'
-          import os, pathlib, subprocess, tempfile
-          binary = pathlib.Path("target/debug/victory.exe").resolve(strict=True)
-          patched = os.environ["TEST_REVISION"].startswith("d178fe7")
-          for case in ("missing", "mixed", "empty", "empty-file"):
-              with tempfile.TemporaryDirectory() as tmp:
-                  root = pathlib.Path(tmp)
-                  valid = root / "empty directory"
-                  valid.mkdir()
-                  empty_file = root / "empty.rpf"
-                  empty_file.touch()
-                  missing = root / "missing shaders.rpf"
-                  files = {"missing": [missing], "mixed": [valid, missing], "empty": [valid], "empty-file": [empty_file]}[case]
-                  env = dict(os.environ, VICTORY_DATA_DIR=str(root/"data"), VICTORY_CACHE_DIR=str(root/"cache"))
-                  p = subprocess.run([binary, "translate", "--cache", "--pipelines", *files], cwd=root, env=env, capture_output=True, text=True, timeout=60)
-                  print(case, "exit", p.returncode, "stdout", p.stdout.strip(), "stderr", p.stderr.strip())
-                  if patched and missing in files:
-                      assert p.returncode != 0 and str(missing) in p.stderr and not (root/"cache").exists()
-                  else:
-                      assert p.returncode == 0 and (root/"cache"/"pipelines").is_dir()
-          '@ | python -
       - run: python tests/check_cold_cache.py target/debug/victory.exe
-  uniform-cpu:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          repository: PastiiJay/klbf-lab
-          ref: 305e0ef6435c7a2e486dc57edc19ba68ec8c19b8
-          persist-credentials: false
-      - name: Exercise both affinity requests on a uniform Windows runner
-        env:
-          VICTORY_DISK_CORES: slow
-        run: |
-          Get-CimInstance Win32_Processor | Select-Object Name,NumberOfLogicalProcessors
-          @'
-
-          #[cfg(test)]
-          #[test]
-          fn ci_uniform_topology_does_not_pin() {
-              assert!(fast_cores_enabled() && disk_cores_slow());
-              assert!(hybrid_cpu_counts().is_none(), "this runner reports hybrid cores");
-              assert!(!keep_on_fast_cores("ci-fast"));
-              assert!(!keep_on_slow_cores("ci-slow"));
-          }
-          '@ | Add-Content crates/victory-gpu/src/affinity.rs
-          cargo test --locked -p victory-gpu --lib 'affinity::' -- --nocapture
-  warp-descriptors:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          repository: PastiiJay/klbf-lab
-          ref: f5a960cdccf8d3a027215de8a01dd7408e5b6077
-          persist-credentials: false
-      - name: Require live host and heap setup in all four descriptor tests
-        run: |
-          @'
-          from pathlib import Path
-          import re
-          p = Path("crates/victory-gpu/src/descriptor/host.rs")
-          text = p.read_text(encoding="utf-8")
-          start = text.index("fn concurrent_cache_hit_and_distinct_create_view_storm()")
-          end = text.index("fn mirror_release_acquire_later_and_forget_semantics()", start)
-          tests = text[start:end]
-          for name, expr in (("host_gpu", r"host\(\)"), ("heap", r"HostHeap::new\(false, [^\n]+?\)")):
-              pat = rf"let Some\({name}\) = ({expr}) else \{{\s*return;[^\n]*\n\s*\}};"
-              tests, count = re.subn(pat, rf'let {name} = \1.expect("required for WARP verification");', tests)
-              assert count == 4, (name, count)
-          p.write_text(text[:start] + tests + text[end:], encoding="utf-8")
-          '@ | python -
-      - name: Run the existing four concurrent descriptor tests on WARP
-        env:
-          VICTORY_D3D12_WARP: '1'
-        run: cargo test --locked -p victory-gpu --lib --features diagnostics 'descriptor::host::tests::concurrent_' -- --nocapture --test-threads=1
