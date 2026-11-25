@@ -1,55 +1,41 @@
-name: Measure depth-bound pixels on Windows WARP
+name: Verify bounds-only pipelines on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  compare:
+  gpu-tests:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: c71c7d6bc627758ad858a736233cc2a4b14bd717
+          ref: d91ab6e14e0c37bfd511339f6bc7ecf94848bf7f
           persist-credentials: false
-      - name: Measure both pixels for replay and direct OMSetDepthBounds
+      - name: Run all default GPU library tests at the patch head
+        run: cargo test --locked -p victory-gpu --lib
+      - name: Confirm both pixel reads on forced WARP
         env:
           VICTORY_D3D12_WARP: '1'
         shell: pwsh
         run: |
           @'
           from pathlib import Path
-          import itertools, os, re, subprocess
-          path = Path("crates/victory-gpu/src/pipeline/host.rs")
-          src = path.read_text(encoding="utf-8")
-          before, sep, test = src.partition("fn depth_bounds_pipeline_loads_and_filters_draws()")
-          assert sep
-          def once(s, old, new):
-              assert s.count(old) == 1, old
-              return s.replace(old, new, 1)
-          test = once(test, "DepthEnable: false.into(),", 'DepthEnable: std::env::var_os("CI_DEPTH_READ").is_some().into(),')
-          call = "list.list.DrawInstanced(3, 1, 0, 0);"
-          test = once(test, call,
-              'if std::env::var_os("CI_DIRECT_BOUNDS").is_some() { use windows::core::Interface as _; '
-              'list.list.cast::<ID3D12GraphicsCommandList1>().unwrap().OMSetDepthBounds(min, max); }\n                ' + call)
-          test = once(test, 'assert_eq!(run_draw(0.6, 1.0), 0,',
-              'let outside = run_draw(0.6, 1.0); let inside = run_draw(0.4, 0.6); '
-              'eprintln!("DEPTH_OBSERVATION outside={outside} inside={inside}"); assert_eq!(outside, 0,')
-          test = once(test, 'assert_eq!(run_draw(0.4, 0.6), 255,', 'assert_eq!(inside, 255,')
-          path.write_text(before + sep + test, encoding="utf-8")
-          for read, direct in itertools.product((False, True), repeat=2):
-              env = dict(os.environ)
-              if read: env["CI_DEPTH_READ"] = "1"
-              if direct: env["CI_DIRECT_BOUNDS"] = "1"
-              p = subprocess.run(["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "--features", "diagnostics", "depth_bounds_pipeline_loads_and_filters_draws", "--", "--nocapture"], env=env, capture_output=True, text=True)
-              log = p.stdout + p.stderr
-              found = re.search(r"DEPTH_OBSERVATION outside=(\d+) inside=(\d+)", log)
-              if not found:
-                  print(log[-5000:]); raise SystemExit("No pixel observations. Skipped or failed before drawing.")
-              outside, inside = map(int, found.groups())
-              print(f"DepthEnable={read} direct_after_pso={direct} outside_pixel={outside} inside_pixel={inside} test_exit={p.returncode}", flush=True)
-              assert inside == 255
-              assert p.returncode == (0 if outside == 0 else 101)
+          p = Path("crates/victory-gpu/src/pipeline/host.rs")
+          s = p.read_text(encoding="utf-8")
+          marker = 'assert_eq!(run_draw(0.6, 1.0), 0,'
+          assert s.count(marker) == 1
+          s = s.replace(marker, 'let outside = run_draw(0.6, 1.0); eprintln!("WARP outside={outside}"); assert_eq!(outside, 0,')
+          marker = 'assert_eq!(run_draw(0.4, 0.6), 255,'
+          assert s.count(marker) == 1
+          s = s.replace(marker, 'let inside = run_draw(0.4, 0.6); eprintln!("WARP inside={inside}"); assert_eq!(inside, 255,')
+          p.write_text(s, encoding="utf-8")
           '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Could not add the test-only pixel printouts' }
+          cargo test --locked -p victory-gpu --lib --features diagnostics depth_bounds_pipeline_loads_and_filters_draws -- --nocapture 2>&1 | Tee-Object -Variable result
+          $code = $LASTEXITCODE
+          $log = $result | Out-String
+          if ($code -ne 0 -or $log -notmatch 'WARP outside=0' -or $log -notmatch 'WARP inside=255') {
+            throw 'Expected both measured WARP pixels; an early return does not verify the fix.'
+          }
