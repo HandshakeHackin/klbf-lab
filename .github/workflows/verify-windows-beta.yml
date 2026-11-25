@@ -1,11 +1,64 @@
-name: Validate the merged descriptor changes on the Lab 51 candidate
+name: Verify eight pending beta contributions together
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  descriptors:
+  release-and-cli:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: a9e0c53c7f6c1741f8f4330013e5bed8ea1d2ef8
+          persist-credentials: false
+      - run: cargo build --release --locked -p victory
+      - run: python tests/check_cold_cache.py target/release/victory.exe
+      - name: Verify the Windows release warm-up deadline
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'warm-inputs'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $env:VICTORY_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'warm-cache'
+          $env:VICTORY_WARM_SECONDS = '0'
+          $lines = & .\target\release\victory.exe translate --warm all $root
+          $lines
+          if ($LASTEXITCODE -ne 0 -or ($lines -join ' ') -notmatch 'stopped at the time limit') {
+            throw 'Zero-second shader warm-up must stop at the time limit.'
+          }
+  windows-workspace:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: a9e0c53c7f6c1741f8f4330013e5bed8ea1d2ef8
+          persist-credentials: false
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo xtask policy
+      - name: Run the workspace on the software-only Windows runner
+        run: cargo test --locked --workspace --no-fail-fast -- --skip glc_heap_uav_loads_stores_and_atomics_execute_on_gpu
+      - name: Recheck the sub-one-FPS case from issue 30
+        shell: pwsh
+        run: |
+          @'
+          import subprocess, sys, tempfile
+          from pathlib import Path
+          with tempfile.TemporaryDirectory() as folder:
+              log = Path(folder) / "run.log"
+              fps = (0.4, 0.1, 0.2, 0.0)
+              lines = [f"{v} fps, 1.0 ms/frame (1.0 preparing:" for v in fps]
+              lines += [f"ffx: frame generation: {v} real fps, {v} fps presented on=true" for v in (0.0, 0.1)]
+              for encoding in ("utf-8", "utf-16"):
+                  log.write_text("\n".join(lines), encoding=encoding)
+                  output = subprocess.check_output([sys.executable, "docs/klbf/summarize_log.py", str(log)], text=True)
+                  assert "0.15 FPS" in output and "0.05 real FPS, 0.05 presented FPS" in output, output
+                  print(encoding, output)
+          '@ | python -
+
+  merged-descriptors:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -14,11 +67,6 @@ jobs:
           repository: PastiiJay/klbf-lab
           ref: d006c10fe0159727c1fbd76455ce6ad9ecf4293b
           persist-credentials: false
-      - name: Build the unchanged release and run all GPU library tests serially
-        run: |
-          cargo build --locked --release -p victory
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p victory-gpu --lib -- --test-threads=1
       - name: Require a real WARP device and live heaps in each descriptor test
         env:
           VICTORY_D3D12_WARP: '1'
