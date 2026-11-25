@@ -1082,8 +1082,7 @@ mod tests {
 
     #[test]
     fn bounds_only_reads_depth_without_enabling_writes() {
-        let mut g = GraphicsState::default();
-        g.depth_bounds = true;
+        let mut g = GraphicsState { depth_bounds: true, ..GraphicsState::default() };
         g.depth.DepthEnable = false.into();
         g.depth.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
         g.depth.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
