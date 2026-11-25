@@ -33,6 +33,11 @@ STATE = re.compile(r"\bon=(true|false)\b")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def format_fps(value):
+    # One-decimal samples can have a median halfway between two tenths.
+    return f"{value:.2f}" if 0 < value < 1 else f"{value:.1f}"
+
+
 def summarize(lines, first, last, breakdown=False):
     host = []
     stages = []
@@ -60,7 +65,7 @@ def summarize(lines, first, last, breakdown=False):
     report = []
     if host:
         fps, ms, cpu = map(median, zip(*host))
-        report.append(f"Host timing ({len(host)} samples, medians): {fps:.1f} FPS, "
+        report.append(f"Host timing ({len(host)} samples, medians): {format_fps(fps)} FPS, "
                       f"{ms:.1f} ms/frame, {cpu:.1f} ms/frame preparing on CPU")
     if stages:
         copies, textures, gpu, back, draws, dropped = map(median, zip(*stages))
@@ -71,7 +76,7 @@ def summarize(lines, first, last, breakdown=False):
     for key, samples in framegen.items():
         real, presented = map(median, zip(*samples))
         report.append(f"Frame generation on={key} ({len(samples)} samples, medians): "
-                      f"{real:.1f} real FPS, {presented:.1f} presented FPS")
+                      f"{format_fps(real)} real FPS, {format_fps(presented)} presented FPS")
     return report
 
 
