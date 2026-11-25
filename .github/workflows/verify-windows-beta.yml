@@ -1,18 +1,28 @@
-name: Verify stable asset policy on Windows
+name: Test the eight beta contributions with main's WARP-only runner fix
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  check:
+  windows:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 460c91ca94503c1d6a5842ede9748371bb14751d
+          ref: a9e0c53c7f6c1741f8f4330013e5bed8ea1d2ef8
+          fetch-depth: 0
           persist-credentials: false
+      - name: Integrate current beta and apply the upstream WARP test fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch https://github.com/PastiiJay/klbf-lab.git 742f436b21b0df94858edd23926149a750e5ae03 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          git -c user.name=CI -c user.email=ci@localhost merge --no-edit 742f436b21b0df94858edd23926149a750e5ae03
+          test "$(git rev-parse 'HEAD^{tree}')" = 4198bb0190b6b78934c85699adcb768b0bc87929
+          git cherry-pick --no-commit 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          git diff --cached --stat
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
