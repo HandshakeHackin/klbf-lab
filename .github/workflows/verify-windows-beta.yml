@@ -1,38 +1,46 @@
-name: Verify PR 43 queue and indirect toggles on WARP
+name: Verify per-frame pipeline refusal diagnostics
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  toggles:
+  windows:
     runs-on: windows-latest
-    timeout-minutes: 30
-    env:
-      VICTORY_D3D12_WARP: "1"
-      VICTORY_REQUIRE_HW_GPU: "1"
-      VICTORY_D3D12_DEBUG: "1"
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: 4f71557e022bd4d06278bfdff18008fa33c511e6
+          ref: a17d7210af4b25b29fc4d46ba2340519f1e09841
+          fetch-depth: 0
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Exercise queue coalescing on and off
+      - name: Apply the worker assertion to the original beta
+        shell: python
         run: |
-          foreach ($toggle in @('0','1')) {
-            $env:VICTORY_JOIN_PARTS = $toggle
-            Write-Host "VICTORY_JOIN_PARTS=$toggle"
-            cargo test --locked -p victory-gpu --features diagnostics --lib hw_coalesce_ready_parts_and_negative_controls -- --test-threads=1 --nocapture
-            if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          }
-      - name: Read back the GPU output with gather on and off
+          import subprocess
+          from pathlib import Path
+          root = "crates/victory-gpu/src/pipeline/"
+          paths = [root + "host.rs", root + "make.rs", "crates/victory-gpu/src/pipeline.rs"]
+          subprocess.run(["git", "restore", "--source=e328c8899c61cda1d43c526e03dedb96219f2018", "--", *paths], check=True)
+          src = Path(paths[1])
+          text = src.read_text(encoding="utf-8")
+          old = "assert!(matches!(p.made.get(), Some(None)));"
+          assert text.count(old) == 1
+          src.write_text(text.replace(old, old + '\n        assert_eq!(missing(&p).as_deref(), Some("no vertex or mesh shader"));'), encoding="utf-8")
+      - name: Verify that beta reports the generic label
+        shell: pwsh
         run: |
-          foreach ($toggle in @('0','1')) {
-            $env:VICTORY_INDIRECT_GATHER = $toggle
-            Write-Host "VICTORY_INDIRECT_GATHER=$toggle"
-            cargo test --locked -p victory-gpu --features diagnostics --lib hw_gather_hostlist_bound_before_end_to_end -- --test-threads=1 --nocapture
-            if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          }
+          cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests::first_use_is_made_by_a_worker -- --exact *> negative.log
+          $code = $LASTEXITCODE
+          Get-Content negative.log | Select-Object -Last 24
+          git restore -- crates/victory-gpu/src/pipeline crates/victory-gpu/src/pipeline.rs
+          if ($code -eq 0 -or -not (Select-String -Path negative.log -SimpleMatch 'Some("refused []")')) { throw 'expected prior label was not observed' }
+          exit 0
+      - name: Exercise diagnostic worker and HRESULT tests
+        run: |
+          cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests::
+      - name: Exercise default worker tests
+        run: |
+          cargo test --locked -p victory-gpu --lib pipeline::make::tests::
