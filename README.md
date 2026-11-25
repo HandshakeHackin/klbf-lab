@@ -25,7 +25,9 @@ No game files are included. You need your own legally obtained copy.
 | **AMD FSR frame generation** (optional) | `VICTORY_FRAMEGEN=1` presents through AMD's frame generation swap chain (FidelityFX SDK 2.4, `amd_fidelityfx_framegeneration_dx12.dll` in `VICTORY_FFX_FG_DIR` or `VICTORY_FFX_DIR`); off by default; the interface is not interpolated | ~8.5 real fps → ~17 fps shown in the world, no loss of real fps, 12 min without a crash. Generated frames, not real ones: input latency does not improve. Should work on any DX12 card; tested on AMD only |
 | **Pre-build on a fresh cache** | the `pipelines` folder is created first, so a crashed pre-build resumes ([#6](https://github.com/PastiiJay/klbf-lab-beta/issues/6), found by clems206) | |
 
-Speed in Lab 39 runs: median 6.6–8.4 fps in the world (720p upscaled to 1080p with AMD FSR), 14 min runs without a crash. If the device is lost about a minute after the world starts loading, try `VICTORY_LATE_WAIT=0`.
+> **Stability policy:** we never publish a build that crashed in our tests. Every session length shown here is when **we** stopped, to get back to work on the project or because a test run reached its planned end, not a crash.
+
+Speed in Lab 39 runs: median 6.6–8.4 fps in the world (720p upscaled to 1080p with AMD FSR). Stability record: 77 min of play without a crash on Lab 39 (stopped by choice); it has never crashed in our test runs. If the device is lost about a minute after the world starts loading, try `VICTORY_LATE_WAIT=0`.
 
 ## What it fixes on AMD
 
