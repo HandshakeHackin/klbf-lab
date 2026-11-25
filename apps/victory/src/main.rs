@@ -83,8 +83,8 @@ enum Command {
         /// Print one line per program and outcome.
         #[arg(long)]
         list: bool,
-        /// Worker threads (default: every logical core).
-        #[arg(long)]
+        /// Worker threads (0 uses one worker).
+        #[arg(long, value_parser = parse_jobs)]
         jobs: Option<usize>,
         /// Warm the run's shader cache: a file of shader hashes (the 16
         /// hex digits a run's log names a shader by, anywhere in a line);
@@ -133,6 +133,10 @@ enum Unimplemented {
 enum Console {
     SeriesX,
     SeriesS,
+}
+
+fn parse_jobs(value: &str) -> std::result::Result<usize, std::num::ParseIntError> {
+    value.parse::<usize>().map(|jobs| jobs.max(1))
 }
 
 fn main() -> Result<()> {
@@ -245,4 +249,23 @@ pub(crate) fn default_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
         "no paths given and none configured (see victory.example.toml)"
     );
     Ok(all)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translate_normalizes_only_explicit_zero_jobs() {
+        for (args, expected) in [
+            (vec!["victory", "translate"], None),
+            (vec!["victory", "translate", "--jobs", "0"], Some(1)),
+            (vec!["victory", "translate", "--jobs", "8"], Some(8)),
+        ] {
+            let Command::Translate { jobs, .. } = Cli::try_parse_from(args).unwrap().command else {
+                unreachable!()
+            };
+            assert_eq!(jobs, expected);
+        }
+    }
 }
