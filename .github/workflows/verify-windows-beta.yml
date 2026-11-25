@@ -1,87 +1,21 @@
-name: Isolate the surviving Lab 51 indirect and descriptor tests
+name: Verify stable asset policy on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  descriptors:
+  check:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: HandshakeHackin/klbf-lab
-          ref: 8aea65cc7325507b2bceafca58bd21f6253cb4bc
+          ref: 460c91ca94503c1d6a5842ede9748371bb14751d
           persist-credentials: false
-      - name: Isolate the test target from three unrelated descriptor test bodies in this CI checkout
-        run: |
-          @'
-          from pathlib import Path
-          root = Path("crates/victory-gpu/src")
-          for file, names in {
-              "descriptor/host.rs": ["a_texture_of_which_the_smaller_mips_are_there_ends_behind_them", "spans_say_whose_memory_a_view_is", "a_texture_sweep_finds_views_nothing_brings_up_to_date"],
-
-          }.items():
-              p = root / file
-              text = p.read_text(encoding="utf-8")
-              for name in names:
-                  symbol = "    #[test]\n    fn " + name + "("
-                  assert text.count(symbol) == 1, name
-                  text = text.replace(symbol, "    #[cfg(any())]\n" + symbol)
-              p.write_text(text, encoding="utf-8")
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Run the overlap and depth-only pipeline checks on WARP
-        env:
-          VICTORY_D3D12_WARP: '1'
-        run: |
-          @'
-          from pathlib import Path
-          import subprocess
-          p = Path("crates/victory-gpu/src/pipeline/host.rs")
-          s = p.read_text(encoding="utf-8")
-          start = s.index("    fn a_pipeline_with_depth_bounds_is_made()")
-          end = s.index("\n    }", start)
-          original = s[start:end]
-          assert original.count("return;") == 1
-          p.write_text(s[:start] + original.replace("return;", 'panic!("WARP depth support required");') + s[end:], encoding="utf-8")
-          for name in ["a_newer_view_of_other_memory_makes_the_older_stale", "a_pipeline_with_depth_bounds_is_made"]:
-              run = subprocess.run(["cargo","test","--locked","-p","victory-gpu","--features","diagnostics","--lib",name,"--","--test-threads=1"],capture_output=True,text=True)
-              print(run.stdout, run.stderr[-1800:],flush=True)
-              assert run.returncode == 0 and "1 passed; 0 failed" in run.stdout, name
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Run the retained indirect-dispatch tests
-        env:
-          VICTORY_D3D12_WARP: '1'
-        run: |
-          cargo test --locked -p victory-gpu --features diagnostics --lib indirect::tests:: -- --test-threads=1
-      - name: Require a real WARP device and live heaps in each descriptor test
-        env:
-          VICTORY_D3D12_WARP: '1'
-        run: |
-          @'
-          from pathlib import Path
-          import re
-          p = Path("crates/victory-gpu/src/descriptor/host.rs")
-          s = p.read_text(encoding="utf-8")
-          names = re.findall(r"    fn (concurrent_\w+|mirror_release_acquire_later_and_forget_semantics)\(", s)
-          assert len(names) == 5, names
-          for name in names:
-              start = s.index("    fn " + name + "(")
-              end = s.index("\n    }", start)
-              case = s[start:end]
-              case, found = re.subn(r"(let Some\((?:host_gpu|heap)\) = (?:host\(\)|HostHeap::new\([^\n]+?\)) else \{\s*)return;", r'\1panic!("WARP fixture unavailable");', case)
-              assert found == 2, (name, found)
-              s = s[:start] + case + s[end:]
-          p.write_text(s, encoding="utf-8")
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($filter in @('descriptor::host::tests::concurrent_','mirror_release_acquire_later_and_forget_semantics')) {
-            $output = cargo test --locked -p victory-gpu --features diagnostics --lib $filter -- --test-threads=1 2>&1 | Out-String
-            $code = $LASTEXITCODE
-            Write-Host $output
-            $count = if ($filter.StartsWith('descriptor')) { 4 } else { 1 }
-            if ($code -ne 0 -or $output -notmatch "test result: ok. $count passed; 0 failed") { throw "Incomplete $filter run" }
-          }
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo xtask policy
+      - run: cargo test --workspace --locked
