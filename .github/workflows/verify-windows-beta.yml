@@ -1,163 +1,107 @@
-name: Verify eight pending beta contributions together
+name: Check the published Win10 test branch and Agility runtime
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  release-and-cli:
-    runs-on: windows-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: c9c5ed36d264c83dbb4e634caf42a131507d5293
-          persist-credentials: false
-      - run: cargo build --release --locked -p victory
-      - run: python tests/check_cold_cache.py target/release/victory.exe
-      - name: Verify the Windows release warm-up deadline
-        shell: pwsh
-        run: |
-          $root = Join-Path $env:RUNNER_TEMP 'warm-inputs'
-          New-Item -ItemType Directory -Path $root | Out-Null
-          $env:VICTORY_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'warm-cache'
-          $env:VICTORY_WARM_SECONDS = '0'
-          $lines = & .\target\release\victory.exe translate --warm all $root
-          $lines
-          if ($LASTEXITCODE -ne 0 -or ($lines -join ' ') -notmatch 'stopped at the time limit') {
-            throw 'Zero-second shader warm-up must stop at the time limit.'
-          }
-  windows-workspace:
-    runs-on: windows-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: c9c5ed36d264c83dbb4e634caf42a131507d5293
-          persist-credentials: false
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo xtask policy
-      - name: Run the workspace on the software-only Windows runner
-        run: cargo test --locked --workspace --no-fail-fast -- --skip glc_heap_uav_loads_stores_and_atomics_execute_on_gpu
-
-  gpu-tests:
-    runs-on: windows-latest
+  agility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: a375d01159cd71eb5d128c8838a1f0f6778d6f75
-          persist-credentials: false
-      - name: Run all default GPU library tests at the patch head
-        run: cargo test --locked -p victory-gpu --lib
-      - name: Confirm both pixel reads on forced WARP
-        env:
-          VICTORY_D3D12_WARP: '1'
-        shell: pwsh
-        run: |
-          @'
-          from pathlib import Path
-          p = Path("crates/victory-gpu/src/pipeline/host.rs")
-          s = p.read_text(encoding="utf-8")
-          marker = 'assert_eq!(run_draw(0.6, 1.0), 0,'
-          assert s.count(marker) == 1
-          s = s.replace(marker, 'let outside = run_draw(0.6, 1.0); eprintln!("WARP outside={outside}"); assert_eq!(outside, 0,')
-          marker = 'assert_eq!(run_draw(0.4, 0.6), 255,'
-          assert s.count(marker) == 1
-          s = s.replace(marker, 'let inside = run_draw(0.4, 0.6); eprintln!("WARP inside={inside}"); assert_eq!(inside, 255,')
-          p.write_text(s, encoding="utf-8")
-          '@ | python -
-          if ($LASTEXITCODE -ne 0) { throw 'Could not add the test-only pixel printouts' }
-          cargo test --locked -p victory-gpu --lib --features diagnostics depth_bounds_pipeline_loads_and_filters_draws -- --nocapture 2>&1 | Tee-Object -Variable result
-          $code = $LASTEXITCODE
-          $log = $result | Out-String
-          if ($code -ne 0 -or $log -notmatch 'WARP outside=0' -or $log -notmatch 'WARP inside=255') {
-            throw 'Expected both measured WARP pixels; an early return does not verify the fix.'
-          }
-
-  staging-review:
-    runs-on: windows-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v5
-        with:
           repository: PastiiJay/klbf-lab
-          ref: fc0480b4de199809cd2dcc0922f243fbffc7dbb8
+          ref: 338f7c527b5522f0bf0fa1cc1cb2047b43fef181
           persist-credentials: false
-      - name: Compare a settled texture with one awaiting tiles on WARP
-        env:
-          VICTORY_D3D12_WARP: '1'
+      - name: Build the unmodified Windows test candidate
+        run: cargo build --release --locked -p victory
+      - name: Inspect both exported constants in the release executable
         shell: pwsh
         run: |
           @'
-          #[cfg(all(test, feature = "diagnostics"))]
-          mod staging_residency_review {
-              use super::*;
-              use std::sync::atomic::Ordering::Relaxed;
-              use victory_formats::texture::{Desc, Dimension, Layout, Swizzle};
+          import struct
+          import sys
+          from pathlib import Path
           
-              fn sample(host: &crate::host::Host, changed: u64, waiting: u64) -> Arc<Staging> {
-                  let bytes = 256;
-                  let (buffer, data) = host.upload_buffer(bytes).expect("WARP upload buffer");
-                  let layout = Layout::new(&Desc {
-                      dimension: Dimension::Tex2d, width: 1, height: 1, depth: 1,
-                      mips: 1, element_bytes: 4, block: 1, samples: 1, swizzle: Swizzle::LINEAR,
-                  }).unwrap();
-                  STAGED[0].fetch_add(1, Relaxed);
-                  STAGED[1].fetch_add(bytes, Relaxed);
-                  Arc::new(Staging {
-                      mem: Mutex::new(Some((buffer, data as usize))), size: bytes, changed: changed.into(),
-                      footprints: vec![], rows: vec![], layout, mips: 1, bytes,
-                      memory: std::ptr::null(), last: Mutex::default(), dirty: false.into(),
-                      uploaded: true.into(), used: crate::host::moment().into(), on_demand: true,
-                      detiled: 1.into(), judged: Default::default(), waiting: waiting.into(),
-                  })
-              }
+          exe = Path(sys.argv[1]).read_bytes()
+          u16 = lambda off: struct.unpack_from('<H', exe, off)[0]
+          u32 = lambda off: struct.unpack_from('<I', exe, off)[0]
+          u64 = lambda off: struct.unpack_from('<Q', exe, off)[0]
+          pe = u32(0x3c)
+          assert exe[pe:pe + 4] == b'PE\0\0' and u16(pe + 4) == 0x8664
+          opt = pe + 24
+          assert u16(opt) == 0x20b
+          image_base = u64(opt + 24)
+          first_section = opt + u16(pe + 20)
+          sections = [first_section + i * 40 for i in range(u16(pe + 6))]
           
-              #[test]
-              fn compare_pending_and_settled_mip_residency_after_sweep() {
-                  let host = host().expect("WARP host must exist");
-                  let changed = crate::host::moment();
-                  for _ in 0..32 {
-                      crate::frame::wait(std::ptr::null(), 0, 0, std::ptr::null(), 2, std::ptr::null_mut());
-                  }
-                  std::thread::sleep(std::time::Duration::from_millis(2150));
-                  assert!(crate::host::long_ago(changed, UNCHANGED_MS, UNCHANGED_FRAMES));
-                  let settled = sample(host, changed, 0);
-                  let waiting = sample(host, changed, changed.max(1));
-                  let (old_settled, old_waiting) = {
-                      let mut table = STAGING.lock().unwrap();
-                      let map = table.get_or_insert_with(HashMap::new);
-                      (map.insert(1, settled), map.insert(2, waiting))
-                  };
-                  assert!(old_settled.is_none() && old_waiting.is_none());
-                  let before = memory();
-                  let_go_idle();
-                  let after = memory();
-                  let (settled, waiting) = {
-                      let mut table = STAGING.lock().unwrap();
-                      let map = table.as_mut().unwrap();
-                      (map.remove(&1).unwrap(), map.remove(&2).unwrap())
-                  };
-                  let resident = |s: &Staging| s.mem.lock().unwrap().is_some();
-                  let expected = std::env::var("EXPECT_PENDING").unwrap() == "resident";
-                  eprintln!("RESIDENCY settled={} waiting={} reported_before={} reported_after={}",
-                            resident(&settled), resident(&waiting), before[1], after[1]);
-                  assert!(!resident(&settled));
-                  assert_eq!(resident(&waiting), expected);
+          def locate(rva):
+              for s in sections:
+                  virtual = u32(s + 12)
+                  if virtual <= rva < virtual + u32(s + 16):
+                      return u32(s + 20) + rva - virtual
+              raise ValueError(f'RVA {rva:x} is outside the image sections')
+          
+          def string_at(rva):
+              start = locate(rva)
+              return exe[start:exe.index(0, start)].decode('ascii')
+          
+          exports = locate(u32(opt + 112))
+          addresses = locate(u32(exports + 28))
+          names = locate(u32(exports + 32))
+          ordinals = locate(u32(exports + 36))
+          locations = {}
+          for i in range(u32(exports + 24)):
+              name = string_at(u32(names + i * 4))
+              rva = u32(addresses + u16(ordinals + i * 2) * 4)
+              locations[name] = rva
+          version = u32(locate(locations['D3D12SDKVersion']))
+          path = string_at(u64(locate(locations['D3D12SDKPath'])) - image_base)
+          print(f'Win64 victory.exe exports SDK version {version} and path {path!r}', flush=True)
+          assert version == 614 and path == '.\\D3D12\\'
+          '@ | python - target/release/victory.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage Microsoft's package as in issue 11
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1 -OutFile d3d12.zip
+          Expand-Archive d3d12.zip d3d12pkg -Force
+          New-Item -ItemType Directory -Force target/release/D3D12 | Out-Null
+          Copy-Item d3d12pkg/build/native/bin/x64/D3D12Core.dll target/release/D3D12/
+          $dll = Get-Item target/release/D3D12/D3D12Core.dll
+          $dll.VersionInfo | Format-List FileVersion,ProductVersion
+          Get-FileHash $dll.FullName
+          Get-AuthenticodeSignature $dll.FullName | Select-Object Status, @{ Name='Signer'; Expression={$_.SignerCertificate.Subject} } | Format-List
+      - name: Observe the real CLI creating a WARP device and record the loaded runtime
+        shell: pwsh
+        env:
+          VICTORY_WARP: '1'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'agility-empty-shader-inputs'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $bytes = [byte[]]::new(4096)
+          for ($i=0; $i -lt 1600; $i++) { [IO.File]::WriteAllBytes((Join-Path $root "$i.bin"), $bytes) }
+          $info = [Diagnostics.ProcessStartInfo]::new((Resolve-Path target/release/victory.exe))
+          foreach ($arg in @('translate','--pipelines','--jobs','1',$root)) { $info.ArgumentList.Add($arg) }
+          $info.UseShellExecute = $false
+          $p = [Diagnostics.Process]::Start($info)
+          $seen = @{}
+          while (!$p.HasExited) {
+            try {
+              $p.Refresh()
+              foreach ($m in $p.Modules) {
+                if ($m.ModuleName -ieq 'D3D12Core.dll') { $seen[$m.FileName] = $m.FileVersionInfo.FileVersion }
               }
+            } catch [System.InvalidOperationException] { break } catch [System.ComponentModel.Win32Exception] {}
+            Start-Sleep -Milliseconds 5
           }
-          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/texture.rs
-          $env:EXPECT_PENDING = 'released'
-          cargo test --locked -p victory-gpu --features diagnostics --lib compare_pending_and_settled_mip_residency_after_sweep -- --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $path = 'crates/victory-gpu/src/texture.rs'
-          $source = [IO.File]::ReadAllText((Resolve-Path $path))
-          $marker = '&& s.uploaded.load(Relaxed)'
-          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'Expected exactly one eviction condition' }
-          $source = $source.Replace($marker, '&& s.waiting.load(Relaxed) == 0 && s.uploaded.load(Relaxed)')
-          [IO.File]::WriteAllText((Resolve-Path $path), $source)
-          $env:EXPECT_PENDING = 'resident'
-          cargo test --locked -p victory-gpu --features diagnostics --lib compare_pending_and_settled_mip_residency_after_sweep -- --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $p.WaitForExit()
+          Write-Host "Host OS $([Environment]::OSVersion.Version) / victory exit $($p.ExitCode)"
+          foreach ($path in $seen.Keys) { Write-Host "Loaded D3D12Core: $path ($($seen[$path]))" }
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          if (!$seen.Count) { throw 'Process ended before a module path was observed' }
