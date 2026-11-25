@@ -1,4 +1,4 @@
-name: Test the eight beta contributions with main's WARP-only runner fix
+name: Verify PR 41 with the queued beta changes on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
@@ -14,15 +14,14 @@ jobs:
           ref: a9e0c53c7f6c1741f8f4330013e5bed8ea1d2ef8
           fetch-depth: 0
           persist-credentials: false
-      - name: Integrate current beta and apply the upstream WARP test fix
+      - name: Combine the exact PR and queued fixes
         shell: bash
         run: |
           set -euo pipefail
-          git fetch https://github.com/PastiiJay/klbf-lab.git 742f436b21b0df94858edd23926149a750e5ae03 448b737fa8f4e669c3a9cede26c08a04d4cacd96
-          git -c user.name=CI -c user.email=ci@localhost merge --no-edit 742f436b21b0df94858edd23926149a750e5ae03
-          test "$(git rev-parse 'HEAD^{tree}')" = 4198bb0190b6b78934c85699adcb768b0bc87929
+          git fetch https://github.com/PastiiJay/klbf-lab.git refs/pull/41/head 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          git -c user.name=CI -c user.email=ci@localhost merge --no-edit ba88ab0607c7cc1b7fa83b3c6f3a4a9beb1093be
+          test "$(git rev-parse 'HEAD^{tree}')" = 516e533e3d23bc7c06bdd2874669a91819ba40dd
           git cherry-pick --no-commit 448b737fa8f4e669c3a9cede26c08a04d4cacd96
-          git diff --cached --stat
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
