@@ -30,7 +30,7 @@ pub(crate) struct Pending {
     queue_state: AtomicU8,
     made: OnceLock<Option<HostPipeline>>,
     #[cfg(feature = "diagnostics")]
-    refusal: OnceLock<&'static str>,
+    refusal: OnceLock<(&'static str, Option<i32>)>,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw or dispatch has requested it yet.
     pub(crate) key: String,
@@ -79,9 +79,9 @@ impl Pending {
     fn make(&self) {
         let _ = self.begun.set(Instant::now());
         self.made.get_or_init(|| {
-            HostPipeline::new(&self.shaders, self.graphics.as_deref(), |_reason| {
+            HostPipeline::new(&self.shaders, self.graphics.as_deref(), |_reason, _code| {
                 #[cfg(feature = "diagnostics")]
-                let _ = self.refusal.set(_reason);
+                let _ = self.refusal.set((_reason, _code));
             })
         });
         let (lock, done) = &DONE;
@@ -98,8 +98,11 @@ pub(crate) fn missing(p: &Pending) -> Option<String> {
         Some(Some(_)) => None,
         None => Some("being made".into()),
         Some(None) => {
-            if let Some(reason) = p.refusal.get() {
-                return Some((*reason).to_owned());
+            if let Some(&(reason, code)) = p.refusal.get() {
+                return Some(match code {
+                    Some(code) => format!("{reason} ({code:#010x}) {:?}", p.shaders),
+                    None => reason.to_owned(),
+                });
             }
             let failed: Vec<String> = p
                 .shaders
@@ -433,6 +436,18 @@ mod tests {
         assert!(matches!(p.made.get(), Some(None)));
         #[cfg(feature = "diagnostics")]
         assert_eq!(missing(&p).as_deref(), Some("no vertex or mesh shader"));
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn driver_refusal_keeps_hresult_and_shader_identity() {
+        let shader = super::super::shader("compute", &[1, 2, 3, 4]);
+        let expected = format!("compute pipeline refused (0x80070057) [compute {}]", shader.hash);
+        let pending = Pending::new(vec![shader], None);
+        pending.refusal.set(("compute pipeline refused", Some(0x80070057u32 as i32))).unwrap();
+        assert_eq!(missing(&pending).as_deref(), Some("being made"));
+        assert!(pending.made.set(None).is_ok());
+        assert_eq!(missing(&pending).as_deref(), Some(expected.as_str()));
     }
 
     #[test]

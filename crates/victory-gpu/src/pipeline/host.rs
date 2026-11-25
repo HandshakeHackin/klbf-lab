@@ -330,11 +330,11 @@ impl HostPipeline {
     pub(crate) fn new(
         shaders: &[Arc<Shader>],
         g: Option<&GraphicsState>,
-        record_refusal: impl Fn(&'static str),
+        record_refusal: impl Fn(&'static str, Option<i32>),
     ) -> Option<HostPipeline> {
         let refuse = |reason: &'static str| {
             // Record every affected pipeline, including those after the first warning.
-            record_refusal(reason);
+            record_refusal(reason, None);
             static SEEN: std::sync::Mutex<Vec<&str>> = std::sync::Mutex::new(Vec::new());
             let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
             if !seen.contains(&reason) {
@@ -506,6 +506,7 @@ impl HostPipeline {
         let (root, root_blob) = match root_signature(&host.device, &params, &samplers, compute.is_some()) {
             Ok(root) => root,
             Err(e) => {
+                record_refusal("root signature refused", Some(e.code().0));
                 tracing::warn!(error = %e, ?shaders, "host root signature refused");
                 return None;
             }
@@ -537,6 +538,7 @@ impl HostPipeline {
             let pso = match made {
                 Ok(pso) => pso,
                 Err(e) => {
+                    record_refusal("compute pipeline refused", Some(e.code().0));
                     tracing::warn!(error = %e, ?shaders, "host pipeline refused");
                     host.log_messages();
                     return None;
@@ -590,6 +592,7 @@ impl HostPipeline {
             let pso = match mesh_pipeline(&host.device, &root, code(0), code(1), g, depth_bounds, &name) {
                 Ok(pso) => pso,
                 Err(e) => {
+                    record_refusal("mesh pipeline refused", Some(e.code().0));
                     tracing::warn!(error = %e, ?shaders, "host mesh pipeline refused");
                     host.log_messages();
                     return None;
@@ -696,6 +699,7 @@ impl HostPipeline {
         let pso = match made {
             Ok(pso) => pso,
             Err(e) => {
+                record_refusal("graphics pipeline refused", Some(e.code().0));
                 tracing::warn!(error = %e, ?shaders, "host pipeline refused");
                 host.log_messages();
                 return None;
