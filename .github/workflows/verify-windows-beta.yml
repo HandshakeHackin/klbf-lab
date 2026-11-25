@@ -1,39 +1,19 @@
-name: Compare the beta depth-bounds test on software D3D12
+name: Verify both strict Clippy checks on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  depth-bounds:
+  clippy:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: c71c7d6bc627758ad858a736233cc2a4b14bd717
+          ref: 6190ae2353cdc9ccd62b952a4b86ec9d9aa27f44
           persist-credentials: false
-      - name: Run the unchanged beta graphics test
-        shell: pwsh
-        run: |
-          cargo test --locked -p victory-gpu --lib depth_bounds_pipeline_loads_and_filters_draws -- --nocapture 2>&1 | Tee-Object -Variable result
-          $code = $LASTEXITCODE
-          if ($code -ne 101 -or ($result | Out-String) -notmatch 'depth 0.5 outside \[0.6, 1.0\] must be rejected') {
-            throw 'The baseline returned a different result from the integrated build.'
-          }
-          exit 0
-      - name: Enable depth reads with an always-pass comparison in the test fixture
-        shell: pwsh
-        run: |
-          @'
-          from pathlib import Path
-          path = Path("crates/victory-gpu/src/pipeline/host.rs")
-          src = path.read_text(encoding="utf-8")
-          before, sep, test = src.partition("fn depth_bounds_pipeline_loads_and_filters_draws()")
-          assert sep and test.count("DepthEnable: false.into(),") == 1
-          test = test.replace("DepthEnable: false.into(),", "DepthEnable: true.into(),", 1)
-          path.write_text(before + sep + test, encoding="utf-8")
-          '@ | python -
-      - name: Run the same draw and pixel assertions
-        run: cargo test --locked -p victory-gpu --lib depth_bounds_pipeline_loads_and_filters_draws -- --nocapture
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --locked -p victory-game
+      - run: cargo test --locked -p victory-hle --lib page_lists_are_read_at_the_titles_submit
