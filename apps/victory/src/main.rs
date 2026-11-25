@@ -96,7 +96,7 @@ enum Command {
         /// With --pipelines: fill the shader cache and host pipeline
         /// library `run` reads with every pipeline of the title's shader
         /// pack (resumable; honours VICTORY_SKIP_PIPELINES).
-        #[arg(long, requires = "pipelines", conflicts_with_all = ["validate", "list"])]
+        #[arg(long, requires = "pipelines", conflicts_with_all = ["validate", "list", "warm"])]
         cache: bool,
     },
     /// Prepare, map and bind a title executable; with --execute, run it.
@@ -254,6 +254,15 @@ pub(crate) fn default_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translate_warm_and_cache_are_separate_modes() {
+        let args = ["victory", "translate"];
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--warm", "all"])).is_ok());
+        assert!(Cli::try_parse_from(args.into_iter().chain(["--cache", "--pipelines"])).is_ok());
+        let result = Cli::try_parse_from(args.into_iter().chain(["--warm", "all", "--cache", "--pipelines"]));
+        assert_eq!(result.err().unwrap().kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 
     #[test]
     fn translate_normalizes_only_explicit_zero_jobs() {
