@@ -15,7 +15,7 @@ jobs:
           persist-credentials: false
       - run: cargo xtask policy
       - run: cargo test --locked -p xtask
-      - run: cargo test --locked -p victory-shader --lib emit::lower::tests::
+      - run: cargo test --locked -p victory-shader --lib 'emit::lower::tests::'
   unchanged-beta-control:
     runs-on: windows-latest
     timeout-minutes: 30
