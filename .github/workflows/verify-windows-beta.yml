@@ -1,40 +1,47 @@
-name: Verify selected adapter logging on Windows
+name: Verify asset policy and CLI regression on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  verify-adapter:
+  asset-policy:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 88ea55a93d5616f6adbd14424c00e92fc5c4ecfd
+          ref: 4ad2343c9b530bb1bb9081943cf2933ce1a882cf
           persist-credentials: false
-      - name: Exercise D3D12 startup with the Windows software adapter
+      - run: cargo xtask policy
+      - run: cargo test --locked -p victory-shader -p xtask
+  historical-cold-cache:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: d0ed1acded0e26b87fa3cdfa24c7114d886a7918
+          path: before
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: c71c7d6bc627758ad858a736233cc2a4b14bd717
+          path: after
+          persist-credentials: false
+      - name: Build the historical Windows CLI
+        working-directory: before
+        run: cargo build --locked -p victory
+      - name: Verify the regression test catches the original defect
         shell: pwsh
-        env:
-          VICTORY_D3D12_WARP: '1'
         run: |
-          @'
-
-          [dev-dependencies.tracing-subscriber]
-          workspace = true
-          '@ | Add-Content crates/victory-gpu/Cargo.toml
-          @'
-
-          #[cfg(test)]
-          #[test]
-          fn ci_warp_startup() {
-              tracing_subscriber::fmt().with_ansi(false).init();
-              assert!(create().is_ok(), "WARP failed to initialize");
+          $env:VICTORY_CONFIG = $null
+          $log = & python after/tests/check_cold_cache.py before/target/debug/victory.exe 2>&1
+          $code = $LASTEXITCODE
+          $log
+          if ($code -ne 1 -or ($log -join ' ') -notmatch 'FAIL: pre-build returned without creating cache/pipelines') {
+            throw 'Expected the original CLI to fail specifically on the absent cache directory.'
           }
-          '@ | Add-Content crates/victory-gpu/src/host.rs
-          cargo test -p victory-gpu --lib --features diagnostics ci_warp_startup -- --nocapture 2>&1 | Tee-Object -Variable result
-          if ($LASTEXITCODE -ne 0) { throw 'The WARP startup test failed' }
-          $log = ($result | Out-String)
-          if ($log -notmatch 'host D3D12 device ready[^\r\n]*adapter="[^"]+"') {
-            throw 'The selected adapter was missing from the startup log'
-          }
+          exit 0
