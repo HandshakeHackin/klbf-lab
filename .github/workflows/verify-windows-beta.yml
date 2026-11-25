@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 22c89ddd5c9a34879b287867e3f9f7701aa59f47
+          ref: fe944643fc1eed02238c0c5eab6bba7903d9b84d
           fetch-depth: 0
           persist-credentials: false
       - run: rustup toolchain install
@@ -39,6 +39,8 @@ jobs:
           if ($code -eq 0 -or -not (Select-String -Path negative.log -SimpleMatch 'Some("refused []")')) { throw 'expected prior label was not observed' }
           exit 0
       - name: Exercise diagnostic worker and HRESULT tests
-        run: cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests::
+        run: |
+          cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests::
       - name: Exercise default worker tests
-        run: cargo test --locked -p victory-gpu --lib pipeline::make::tests::
+        run: |
+          cargo test --locked -p victory-gpu --lib pipeline::make::tests::
