@@ -1,80 +1,47 @@
-name: Validate Wave32 DXIL alone and with the queued optimizer
+name: Verify adapter-specific pipeline cache files
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  parity:
+  cache:
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: 0948a4fd56d97548e0b746ae3c9b4bcbb881032e
-          fetch-depth: 0
+          ref: 7d31a81ed4f35930b9a205ae620ea2942563ccec
           persist-credentials: false
-      - name: Check reviewed revision
-        run: |
-          if ((git rev-parse HEAD) -ne '0948a4fd56d97548e0b746ae3c9b4bcbb881032e') { throw 'Pull request revision changed' }
       - run: rustup toolchain install
-      - name: Require the SDK validator in the test harness
-        shell: python
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify names and migration of the legacy cache
         run: |
-          from pathlib import Path
-          p = Path("crates/victory-shader/src/emit/wave64_tests.rs")
-          data = p.read_text(encoding="utf-8")
-          optional = "if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {"
-          strict = '{ let mut v = validator::Validator::load(validator::Validator::default_path().as_deref()).expect("Windows SDK DXIL validator required");'
-          start = data.index('fn run_wave32_lds_on_hardware(')
-          before, target = data[:start], data[start:]
-          assert target.count(optional) == 1
-          target = target.replace(optional, strict)
-          check = 'v.validate(&mut copy).expect("DXIL validation failed");'
-          assert target.count(check) == 1
-          target = target.replace(check, check + '\n        eprintln!("validated DXIL for {label}");')
-          p.write_text(before + target, encoding="utf-8")
-      - name: Validate standalone DXIL and identify software-adapter limits
-        env:
-          VICTORY_WARP: "1"
-          VICTORY_REQUIRE_HW_GPU: "1"
-          VICTORY_D3D12_DEBUG: "1"
+          cargo test --locked -p victory-gpu --lib adapter_keys_produce_distinct_filenames_for_hardware_and_software
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked -p victory-gpu --lib legacy_fallback_reads_hardware_cache_and_never_touches_it_on_warp
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Run the WARP child and verify cache isolation on disk
         run: |
-          cargo test --locked -p victory-shader --lib lds -- --nocapture --test-threads=1 *> wave-check.log
+          $env:VICTORY_TEST_LIB_WARP_DIR = Join-Path $env:RUNNER_TEMP new-cache
+          $env:VICTORY_TEST_LIB_WARP_LEGACY_DIR = Join-Path $env:RUNNER_TEMP old-cache
+          New-Item $env:VICTORY_TEST_LIB_WARP_DIR,$env:VICTORY_TEST_LIB_WARP_LEGACY_DIR -ItemType Directory | Out-Null
+          $legacy = Join-Path $env:VICTORY_TEST_LIB_WARP_LEGACY_DIR 'host-pipelines.bin'
+          $hardware = Join-Path $env:VICTORY_TEST_LIB_WARP_DIR 'host-pipelines-10de-2783-ra1-hw.bin'
+          Set-Content -NoNewline $legacy 'synthetic legacy fixture'
+          Set-Content -NoNewline $hardware 'synthetic hardware fixture'
+          $before = (Get-FileHash $legacy).Hash,(Get-FileHash $hardware).Hash
+          cargo test --locked -p victory-gpu --lib pipeline::library::tests::warp_save_does_not_discard_hardware_pipeline_library -- --exact --nocapture --test-threads=1 *> cache-test.log
           $code = $LASTEXITCODE
-          Get-Content wave-check.log | Select-String -Pattern 'validated DXIL for |maximum wave lane count|test result:|test emit::lds'
-          $log = Get-Content -Raw wave-check.log
-          foreach ($label in @('lds_disjoint_ranges','lds_dual_and_b128_disjoint','lds_lane_private_rtn_atomic')) {
-            if (-not $log.Contains("validated DXIL for $label")) { throw "Missing SDK validation for $label" }
+          Get-Content cache-test.log | Select-Object -Last 24
+          if ($code) { exit $code }
+          $result = [regex]::Match((Get-Content -Raw cache-test.log),'WARP_FILE=(host-pipelines-[A-Za-z0-9-]+-sw\.bin)')
+          if (-not $result.Success) { throw 'WARP cache save/reopen did not execute' }
+          foreach ($dir in @($env:VICTORY_TEST_LIB_WARP_DIR,$env:VICTORY_TEST_LIB_WARP_LEGACY_DIR)) {
+            $f = Get-Item (Join-Path $dir $result.Groups[1].Value)
+            if ($f.Length -le 0) { throw 'Expected nonempty software pipeline cache' }
+            Write-Host "$($f.Name) saved, $($f.Length) bytes"
           }
-          if ($code -eq 0 -and $log -match 'test result: ok\. 19 passed') { exit 0 }
-          $unsupported = [regex]::Matches($log, 'Shader wants wave lane count of 32 but maximum wave lane count for device is 4').Count
-          if ($unsupported -ne 3 -or $log -notmatch '16 passed; 3 failed; 0 ignored') { throw 'Unexpected execution result' }
-          Write-Host 'All three DXIL fixtures passed SDK validation. This adapter cannot execute Wave32.'
-          exit 0
-      - name: Add the exact shader optimization PR
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch https://github.com/PastiiJay/klbf-lab.git refs/pull/41/head
-          git -c user.name=CI -c user.email=ci@localhost merge --no-edit ba88ab0607c7cc1b7fa83b3c6f3a4a9beb1093be
-          test "$(git rev-parse 'HEAD^{tree}')" = 4e0694074c06b63a1f25c06e46efa45b5b5efd9f
-      - name: Validate DXIL with the shader optimizer
-        env:
-          VICTORY_WARP: "1"
-          VICTORY_REQUIRE_HW_GPU: "1"
-          VICTORY_D3D12_DEBUG: "1"
-        run: |
-          cargo test --locked -p victory-shader --lib lds -- --nocapture --test-threads=1 *> wave-check.log
-          $code = $LASTEXITCODE
-          Get-Content wave-check.log | Select-String -Pattern 'validated DXIL for |maximum wave lane count|test result:|test emit::lds'
-          $log = Get-Content -Raw wave-check.log
-          foreach ($label in @('lds_disjoint_ranges','lds_dual_and_b128_disjoint','lds_lane_private_rtn_atomic')) {
-            if (-not $log.Contains("validated DXIL for $label")) { throw "Missing SDK validation for $label" }
-          }
-          if ($code -eq 0 -and $log -match 'test result: ok\. 19 passed') { exit 0 }
-          $unsupported = [regex]::Matches($log, 'Shader wants wave lane count of 32 but maximum wave lane count for device is 4').Count
-          if ($unsupported -ne 3 -or $log -notmatch '16 passed; 3 failed; 0 ignored') { throw 'Unexpected execution result' }
-          Write-Host 'All three DXIL fixtures passed SDK validation. This adapter cannot execute Wave32.'
-          exit 0
+          if ($before[0] -ne (Get-FileHash $legacy).Hash -or $before[1] -ne (Get-FileHash $hardware).Hash) { throw 'Fixture was modified' }
+          Write-Host 'Both synthetic hardware and legacy cache hashes were preserved.'
