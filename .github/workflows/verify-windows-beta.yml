@@ -1,78 +1,49 @@
-name: Compare directly-indexed root signature support in the candidate
+name: Validate the merged descriptor changes on the Lab 51 candidate
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  root-signature:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-2022, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+  descriptors:
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: 338f7c527b5522f0bf0fa1cc1cb2047b43fef181
+          ref: d006c10fe0159727c1fbd76455ce6ad9ecf4293b
           persist-credentials: false
-      - name: Instrument the existing root-signature path before the shader-model gate
-        shell: pwsh
+      - name: Build the unchanged release and run all GPU library tests serially
+        run: |
+          cargo build --locked --release -p victory
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p victory-gpu --lib -- --test-threads=1
+      - name: Require a real WARP device and live heaps in each descriptor test
+        env:
+          VICTORY_D3D12_WARP: '1'
         run: |
           @'
           from pathlib import Path
-          p = Path("crates/victory-shader/src/emit/host.rs")
+          import re
+          p = Path("crates/victory-gpu/src/descriptor/host.rs")
           s = p.read_text(encoding="utf-8")
-          anchor = 'let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL {'
-          assert s.count(anchor) == 1
-          s = s.replace(anchor, '''let probe = Self { device: device.clone() };
-                      eprintln!("PROBE starting flags=0xc01");
-                      match probe.root_signature_for(&[]) {
-                          Ok(_) => eprintln!("PROBE created root signature"),
-                          Err(error) => eprintln!("PROBE root signature error: {error}"),
-                      }
-                      ''' + anchor)
-          anchor = 'let blob: ID3DBlob = blob.ok_or("no root signature blob")?;'
-          assert s.count(anchor) == 1
-          s = s.replace(anchor, anchor + '\n            eprintln!("PROBE serialized flags=0xc01");')
-          anchor = 'if sm.HighestShaderModel.0 < D3D_SHADER_MODEL_6_6.0 {'
-          assert s.count(anchor) == 1
-          s = s.replace(anchor, 'eprintln!("PROBE shader model {:#x}", sm.HighestShaderModel.0);\n            ' + anchor)
+          names = re.findall(r"    fn (concurrent_\w+|mirror_release_acquire_later_and_forget_semantics)\(", s)
+          assert len(names) == 5, names
+          for name in names:
+              start = s.index("    fn " + name + "(")
+              end = s.index("\n    }", start)
+              case = s[start:end]
+              case, found = re.subn(r"(let Some\((?:host_gpu|heap)\) = (?:host\(\)|HostHeap::new\([^\n]+?\)) else \{\s*)return;", r'\1panic!("WARP fixture unavailable");', case)
+              assert found == 2, (name, found)
+              s = s[:start] + case + s[end:]
           p.write_text(s, encoding="utf-8")
           '@ | python -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Compare the packaged runtime with the inbox control using the same probe
-        env:
-          VICTORY_WARP: '1'
-        shell: pwsh
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $false
-          $root = Join-Path $env:RUNNER_TEMP 'empty-scan'
-          New-Item -ItemType Directory -Path $root | Out-Null
-          Invoke-WebRequest https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1 -OutFile d3d12.zip
-          Expand-Archive d3d12.zip d3d12pkg -Force
-          foreach ($mode in @('packaged','inbox')) {
-            if ($mode -eq 'inbox') {
-              [IO.File]::WriteAllText((Resolve-Path apps/victory/build.rs), 'fn main() {}')
-              Move-Item target/release/D3D12 (Join-Path $env:RUNNER_TEMP 'sdk-control')
-            }
-            cargo build --release --locked -p victory
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            if ($mode -eq 'packaged') {
-              New-Item -ItemType Directory -Path target/release/D3D12 -Force | Out-Null
-              Copy-Item d3d12pkg/build/native/bin/x64/D3D12Core.dll target/release/D3D12/
-            }
-            $out = & ./target/release/victory.exe translate --pipelines $root 2>&1 | Out-String
+          foreach ($filter in @('descriptor::host::tests::concurrent_','mirror_release_acquire_later_and_forget_semantics')) {
+            $output = cargo test --locked -p victory-gpu --features diagnostics --lib $filter -- --test-threads=1 2>&1 | Out-String
             $code = $LASTEXITCODE
-            Write-Host "PROFILE=$mode CLI_EXIT=$code Windows=$([Environment]::OSVersion.Version)"
-            Write-Host $out
-            if ($out -notmatch 'PROBE starting flags=0xc01' -or $out -notmatch 'PROBE shader model') {
-              throw "Probe did not observe the root-signature test on $mode"
-            }
-            if ($mode -eq 'packaged' -and $out -notmatch 'PROBE serialized flags=0xc01') {
-              throw 'The packaged runtime did not serialize the target root signature.'
-            }
+            Write-Host $output
+            $count = if ($filter.StartsWith('descriptor')) { 4 } else { 1 }
+            if ($code -ne 0 -or $output -notmatch "test result: ok. $count passed; 0 failed") { throw "Incomplete $filter run" }
           }
-          exit 0
