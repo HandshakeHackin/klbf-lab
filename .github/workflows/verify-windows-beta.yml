@@ -1,11 +1,11 @@
-name: Check the published Win10 test branch and Agility runtime
+name: Compare directly-indexed root signature support in the candidate
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  agility:
+  root-signature:
     strategy:
       fail-fast: false
       matrix:
@@ -18,90 +18,61 @@ jobs:
           repository: PastiiJay/klbf-lab
           ref: 338f7c527b5522f0bf0fa1cc1cb2047b43fef181
           persist-credentials: false
-      - name: Build the unmodified Windows test candidate
-        run: cargo build --release --locked -p victory
-      - name: Inspect both exported constants in the release executable
+      - name: Instrument the existing root-signature path before the shader-model gate
         shell: pwsh
         run: |
           @'
-          import struct
-          import sys
           from pathlib import Path
-          
-          exe = Path(sys.argv[1]).read_bytes()
-          u16 = lambda off: struct.unpack_from('<H', exe, off)[0]
-          u32 = lambda off: struct.unpack_from('<I', exe, off)[0]
-          u64 = lambda off: struct.unpack_from('<Q', exe, off)[0]
-          pe = u32(0x3c)
-          assert exe[pe:pe + 4] == b'PE\0\0' and u16(pe + 4) == 0x8664
-          opt = pe + 24
-          assert u16(opt) == 0x20b
-          image_base = u64(opt + 24)
-          first_section = opt + u16(pe + 20)
-          sections = [first_section + i * 40 for i in range(u16(pe + 6))]
-          
-          def locate(rva):
-              for s in sections:
-                  virtual = u32(s + 12)
-                  if virtual <= rva < virtual + u32(s + 16):
-                      return u32(s + 20) + rva - virtual
-              raise ValueError(f'RVA {rva:x} is outside the image sections')
-          
-          def string_at(rva):
-              start = locate(rva)
-              return exe[start:exe.index(0, start)].decode('ascii')
-          
-          exports = locate(u32(opt + 112))
-          addresses = locate(u32(exports + 28))
-          names = locate(u32(exports + 32))
-          ordinals = locate(u32(exports + 36))
-          locations = {}
-          for i in range(u32(exports + 24)):
-              name = string_at(u32(names + i * 4))
-              rva = u32(addresses + u16(ordinals + i * 2) * 4)
-              locations[name] = rva
-          version = u32(locate(locations['D3D12SDKVersion']))
-          path = string_at(u64(locate(locations['D3D12SDKPath'])) - image_base)
-          print(f'Win64 victory.exe exports SDK version {version} and path {path!r}', flush=True)
-          assert version == 614 and path == '.\\D3D12\\'
-          '@ | python - target/release/victory.exe
+          p = Path("crates/victory-shader/src/emit/host.rs")
+          s = p.read_text(encoding="utf-8")
+          anchor = 'let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL {'
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, '''let probe = Self { device: device.clone() };
+                      eprintln!("PROBE starting flags=0xc01");
+                      match probe.root_signature_for(&[]) {
+                          Ok(_) => eprintln!("PROBE created root signature"),
+                          Err(error) => eprintln!("PROBE root signature error: {error}"),
+                      }
+                      ''' + anchor)
+          anchor = 'let blob: ID3DBlob = blob.ok_or("no root signature blob")?;'
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, anchor + '\n            eprintln!("PROBE serialized flags=0xc01");')
+          anchor = 'if sm.HighestShaderModel.0 < D3D_SHADER_MODEL_6_6.0 {'
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, 'eprintln!("PROBE shader model {:#x}", sm.HighestShaderModel.0);\n            ' + anchor)
+          p.write_text(s, encoding="utf-8")
+          '@ | python -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage Microsoft's package as in issue 11
-        shell: pwsh
-        run: |
-          Invoke-WebRequest https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1 -OutFile d3d12.zip
-          Expand-Archive d3d12.zip d3d12pkg -Force
-          New-Item -ItemType Directory -Force target/release/D3D12 | Out-Null
-          Copy-Item d3d12pkg/build/native/bin/x64/D3D12Core.dll target/release/D3D12/
-          $dll = Get-Item target/release/D3D12/D3D12Core.dll
-          $dll.VersionInfo | Format-List FileVersion,ProductVersion
-          Get-FileHash $dll.FullName
-          Get-AuthenticodeSignature $dll.FullName | Select-Object Status, @{ Name='Signer'; Expression={$_.SignerCertificate.Subject} } | Format-List
-      - name: Observe the real CLI creating a WARP device and record the loaded runtime
-        shell: pwsh
+      - name: Compare the packaged runtime with the inbox control using the same probe
         env:
           VICTORY_WARP: '1'
+        shell: pwsh
         run: |
-          $root = Join-Path $env:RUNNER_TEMP 'agility-empty-shader-inputs'
-          New-Item -ItemType Directory -Path $root -Force | Out-Null
-          $bytes = [byte[]]::new(4096)
-          for ($i=0; $i -lt 1600; $i++) { [IO.File]::WriteAllBytes((Join-Path $root "$i.bin"), $bytes) }
-          $info = [Diagnostics.ProcessStartInfo]::new((Resolve-Path target/release/victory.exe))
-          foreach ($arg in @('translate','--pipelines','--jobs','1',$root)) { $info.ArgumentList.Add($arg) }
-          $info.UseShellExecute = $false
-          $p = [Diagnostics.Process]::Start($info)
-          $seen = @{}
-          while (!$p.HasExited) {
-            try {
-              $p.Refresh()
-              foreach ($m in $p.Modules) {
-                if ($m.ModuleName -ieq 'D3D12Core.dll') { $seen[$m.FileName] = $m.FileVersionInfo.FileVersion }
-              }
-            } catch [System.InvalidOperationException] { break } catch [System.ComponentModel.Win32Exception] {}
-            Start-Sleep -Milliseconds 5
+          $PSNativeCommandUseErrorActionPreference = $false
+          $root = Join-Path $env:RUNNER_TEMP 'empty-scan'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          Invoke-WebRequest https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1 -OutFile d3d12.zip
+          Expand-Archive d3d12.zip d3d12pkg -Force
+          foreach ($mode in @('packaged','inbox')) {
+            if ($mode -eq 'inbox') {
+              [IO.File]::WriteAllText((Resolve-Path apps/victory/build.rs), 'fn main() {}')
+              Move-Item target/release/D3D12 (Join-Path $env:RUNNER_TEMP 'sdk-control')
+            }
+            cargo build --release --locked -p victory
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($mode -eq 'packaged') {
+              New-Item -ItemType Directory -Path target/release/D3D12 -Force | Out-Null
+              Copy-Item d3d12pkg/build/native/bin/x64/D3D12Core.dll target/release/D3D12/
+            }
+            $out = & ./target/release/victory.exe translate --pipelines $root 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Host "PROFILE=$mode CLI_EXIT=$code Windows=$([Environment]::OSVersion.Version)"
+            Write-Host $out
+            if ($out -notmatch 'PROBE starting flags=0xc01' -or $out -notmatch 'PROBE shader model') {
+              throw "Probe did not observe the root-signature test on $mode"
+            }
+            if ($mode -eq 'packaged' -and $out -notmatch 'PROBE serialized flags=0xc01') {
+              throw 'The packaged runtime did not serialize the target root signature.'
+            }
           }
-          $p.WaitForExit()
-          Write-Host "Host OS $([Environment]::OSVersion.Version) / victory exit $($p.ExitCode)"
-          foreach ($path in $seen.Keys) { Write-Host "Loaded D3D12Core: $path ($($seen[$path]))" }
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
-          if (!$seen.Count) { throw 'Process ended before a module path was observed' }
+          exit 0
