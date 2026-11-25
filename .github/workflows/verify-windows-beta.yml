@@ -1,4 +1,4 @@
-name: Verify pipeline refusal diagnostics on Windows
+name: Verify per-frame pipeline refusal diagnostics
 on:
   push:
     branches: [verify-windows-beta-20261125]
@@ -7,29 +7,38 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: d8d59d4816f4e1beb14ee0c0dd50372cbb15e4dc
+          ref: 22c89ddd5c9a34879b287867e3f9f7701aa59f47
+          fetch-depth: 0
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Verify the diagnostic reports its refusal before the change
+      - name: Apply the worker assertion to the original beta
+        shell: python
+        run: |
+          import subprocess
+          from pathlib import Path
+          root = "crates/victory-gpu/src/pipeline/"
+          paths = [root + "host.rs", root + "make.rs"]
+          subprocess.run(["git", "restore", "--source=e328c8899c61cda1d43c526e03dedb96219f2018", "--", *paths], check=True)
+          src = Path(paths[1])
+          text = src.read_text(encoding="utf-8")
+          old = "assert!(matches!(p.made.get(), Some(None)));"
+          assert text.count(old) == 1
+          src.write_text(text.replace(old, old + '\n        assert_eq!(missing(&p).as_deref(), Some("no vertex or mesh shader"));'), encoding="utf-8")
+      - name: Verify that beta reports the generic label
         shell: pwsh
         run: |
-          $file = 'crates/victory-gpu/src/pipeline/make.rs'
-          $source = Get-Content -Raw $file
-          $old = 'return Some((*reason).to_owned());'
-          if (-not $source.Contains($old)) { throw 'expected diagnostic branch missing' }
-          Set-Content -NoNewline $file $source.Replace($old, 'let _ = reason;')
-          cargo test -p victory-gpu --locked --features diagnostics --lib pipeline::make::tests::first_use_is_made_by_a_worker -- --exact *> negative.log
+          cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests::first_use_is_made_by_a_worker -- --exact *> negative.log
           $code = $LASTEXITCODE
           Get-Content negative.log | Select-Object -Last 24
-          git restore -- $file
-          if ($code -eq 0 -or -not (Select-String -Path negative.log -SimpleMatch 'Some("refused []")')) { throw 'expected prior aggregate label was not detected' }
+          git restore -- crates/victory-gpu/src/pipeline
+          if ($code -eq 0 -or -not (Select-String -Path negative.log -SimpleMatch 'Some("refused []")')) { throw 'expected prior label was not observed' }
           exit 0
-      - name: Check the recorded reason in the worker tests
-        run: cargo test -p victory-gpu --locked --features diagnostics --lib pipeline::make::tests::
-      - name: Check default-feature worker tests
-        run: cargo test -p victory-gpu --locked --lib pipeline::make::tests::
+      - name: Exercise diagnostic worker and HRESULT tests
+        run: cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests::
+      - name: Exercise default worker tests
+        run: cargo test --locked -p victory-gpu --lib pipeline::make::tests::
