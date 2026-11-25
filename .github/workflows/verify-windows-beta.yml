@@ -23,25 +23,33 @@ jobs:
           cargo test --locked -p victory-gpu --lib legacy_fallback_reads_hardware_cache_and_never_touches_it_on_warp
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Run the WARP child and verify cache isolation on disk
+        shell: python
         run: |
-          $env:VICTORY_TEST_LIB_WARP_DIR = Join-Path $env:RUNNER_TEMP new-cache
-          $env:VICTORY_TEST_LIB_WARP_LEGACY_DIR = Join-Path $env:RUNNER_TEMP old-cache
-          New-Item $env:VICTORY_TEST_LIB_WARP_DIR,$env:VICTORY_TEST_LIB_WARP_LEGACY_DIR -ItemType Directory | Out-Null
-          $legacy = Join-Path $env:VICTORY_TEST_LIB_WARP_LEGACY_DIR 'host-pipelines.bin'
-          $hardware = Join-Path $env:VICTORY_TEST_LIB_WARP_DIR 'host-pipelines-10de-2783-ra1-hw.bin'
-          Set-Content -NoNewline $legacy 'synthetic legacy fixture'
-          Set-Content -NoNewline $hardware 'synthetic hardware fixture'
-          $before = (Get-FileHash $legacy).Hash,(Get-FileHash $hardware).Hash
-          cargo test --locked -p victory-gpu --lib pipeline::library::tests::warp_save_does_not_discard_hardware_pipeline_library -- --exact --nocapture --test-threads=1 *> cache-test.log
-          $code = $LASTEXITCODE
-          Get-Content cache-test.log | Select-Object -Last 24
-          if ($code) { exit $code }
-          $result = [regex]::Match((Get-Content -Raw cache-test.log),'WARP_FILE=(host-pipelines-[A-Za-z0-9-]+-sw\.bin)')
-          if (-not $result.Success) { throw 'WARP cache save/reopen did not execute' }
-          foreach ($dir in @($env:VICTORY_TEST_LIB_WARP_DIR,$env:VICTORY_TEST_LIB_WARP_LEGACY_DIR)) {
-            $f = Get-Item (Join-Path $dir $result.Groups[1].Value)
-            if ($f.Length -le 0) { throw 'Expected nonempty software pipeline cache' }
-            Write-Host "$($f.Name) saved, $($f.Length) bytes"
-          }
-          if ($before[0] -ne (Get-FileHash $legacy).Hash -or $before[1] -ne (Get-FileHash $hardware).Hash) { throw 'Fixture was modified' }
-          Write-Host 'Both synthetic hardware and legacy cache hashes were preserved.'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          import os, re, subprocess
+          with TemporaryDirectory() as temp:
+              new = Path(temp) / "new"
+              old = Path(temp) / "legacy"
+              new.mkdir()
+              old.mkdir()
+              fixtures = {
+                  old / "host-pipelines.bin": b"synthetic legacy fixture",
+                  new / "host-pipelines-10de-2783-ra1-hw.bin": b"synthetic hardware fixture",
+              }
+              for path, data in fixtures.items():
+                  path.write_bytes(data)
+              env = dict(os.environ, VICTORY_TEST_LIB_WARP_DIR=str(new), VICTORY_TEST_LIB_WARP_LEGACY_DIR=str(old))
+              cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "pipeline::library::tests::warp_save_does_not_discard_hardware_pipeline_library", "--", "--exact", "--nocapture", "--test-threads=1"]
+              proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+              print(proc.stdout, proc.stderr)
+              proc.check_returncode()
+              name = re.search(r"WARP_FILE=(host-pipelines-[A-Za-z0-9-]+-sw[.]bin)", proc.stdout)
+              assert name, "WARP cache save/reopen did not execute"
+              for directory in (new, old):
+                  size = (directory / name[1]).stat().st_size
+                  assert size > 0
+                  print(f"{name[1]} saved, {size} bytes")
+              for path, data in fixtures.items():
+                  assert path.read_bytes() == data
+              print("Both synthetic hardware and legacy cache files retained their original contents.")
