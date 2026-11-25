@@ -27,6 +27,11 @@ const ALLOWED_NAMES: &[&str] = &[
     "LICENSE-APACHE",
 ];
 
+// The maintainer's social preview image, added in commit 3156657.
+const LOGO_PREVIEW: &str = "docs/klbf/preview.png";
+const LOGO_PREVIEW_BLAKE3: &str =
+    "66dd823ccaf1c8d9b34c0ea4ae0aa03b5ad421e1a9017f11af0fcc87ac5e26a4";
+
 /// Paths explicitly exempted, with a reason. Keep this empty if at all possible.
 const EXCEPTIONS: &[(&str, &str)] = &[(
     "crates/victory-formats/src/bcpack-tables.bin",
@@ -144,10 +149,20 @@ fn list_files(root: &Path, staged: bool) -> Result<Vec<String>> {
 
 /// All problems with one file. Pure, for testing.
 pub fn check(path: &str, content: &[u8]) -> Vec<String> {
+    if path == LOGO_PREVIEW {
+        if content.len() <= MAX_FILE_SIZE
+            && blake3::hash(content).to_hex().as_str() == LOGO_PREVIEW_BLAKE3
+        {
+            return Vec::new();
+        }
+        return vec!["logo preview differs from the reviewed project image".to_owned()];
+    }
+
     let mut problems = Vec::new();
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    let allowed = ALLOWED_NAMES.contains(&name)
+    let allowed = path == "docs/klbf/logo.svg"
+        || ALLOWED_NAMES.contains(&name)
         || ext
             .as_deref()
             .is_some_and(|e| ALLOWED_EXTENSIONS.contains(&e));
@@ -196,6 +211,22 @@ mod tests {
         assert!(check("crates/x/src/lib.rs", b"fn main() {}\n").is_empty());
         assert!(check(".gitignore", b"/target/\n").is_empty());
         assert!(check(".githooks/pre-commit", b"#!/bin/sh\n").is_empty());
+    }
+
+    #[test]
+    fn logo_files_are_limited_to_the_reviewed_artwork() {
+        let svg = "docs/klbf/logo.svg";
+        assert!(check(svg, b"<svg/>").is_empty());
+        assert!(!check(svg, b"data\0").is_empty());
+        assert!(!check(svg, &[b'A'; 513]).is_empty());
+        assert!(!check("elsewhere/logo.svg", b"<svg/>").is_empty());
+
+        let preview = std::fs::read(crate::workspace_root().join(super::LOGO_PREVIEW)).unwrap();
+        assert!(check(super::LOGO_PREVIEW, &preview).is_empty());
+        assert!(!check("elsewhere/preview.png", &preview).is_empty());
+        let mut changed = preview;
+        changed.push(0);
+        assert!(!check(super::LOGO_PREVIEW, &changed).is_empty());
     }
 
     #[test]
