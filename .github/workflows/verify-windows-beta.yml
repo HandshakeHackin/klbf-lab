@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: e738e4028119f4ad4e689930c87d21f7d38ecf41
+          ref: c9c5ed36d264c83dbb4e634caf42a131507d5293
           persist-credentials: false
       - run: cargo build --release --locked -p victory
       - run: python tests/check_cold_cache.py target/release/victory.exe
@@ -33,10 +33,131 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: e738e4028119f4ad4e689930c87d21f7d38ecf41
+          ref: c9c5ed36d264c83dbb4e634caf42a131507d5293
           persist-credentials: false
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo xtask policy
       - name: Run the workspace on the software-only Windows runner
         run: cargo test --locked --workspace --no-fail-fast -- --skip glc_heap_uav_loads_stores_and_atomics_execute_on_gpu
+
+  gpu-tests:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: a375d01159cd71eb5d128c8838a1f0f6778d6f75
+          persist-credentials: false
+      - name: Run all default GPU library tests at the patch head
+        run: cargo test --locked -p victory-gpu --lib
+      - name: Confirm both pixel reads on forced WARP
+        env:
+          VICTORY_D3D12_WARP: '1'
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          p = Path("crates/victory-gpu/src/pipeline/host.rs")
+          s = p.read_text(encoding="utf-8")
+          marker = 'assert_eq!(run_draw(0.6, 1.0), 0,'
+          assert s.count(marker) == 1
+          s = s.replace(marker, 'let outside = run_draw(0.6, 1.0); eprintln!("WARP outside={outside}"); assert_eq!(outside, 0,')
+          marker = 'assert_eq!(run_draw(0.4, 0.6), 255,'
+          assert s.count(marker) == 1
+          s = s.replace(marker, 'let inside = run_draw(0.4, 0.6); eprintln!("WARP inside={inside}"); assert_eq!(inside, 255,')
+          p.write_text(s, encoding="utf-8")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Could not add the test-only pixel printouts' }
+          cargo test --locked -p victory-gpu --lib --features diagnostics depth_bounds_pipeline_loads_and_filters_draws -- --nocapture 2>&1 | Tee-Object -Variable result
+          $code = $LASTEXITCODE
+          $log = $result | Out-String
+          if ($code -ne 0 -or $log -notmatch 'WARP outside=0' -or $log -notmatch 'WARP inside=255') {
+            throw 'Expected both measured WARP pixels; an early return does not verify the fix.'
+          }
+
+  staging-review:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: fc0480b4de199809cd2dcc0922f243fbffc7dbb8
+          persist-credentials: false
+      - name: Compare a settled texture with one awaiting tiles on WARP
+        env:
+          VICTORY_D3D12_WARP: '1'
+        shell: pwsh
+        run: |
+          @'
+          #[cfg(all(test, feature = "diagnostics"))]
+          mod staging_residency_review {
+              use super::*;
+              use std::sync::atomic::Ordering::Relaxed;
+              use victory_formats::texture::{Desc, Dimension, Layout, Swizzle};
+          
+              fn sample(host: &crate::host::Host, changed: u64, waiting: u64) -> Arc<Staging> {
+                  let bytes = 256;
+                  let (buffer, data) = host.upload_buffer(bytes).expect("WARP upload buffer");
+                  let layout = Layout::new(&Desc {
+                      dimension: Dimension::Tex2d, width: 1, height: 1, depth: 1,
+                      mips: 1, element_bytes: 4, block: 1, samples: 1, swizzle: Swizzle::LINEAR,
+                  }).unwrap();
+                  STAGED[0].fetch_add(1, Relaxed);
+                  STAGED[1].fetch_add(bytes, Relaxed);
+                  Arc::new(Staging {
+                      mem: Mutex::new(Some((buffer, data as usize))), size: bytes, changed: changed.into(),
+                      footprints: vec![], rows: vec![], layout, mips: 1, bytes,
+                      memory: std::ptr::null(), last: Mutex::default(), dirty: false.into(),
+                      uploaded: true.into(), used: crate::host::moment().into(), on_demand: true,
+                      detiled: 1.into(), judged: Default::default(), waiting: waiting.into(),
+                  })
+              }
+          
+              #[test]
+              fn compare_pending_and_settled_mip_residency_after_sweep() {
+                  let host = host().expect("WARP host must exist");
+                  let changed = crate::host::moment();
+                  for _ in 0..32 {
+                      crate::frame::wait(std::ptr::null(), 0, 0, std::ptr::null(), 2, std::ptr::null_mut());
+                  }
+                  std::thread::sleep(std::time::Duration::from_millis(2150));
+                  assert!(crate::host::long_ago(changed, UNCHANGED_MS, UNCHANGED_FRAMES));
+                  let settled = sample(host, changed, 0);
+                  let waiting = sample(host, changed, changed.max(1));
+                  let (old_settled, old_waiting) = {
+                      let mut table = STAGING.lock().unwrap();
+                      let map = table.get_or_insert_with(HashMap::new);
+                      (map.insert(1, settled), map.insert(2, waiting))
+                  };
+                  assert!(old_settled.is_none() && old_waiting.is_none());
+                  let before = memory();
+                  let_go_idle();
+                  let after = memory();
+                  let (settled, waiting) = {
+                      let mut table = STAGING.lock().unwrap();
+                      let map = table.as_mut().unwrap();
+                      (map.remove(&1).unwrap(), map.remove(&2).unwrap())
+                  };
+                  let resident = |s: &Staging| s.mem.lock().unwrap().is_some();
+                  let expected = std::env::var("EXPECT_PENDING").unwrap() == "resident";
+                  eprintln!("RESIDENCY settled={} waiting={} reported_before={} reported_after={}",
+                            resident(&settled), resident(&waiting), before[1], after[1]);
+                  assert!(!resident(&settled));
+                  assert_eq!(resident(&waiting), expected);
+              }
+          }
+          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/texture.rs
+          $env:EXPECT_PENDING = 'released'
+          cargo test --locked -p victory-gpu --features diagnostics --lib compare_pending_and_settled_mip_residency_after_sweep -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $path = 'crates/victory-gpu/src/texture.rs'
+          $source = [IO.File]::ReadAllText((Resolve-Path $path))
+          $marker = '&& s.uploaded.load(Relaxed)'
+          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'Expected exactly one eviction condition' }
+          $source = $source.Replace($marker, '&& s.waiting.load(Relaxed) == 0 && s.uploaded.load(Relaxed)')
+          [IO.File]::WriteAllText((Resolve-Path $path), $source)
+          $env:EXPECT_PENDING = 'resident'
+          cargo test --locked -p victory-gpu --features diagnostics --lib compare_pending_and_settled_mip_residency_after_sweep -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
