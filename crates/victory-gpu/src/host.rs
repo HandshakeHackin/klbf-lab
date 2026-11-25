@@ -1835,7 +1835,7 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
 /// # Safety
 /// The caller must have bound [`CARD_COMPARE`]'s root signature, pipeline,
 /// SRV, and UAVs on `list`, and `list` must be open for recording.
-unsafe fn dispatch_card_compare(
+pub(crate) unsafe fn dispatch_card_compare(
     list: &ID3D12GraphicsCommandList,
     first: u32,
     skew: u32,

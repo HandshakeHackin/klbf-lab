@@ -1035,17 +1035,16 @@ void main() {
     /// compare before it, also a change back.
     #[test]
     fn warp_card_compare_stores_the_hash_it_made_when_told() {
-        card_compare_stores(crate::host::CARD_COMPARE, 64);
+        card_compare_stores(crate::host::CARD_COMPARE);
     }
 
     /// The same of the compare with a group per piece.
     #[test]
     fn warp_wide_card_compare_stores_the_hash_it_made_when_told() {
-        card_compare_stores(crate::host::CARD_COMPARE_WIDE, 1);
+        card_compare_stores(crate::host::CARD_COMPARE_WIDE);
     }
 
-    /// `source` hashes `per_group` pieces with a group.
-    fn card_compare_stores(source: &str, per_group: u32) {
+    fn card_compare_stores(source: &str) {
         let Some(mut warp) = WarpHarness::new() else {
             return;
         };
@@ -1070,12 +1069,10 @@ void main() {
                 }
                 warp.list.SetComputeRootSignature(&compare.root);
                 warp.list.SetPipelineState(&compare.pso);
-                let constants = [0u32, 0, size as u32, PIECES, 0, mode];
-                warp.list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
                 warp.list.SetComputeRootShaderResourceView(1, now_gpu);
                 warp.list.SetComputeRootUnorderedAccessView(2, hashes_gpu);
                 warp.list.SetComputeRootUnorderedAccessView(3, differs_gpu);
-                warp.list.Dispatch(PIECES.div_ceil(per_group), 1, 1);
+                crate::host::dispatch_card_compare(&warp.list, 0, 0, size as u32, PIECES, 0, mode);
             }
             warp.submit_and_wait();
             // SAFETY: as above.
