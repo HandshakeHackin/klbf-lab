@@ -1,31 +1,40 @@
-name: Verify merged beta changes on Windows
+name: Verify selected adapter logging on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  verify:
+  verify-adapter:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: 45546f9363ff9531b87de731bc320b18e09e09eb
+          ref: 88ea55a93d5616f6adbd14424c00e92fc5c4ecfd
           persist-credentials: false
-      - run: cargo test --locked -p victory --bin victory translate_
-      - run: cargo build --locked -p victory
-      - run: python tests/check_cold_cache.py target/debug/victory.exe
-      - name: Check zero-second warm-up
+      - name: Exercise D3D12 startup with the Windows software adapter
         shell: pwsh
+        env:
+          VICTORY_D3D12_WARP: '1'
         run: |
-          $inputs = Join-Path $env:RUNNER_TEMP 'empty-inputs'
-          New-Item -ItemType Directory -Path $inputs | Out-Null
-          $env:VICTORY_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'warm-cache'
-          $env:VICTORY_WARM_SECONDS = '0'
-          $output = & .\target\debug\victory.exe translate --warm all $inputs
-          $output
-          if ($LASTEXITCODE -ne 0 -or ($output -join ' ') -notmatch 'stopped at the time limit') {
-            throw 'Expected the warm-up to stop at its time limit.'
+          @'
+
+          [dev-dependencies.tracing-subscriber]
+          workspace = true
+          '@ | Add-Content crates/victory-gpu/Cargo.toml
+          @'
+
+          #[cfg(test)]
+          #[test]
+          fn ci_warp_startup() {
+              tracing_subscriber::fmt().with_ansi(false).init();
+              assert!(create().is_ok(), "WARP failed to initialize");
+          }
+          '@ | Add-Content crates/victory-gpu/src/host.rs
+          cargo test -p victory-gpu --lib --features diagnostics ci_warp_startup -- --nocapture 2>&1 | Tee-Object -Variable result
+          if ($LASTEXITCODE -ne 0) { throw 'The WARP startup test failed' }
+          $log = ($result | Out-String)
+          if ($log -notmatch 'host D3D12 device ready[^\r\n]*adapter="[^"]+"') {
+            throw 'The selected adapter was missing from the startup log'
           }
