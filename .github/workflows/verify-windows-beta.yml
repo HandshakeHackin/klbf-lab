@@ -1,19 +1,55 @@
-name: Verify both strict Clippy checks on Windows
+name: Measure depth-bound pixels on Windows WARP
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  clippy:
+  compare:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 6190ae2353cdc9ccd62b952a4b86ec9d9aa27f44
+          repository: PastiiJay/klbf-lab
+          ref: c71c7d6bc627758ad858a736233cc2a4b14bd717
           persist-credentials: false
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --locked -p victory-game
-      - run: cargo test --locked -p victory-hle --lib page_lists_are_read_at_the_titles_submit
+      - name: Measure both pixels for replay and direct OMSetDepthBounds
+        env:
+          VICTORY_D3D12_WARP: '1'
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import itertools, os, re, subprocess
+          path = Path("crates/victory-gpu/src/pipeline/host.rs")
+          src = path.read_text(encoding="utf-8")
+          before, sep, test = src.partition("fn depth_bounds_pipeline_loads_and_filters_draws()")
+          assert sep
+          def once(s, old, new):
+              assert s.count(old) == 1, old
+              return s.replace(old, new, 1)
+          test = once(test, "DepthEnable: false.into(),", 'DepthEnable: std::env::var_os("CI_DEPTH_READ").is_some().into(),')
+          call = "list.list.DrawInstanced(3, 1, 0, 0);"
+          test = once(test, call,
+              'if std::env::var_os("CI_DIRECT_BOUNDS").is_some() { use windows::core::Interface as _; '
+              'list.list.cast::<ID3D12GraphicsCommandList1>().unwrap().OMSetDepthBounds(min, max); }\n                ' + call)
+          test = once(test, 'assert_eq!(run_draw(0.6, 1.0), 0,',
+              'let outside = run_draw(0.6, 1.0); let inside = run_draw(0.4, 0.6); '
+              'eprintln!("DEPTH_OBSERVATION outside={outside} inside={inside}"); assert_eq!(outside, 0,')
+          test = once(test, 'assert_eq!(run_draw(0.4, 0.6), 255,', 'assert_eq!(inside, 255,')
+          path.write_text(before + sep + test, encoding="utf-8")
+          for read, direct in itertools.product((False, True), repeat=2):
+              env = dict(os.environ)
+              if read: env["CI_DEPTH_READ"] = "1"
+              if direct: env["CI_DIRECT_BOUNDS"] = "1"
+              p = subprocess.run(["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "--features", "diagnostics", "depth_bounds_pipeline_loads_and_filters_draws", "--", "--nocapture"], env=env, capture_output=True, text=True)
+              log = p.stdout + p.stderr
+              found = re.search(r"DEPTH_OBSERVATION outside=(\d+) inside=(\d+)", log)
+              if not found:
+                  print(log[-5000:]); raise SystemExit("No pixel observations. Skipped or failed before drawing.")
+              outside, inside = map(int, found.groups())
+              print(f"DepthEnable={read} direct_after_pso={direct} outside_pixel={outside} inside_pixel={inside} test_exit={p.returncode}", flush=True)
+              assert inside == 255
+              assert p.returncode == (0 if outside == 0 else 101)
+          '@ | python -
