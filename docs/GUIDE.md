@@ -45,7 +45,14 @@ cd klbf-lab
 cargo build --release
 ```
 
-For the latest test build instead, use `git clone -b beta https://github.com/PastiiJay/klbf-lab`.
+The commands above already select the beta branch. If you previously cloned the stable build, run these commands from that checkout to switch and build the latest beta:
+
+```powershell
+git fetch origin
+git switch beta
+git pull --ff-only
+cargo build --release
+```
 
 ## 5. Get AMD's FidelityFX SDK (for the faster Series S mode)
 
@@ -102,12 +109,21 @@ Then step 6, step 7 again, and step 8.
 | What you see | What to do |
 |---|---|
 | `amd_fidelityfx_loader_dx12.dll not found`, then a crash | Step 5, and check the path in `VICTORY_FFX_DIR` |
-| Crash about 3 seconds after start, black window | Not enough memory: step 2 (page file), close other programs |
+| Crash about 3 seconds after start, black window | Check step 2 on a 16 GB system. This symptom has several possible causes. If it persists on beta, include the build and driver details below |
 | `X3506` or `vs_5_1` in the log, black window | Old Windows shader compiler: copy the x64 `d3dcompiler_47.dll` from a recent Windows SDK (`Redist\D3D\x64`) next to `victory.exe` |
 | `error: unexpected argument '--cache'` | You built an old copy: redo step 4 |
 | Graphics card stops responding after ~1 min | `$env:VICTORY_LATE_WAIT = '0'` |
 
-Still stuck? Open an [issue](https://github.com/PastiiJay/klbf-lab/issues) with your graphics card, driver version, Windows version and the last lines PowerShell printed.
+Still stuck? From the same checkout where you built the executable, run:
+
+```powershell
+git branch --show-current
+git rev-parse --short HEAD
+Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion
+Get-CimInstance Win32_OperatingSystem | Select-Object Caption, BuildNumber
+```
+
+Include the output in your [issue](https://github.com/PastiiJay/klbf-lab/issues), along with the last lines PowerShell printed. If you downloaded a binary, give its release or build label instead of the Git details. For a black window at startup, mention whether any logo or menu appeared and whether the result changed after trying beta.
 
 ---
 
