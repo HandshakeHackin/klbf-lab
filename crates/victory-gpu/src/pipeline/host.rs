@@ -1104,7 +1104,7 @@ mod tests {
     /// A pipeline with the depth bounds test is made, and loads again.
     #[test]
     fn a_pipeline_with_depth_bounds_is_made() {
-        let Some(host) = host().filter(|_| super::depth_bounds_test()) else {
+        let Some(host) = host().filter(|host| host.depth_bounds()) else {
             eprintln!("no host depth bounds test; skipped");
             return;
         };
@@ -1125,17 +1125,26 @@ mod tests {
                 BytecodeLength: blob.GetBufferSize(),
             }
         };
-        let none = D3D12_SHADER_BYTECODE::default;
         let (root, root_blob) = root_signature(&host.device, &[], &[], false).unwrap();
         let mut g = GraphicsState::default();
         let plain = g.describe();
-        g.bounds = true;
+        g.depth_bounds = true;
         assert_ne!(plain, g.describe());
         g.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         g.depth_format = DXGI_FORMAT_D32_FLOAT;
+        let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+            VS: vs,
+            BlendState: g.blend,
+            SampleMask: g.sample_mask,
+            RasterizerState: g.rasterizer,
+            PrimitiveTopologyType: g.topology,
+            DSVFormat: g.depth_format,
+            SampleDesc: g.samples,
+            ..Default::default()
+        };
         let name = super::super::library::name("bounds test", &root_blob, &[&code_bytes(&vs)], &g.describe());
         for _ in 0..2 {
-            bounds_pipeline(&host.device, &root, [vs, none(), none(), none()], &g, &name).expect("made");
+            graphics_depth_bounds_pipeline(&host.device, &root, &desc, g.depth1(), &name).expect("made");
         }
     }
 
