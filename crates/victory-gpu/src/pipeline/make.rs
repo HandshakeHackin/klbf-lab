@@ -441,10 +441,13 @@ mod tests {
     #[cfg(feature = "diagnostics")]
     #[test]
     fn driver_refusal_keeps_hresult_and_shader_identity() {
-        let shader = super::super::shader("compute", &[1, 2, 3, 4]);
+        let shader = Arc::new(Shader::new("compute", &[1, 2, 3, 4]));
         let expected = format!("compute pipeline refused (0x80070057) [compute {}]", shader.hash);
         let pending = Pending::new(vec![shader], None);
-        pending.refusal.set(("compute pipeline refused", Some(0x80070057u32 as i32))).unwrap();
+        pending
+            .refusal
+            .set(("compute pipeline refused", Some(0x80070057u32 as i32)))
+            .unwrap();
         assert_eq!(missing(&pending).as_deref(), Some("being made"));
         assert!(pending.made.set(None).is_ok());
         assert_eq!(missing(&pending).as_deref(), Some(expected.as_str()));
