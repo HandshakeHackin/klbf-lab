@@ -1,4 +1,4 @@
-name: Verify Wave32 shader output on WARP, alone and with PR 41
+name: Validate Wave32 DXIL alone and with the queued optimizer
 on:
   push:
     branches: [verify-windows-beta-20261125]
@@ -30,13 +30,29 @@ jobs:
           start = data.index('fn run_wave32_lds_on_hardware(')
           before, target = data[:start], data[start:]
           assert target.count(optional) == 1
-          p.write_text(before + target.replace(optional, strict), encoding="utf-8")
-      - name: Validate computed outputs on the standalone PR
+          target = target.replace(optional, strict)
+          check = 'v.validate(&mut copy).expect("DXIL validation failed");'
+          assert target.count(check) == 1
+          target = target.replace(check, check + '\n        eprintln!("validated DXIL for {label}");')
+          p.write_text(before + target, encoding="utf-8")
+      - name: Validate standalone DXIL and identify software-adapter limits
         env:
           VICTORY_WARP: "1"
           VICTORY_REQUIRE_HW_GPU: "1"
           VICTORY_D3D12_DEBUG: "1"
-        run: cargo test --locked -p victory-shader --lib lds -- --nocapture --test-threads=1
+        run: |
+          cargo test --locked -p victory-shader --lib lds -- --nocapture --test-threads=1 *> wave-check.log
+          $code = $LASTEXITCODE
+          Get-Content wave-check.log | Select-String -Pattern 'validated DXIL for |maximum wave lane count|test result:|test emit::lds'
+          $log = Get-Content -Raw wave-check.log
+          foreach ($label in @('lds_disjoint_ranges','lds_dual_and_b128_disjoint','lds_lane_private_rtn_atomic')) {
+            if (-not $log.Contains("validated DXIL for $label")) { throw "Missing SDK validation for $label" }
+          }
+          if ($code -eq 0 -and $log -match 'test result: ok\. 19 passed') { exit 0 }
+          $unsupported = [regex]::Matches($log, 'Shader wants wave lane count of 32 but maximum wave lane count for device is 4').Count
+          if ($unsupported -ne 3 -or $log -notmatch '16 passed; 3 failed; 0 ignored') { throw 'Unexpected execution result' }
+          Write-Host 'All three DXIL fixtures passed SDK validation. This adapter cannot execute Wave32.'
+          exit 0
       - name: Add the exact shader optimization PR
         shell: bash
         run: |
@@ -44,9 +60,21 @@ jobs:
           git fetch https://github.com/PastiiJay/klbf-lab.git refs/pull/41/head
           git -c user.name=CI -c user.email=ci@localhost merge --no-edit ba88ab0607c7cc1b7fa83b3c6f3a4a9beb1093be
           test "$(git rev-parse 'HEAD^{tree}')" = 4e0694074c06b63a1f25c06e46efa45b5b5efd9f
-      - name: Validate Wave32 outputs with the shader optimizer
+      - name: Validate DXIL with the shader optimizer
         env:
           VICTORY_WARP: "1"
           VICTORY_REQUIRE_HW_GPU: "1"
           VICTORY_D3D12_DEBUG: "1"
-        run: cargo test --locked -p victory-shader --lib lds -- --nocapture --test-threads=1
+        run: |
+          cargo test --locked -p victory-shader --lib lds -- --nocapture --test-threads=1 *> wave-check.log
+          $code = $LASTEXITCODE
+          Get-Content wave-check.log | Select-String -Pattern 'validated DXIL for |maximum wave lane count|test result:|test emit::lds'
+          $log = Get-Content -Raw wave-check.log
+          foreach ($label in @('lds_disjoint_ranges','lds_dual_and_b128_disjoint','lds_lane_private_rtn_atomic')) {
+            if (-not $log.Contains("validated DXIL for $label")) { throw "Missing SDK validation for $label" }
+          }
+          if ($code -eq 0 -and $log -match 'test result: ok\. 19 passed') { exit 0 }
+          $unsupported = [regex]::Matches($log, 'Shader wants wave lane count of 32 but maximum wave lane count for device is 4').Count
+          if ($unsupported -ne 3 -or $log -notmatch '16 passed; 3 failed; 0 ignored') { throw 'Unexpected execution result' }
+          Write-Host 'All three DXIL fixtures passed SDK validation. This adapter cannot execute Wave32.'
+          exit 0
