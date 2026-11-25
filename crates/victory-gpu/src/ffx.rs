@@ -1029,9 +1029,10 @@ pub(crate) fn framegen_before_present(
 /// real frame rate and the presented one.
 pub(crate) fn framegen_after_present(presented: Option<u32>) {
     let real = FRAME.fetch_add(1, Ordering::AcqRel) + 1;
+    // DXGI counts are cumulative. Keep the last valid baseline if the query fails.
+    let Some(presented) = presented else { return };
     static SINCE: std::sync::Mutex<Option<(std::time::Instant, u64, u32)>> = std::sync::Mutex::new(None);
     let mut since = SINCE.lock().unwrap_or_else(|e| e.into_inner());
-    let presented = presented.unwrap_or(0);
     let Some((at, real_then, presented_then)) = *since else {
         *since = Some((std::time::Instant::now(), real, presented));
         return;
