@@ -1,85 +1,54 @@
-name: Check exact SIMD copy-back ranges across vector boundaries
+name: Check ReBAR fallback on the native Windows software adapter
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  spans:
+  warp:
     runs-on: windows-latest
     timeout-minutes: 25
+    env:
+      VICTORY_D3D12_WARP: '1'
+      VICTORY_REBAR: '2'
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: ea3f336f39160801f10330aa6d38ed8008796b6f
+          ref: d29505a1d5a3eef400b75cc081d88b51bf6a5688
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Exercise vector boundaries with independently computed results
+      - name: Distinguish a live round trip from an unsupported-device fallback
         shell: python
         run: |
           from pathlib import Path
           import subprocess
-          shadow = Path("crates/victory-gpu/src/shadow.rs")
-          with shadow.open("a", encoding="utf-8") as f:
-              f.write('\n#[cfg(test)]\nmod handoff_span_tests;\n')
-          folder = shadow.with_suffix("")
-          folder.mkdir(exist_ok=True)
-          test = r"""
-          #[test]
-          fn every_contiguous_run_survives_vector_boundaries_and_scalar_tails() {
-              use super::{changed_runs, first_difference, has_avx2, last_difference, merge_back_piece};
-          
-              assert!(has_avx2(), "this runner must exercise AVX2");
-              let mut cases = 0u32;
-              for len in [31, 32, 33, 63, 64, 65, 95, 96, 97] {
-                  let old = vec![0u8; len];
-                  for start in 0..=len {
-                      for end in start..=len {
-                          let mut gpu = old.clone();
-                          gpu[start..end].fill(1);
-                          let expected_runs = if start == end { vec![] } else { vec![(start, end - start)] };
-                          assert_eq!(changed_runs(&gpu, &old), expected_runs);
-                          assert_eq!(first_difference(&gpu, &old), (start < end).then_some(start));
-                          assert_eq!(last_difference(&gpu, &old), (start < end).then(|| end - 1));
-          
-                          // CPU writes cut holes on each side of a 32-byte boundary.
-                          let mut title = old.clone();
-                          for position in [30, 31, 32, 63, 64] {
-                              if position < len { title[position] = 2; }
-                          }
-                          let mut expected = title.clone();
-                          let mut wanted = Vec::new();
-                          let mut at = start;
-                          while at < end {
-                              if expected[at] != 0 {
-                                  at += 1;
-                                  continue;
-                              }
-                              let first = at;
-                              while at < end && expected[at] == 0 {
-                                  expected[at] = 1;
-                                  at += 1;
-                              }
-                              wanted.push((first, at - first));
-                          }
-                          let mut runs = vec![(0, len)];
-                          assert_eq!(merge_back_piece(&mut title, &mut gpu, &old, &mut runs), !wanted.is_empty());
-                          assert_eq!(title, expected);
-                          assert_eq!(gpu, expected);
-                          assert_eq!(runs, wanted, "length {len}, run {start}..{end}");
-                          cases += 1;
-                      }
+          path = Path("crates/victory-gpu/src/shadow.rs")
+          source = path.read_text(encoding="utf-8")
+          begin = source.index("fn rebar_wc_write_read_compare_roundtrip()")
+          stop = source.index("        // SAFETY:", begin)
+          original = source[begin:stop]
+          assert "if !rebar::supported()" in original and "rebar::gpu_upload_buffer(h, LEN as u64)" in original
+          probe = """
+              fn rebar_wc_write_read_compare_roundtrip() {
+                  let h = host().expect("a live software adapter is required");
+                  const LEN: usize = 256 << 10;
+                  assert_eq!(rebar::level(), 2);
+                  if !rebar::supported() {
+                      assert!(rebar::reserve(rebar::Kind::Window, LEN as u64, false).is_none());
+                      assert!(rebar::reserve(rebar::Kind::Buffer, LEN as u64, false).is_none());
+                      println!("WARP: GPU upload unsupported; window and buffer reservations both declined");
+                      return;
                   }
-              }
-              println!("{cases} span placements passed on an AVX2 CPU");
-          }
+                  let (buffer, ptr) = rebar::gpu_upload_buffer(h, LEN as u64)
+                      .expect("the supported adapter must complete its upload allocation");
+                  println!("WARP: GPU upload supported; executing 256 KiB round trip");
           """
-          (folder / "handoff_span_tests.rs").write_text(test, encoding="utf-8")
-          name = "shadow::handoff_span_tests::every_contiguous_run_survives_vector_boundaries_and_scalar_tails"
-          cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", name, "--", "--exact", "--nocapture"]
-          proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
-          print(proc.stdout)
-          proc.check_returncode()
-          assert "span placements passed on an AVX2 CPU" in proc.stdout
+          path.write_text(source[:begin] + probe + source[stop:], encoding="utf-8")
+          test = "shadow::rebar_tests::rebar_wc_write_read_compare_roundtrip"
+          cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "--features", "diagnostics", test, "--", "--exact", "--nocapture"]
+          result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+          print(result.stdout)
+          result.check_returncode()
+          assert "WARP: GPU upload" in result.stdout and "1 passed; 0 failed" in result.stdout
