@@ -1,0 +1,48 @@
+name: Package the two isolated half-view retest builds
+on:
+  push:
+    branches: [verify/half-view-retest-builds]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [pr113-only, pr113-plus-pr1]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 52388bb6b923cb671498155dbce84f1b5125079d
+          persist-credentials: false
+      - name: Apply only the requested Wine pipeline-library change
+        if: matrix.variant == 'pr113-plus-pr1'
+        run: |
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git refs/pull/1/head
+          if ($LASTEXITCODE -or (git rev-parse FETCH_HEAD) -ne '08f9ac1e3a55e10e03a3b5644943c1a8fe93c290') { throw 'Unexpected PR 1 revision' }
+          git cherry-pick --no-commit FETCH_HEAD
+          if ($LASTEXITCODE -or (git write-tree) -ne 'd1f03f399d224191d79772fb372b742208f46ac3') { throw 'Unexpected integrated tree' }
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p victory
+      - name: Package the executable and matching launcher files
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./target/release/victory.exe --help
+          if ($LASTEXITCODE) { throw 'executable startup failed' }
+          $files = @('target/release/victory.exe','play.ps1','docs/klbf/skip-amd.txt')
+          New-Item -ItemType Directory -Force build/target/release,build/docs/klbf | Out-Null
+          foreach ($file in $files) { Copy-Item $file "build/$file" }
+          @("PR 113 = $(git rev-parse HEAD)", "variant = ${{ matrix.variant }}", "source tree = $(git write-tree)") | Set-Content -Encoding ascii build/SOURCE.txt
+          if ('${{ matrix.variant }}' -eq 'pr113-plus-pr1') { Add-Content -Encoding ascii build/SOURCE.txt 'PR 1 = 08f9ac1e3a55e10e03a3b5644943c1a8fe93c290' }
+          $checksums = foreach ($file in $files) { "$((Get-FileHash "build/$file" -Algorithm SHA256).Hash.ToLower())  $file" }
+          $checksums | Set-Content -Encoding ascii build/SHA256SUMS.txt
+          Get-Content build/SOURCE.txt,build/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: klbf-52388bb-${{ matrix.variant }}-windows-x64
+          path: build/
+          if-no-files-found: error
+          retention-days: 14
