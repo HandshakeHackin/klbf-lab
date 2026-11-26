@@ -1350,6 +1350,66 @@ void main() {
         assert_eq!(slot(PIECE - SKEW as usize), piece0);
     }
 
+    #[test]
+    fn ordered_argument_snapshot_drives_the_current_tile_mask() {
+        let mut warp = WarpHarness::new().expect("this diagnostic requires Windows WARP");
+        let mark = compile_cs(&warp.device, r#"
+            RWByteAddressBuffer mask : register(u0);
+            [RootSignature("UAV(u0)")]
+            [numthreads(1, 1, 1)]
+            void main(uint3 group : SV_GroupID) {
+                uint prior;
+                mask.InterlockedOr(0, 1u << group.x, prior);
+            }
+        "#).unwrap();
+        let signature = warp.signature(2, 12);
+        for early in [true, false] {
+            let (source, words, source_gpu) = warp.shared_buffer(12);
+            let (_budget, budget_word, budget_gpu) = warp.shared_buffer(16);
+            let (_mask, mask_word, mask_gpu) = warp.shared_buffer(4);
+            let snapshot = warp.default_uav(12);
+
+            // SAFETY: all three mappings are live until the fence completes.
+            unsafe {
+                std::ptr::copy_nonoverlapping([1u32, 1, 1].as_ptr(), words.cast(), 3);
+                budget_word.cast::<u32>().write(0);
+                mask_word.cast::<u32>().write(0);
+            }
+            let read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            let write = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            // SAFETY: live buffers and compute roots on the same device, one open list.
+            unsafe {
+                warp.list.ResourceBarrier(&[transition(&source, D3D12_RESOURCE_STATE_COMMON, read)]);
+                let clamp = || {
+                    assert!(record_clamp(&warp.clamp, &warp.list, &snapshot, budget_gpu,
+                                         (&source, 0), None, (2, 12, 1)));
+                };
+                if early {
+                    clamp();
+                }
+                warp.list.ResourceBarrier(&[transition(&source, read, write)]);
+                warp.list.SetComputeRootSignature(&warp.worker.root);
+                warp.list.SetPipelineState(&warp.worker.pso);
+                warp.list.SetComputeRootUnorderedAccessView(0, source_gpu);
+                warp.list.Dispatch(4, 1, 1); // Four atomic increments change X from 1 to 5.
+                warp.list.ResourceBarrier(&[transition(&source, write, read)]);
+                if !early {
+                    clamp();
+                }
+                warp.list.SetComputeRootSignature(&mark.root);
+                warp.list.SetPipelineState(&mark.pso);
+                warp.list.SetComputeRootUnorderedAccessView(0, mask_gpu);
+                warp.list.ExecuteIndirect(&signature, 1, &snapshot, 0, None::<&ID3D12Resource>, 0);
+            }
+            warp.submit_and_wait();
+            // SAFETY: the fence signaled for the only queue touching the mappings.
+            let (x, mask) = unsafe { (words.cast::<u32>().read_volatile(), mask_word.cast::<u32>().read_volatile()) };
+            println!("clamp before producer={early}: final source X={x}, dispatched tile mask={mask:#04x}");
+            assert_eq!(x, 5);
+            assert_eq!(mask, if early { 0x01 } else { 0x1f });
+        }
+    }
+
     /// The clamp compiles with the system's compiler and the host takes it.
     #[test]
     fn argument_clamp_builds() {
