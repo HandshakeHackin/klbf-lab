@@ -1,0 +1,33 @@
+name: Build the issue 55 blend-state diagnostic
+on:
+  push:
+    branches: [verify/issue-55-diagnostics]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      VICTORY_D3D12_WARP: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 4426ba004da86f1d944f960f306752ffad94d2a2
+          persist-credentials: false
+      - name: Verify active and inherited blend settings
+        run: cargo test --locked -p victory-gpu --lib pipeline::host::tests::refusal_shows_the_effective_blend_for_each_active_target -- --exact
+      - name: Build the normal Windows release with refusal logging
+        run: cargo build --locked -p victory --release
+      - name: Smoke test and checksum
+        shell: pwsh
+        run: |
+          ./target/release/victory.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-FileHash -Algorithm SHA256 ./target/release/victory.exe | Format-List
+      - uses: actions/upload-artifact@v4
+        with:
+          name: victory-main-issue55-blend-diagnostics
+          path: target/release/victory.exe
+          if-no-files-found: error
+          retention-days: 7
