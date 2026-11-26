@@ -1,55 +1,54 @@
-name: Verify adapter-specific pipeline cache files
+name: Verify native Windows profiler for PR 53
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  cache:
+  native:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: 7d31a81ed4f35930b9a205ae620ea2942563ccec
+          ref: 8aea65cc7325507b2bceafca58bd21f6253cb4bc
           persist-credentials: false
+      - name: Fetch the comparison revisions
+        run: |
+          git fetch --no-tags origin refs/pull/53/head
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ((git rev-parse FETCH_HEAD) -ne 'd973b9d2143ccaf4e4012f5268982c2a321f7024') { throw 'Review head changed' }
+          git restore --source=FETCH_HEAD -- crates/victory-gpu/src/profile/tests.rs
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Verify names and migration of the legacy cache
-        run: |
-          cargo test --locked -p victory-gpu --lib adapter_keys_produce_distinct_filenames_for_hardware_and_software
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test --locked -p victory-gpu --lib legacy_fallback_reads_hardware_cache_and_never_touches_it_on_warp
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Run the WARP child and verify cache isolation on disk
+      - name: Verify Windows supplies the native cycle counter
         shell: python
         run: |
-          from pathlib import Path
-          from tempfile import TemporaryDirectory
-          import os, re, subprocess
-          with TemporaryDirectory() as temp:
-              new = Path(temp) / "new"
-              old = Path(temp) / "legacy"
-              new.mkdir()
-              old.mkdir()
-              fixtures = {
-                  old / "host-pipelines.bin": b"synthetic legacy fixture",
-                  new / "host-pipelines-10de-2783-ra1-hw.bin": b"synthetic hardware fixture",
-              }
-              for path, data in fixtures.items():
-                  path.write_bytes(data)
-              env = dict(os.environ, VICTORY_TEST_LIB_WARP_DIR=str(new), VICTORY_TEST_LIB_WARP_LEGACY_DIR=str(old))
-              cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "pipeline::library::tests::warp_save_does_not_discard_hardware_pipeline_library", "--", "--exact", "--nocapture", "--test-threads=1"]
-              proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-              print(proc.stdout, proc.stderr)
-              proc.check_returncode()
-              name = re.search(r"WARP_FILE=(host-pipelines-[A-Za-z0-9-]+-sw[.]bin)", proc.stdout)
-              assert name, "WARP cache save/reopen did not execute"
-              for directory in (new, old):
-                  size = (directory / name[1]).stat().st_size
-                  assert size > 0
-                  print(f"{name[1]} saved, {size} bytes")
-              for path, data in fixtures.items():
-                  assert path.read_bytes() == data
-              print("Both synthetic hardware and legacy cache files retained their original contents.")
+          from ctypes import WinDLL, POINTER, byref, c_int, c_ulonglong, c_void_p
+          api = WinDLL("kernel32", use_last_error=True)
+          api.GetCurrentThread.restype = c_void_p
+          api.QueryThreadCycleTime.argtypes = [c_void_p, POINTER(c_ulonglong)]
+          api.QueryThreadCycleTime.restype = c_int
+          value = c_ulonglong()
+          assert api.QueryThreadCycleTime(api.GetCurrentThread(), byref(value)) and value.value
+          print(f"Native cycle counter available ({value.value} cycles)")
+      - name: Exercise the same tests before and after PR 53
+        shell: python
+        run: |
+          import subprocess
+          gpu = "crates/victory-gpu/src/profile.rs"
+          # PR 37 removes unrelated test-build blockers on win10-test.
+          # Both revisions run the same profile tests from PR 53.
+          for revision in ("baseline", "candidate"):
+              if revision == "candidate":
+                  subprocess.run(["git", "restore", "--source=d973b9d2143ccaf4e4012f5268982c2a321f7024", "--", gpu], check=True)
+              for case in ("a_blocked_thread_is_sampled_in_a_kernel_wait", "time_goes_to_the_function_that_spent_it"):
+                  name = "profile::tests::" + case
+                  print(f"Testing {revision} {name}", flush=True)
+                  command = ["cargo", "test", "--locked", "-p", "victory-gpu", "--features", "diagnostics", "--lib", name, "--", "--exact", "--test-threads=1"]
+                  result = subprocess.run(command, stdout=subprocess.PIPE, text=True)
+                  print(result.stdout, flush=True)
+                  result.check_returncode()
+                  if "1 passed; 0 failed" not in result.stdout:
+                      raise RuntimeError(f"Expected one executed test for {name}")
