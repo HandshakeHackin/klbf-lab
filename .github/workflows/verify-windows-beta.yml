@@ -1,36 +1,32 @@
-name: Verify beta-2 card patch and fetch on Windows WARP
+name: Check beta-2 workspace with PRs 81, 83 and the depth fix from 27
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  warp:
-    runs-on: windows-2025
-    timeout-minutes: 25
+  workspace:
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 395efe9b00640069e660e62da5f4f0608ea8928b
+          ref: 9e0db508382392414dd6cb17d1a49b153fd1ea9f
+          fetch-depth: 0
           persist-credentials: false
-      - name: Run the checked-in card shader tests
-        run: cargo test --locked -p victory-gpu --lib --features diagnostics indirect::tests::warp_card -- --test-threads=1
-      - name: Require successful creation of a WARP test device
-        shell: python
+      - name: Integrate the card tests and the production changes from PR 27
+        shell: bash
         run: |
-          from pathlib import Path
-          path = Path("crates/victory-gpu/src/indirect.rs")
-          text = path.read_text(encoding="utf-8")
-          a = "let Some(mut warp) = WarpHarness::new() else {" + chr(10) + "            return;" + chr(10) + "        };"
-          for name in ["warp_card_patch_writes_the_masked_bytes_and_no_others", "warp_card_fetch_copies_flagged_pieces_to_their_slots"]:
-              start = text.index("fn " + name + "()")
-              offset = text.index(a, start, start + 400)
-              text = text[:offset] + text[offset:].replace(a, 'let mut warp = WarpHarness::new().expect("native WARP is required for this verification");', 1)
-          path.write_text(text, encoding="utf-8")
-      - name: Repeat both readbacks on required WARP devices in fresh processes
-        shell: pwsh
-        run: |
-          foreach ($repeat in 1,2) {
-            cargo test --locked -p victory-gpu --lib --features diagnostics indirect::tests::warp_card -- --test-threads=1
-            if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          }
+          set -euo pipefail
+          git config user.name CI
+          git config user.email ci@localhost
+          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 395efe9b00640069e660e62da5f4f0608ea8928b
+          git merge --no-edit FETCH_HEAD
+          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git d91ab6e14e0c37bfd511339f6bc7ecf94848bf7f
+          git show FETCH_HEAD --format= | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth27.patch"
+          git apply "$RUNNER_TEMP/depth27.patch"
+          git diff --check 8187780aeba81d8741a68ee39bcc7eacee05ed76
+      - name: Recheck the original failing depth-bounds pixel test
+        run: cargo test --locked -p victory-gpu --lib pipeline::host::tests::depth_bounds_pipeline_loads_and_filters_draws -- --exact --nocapture
+      - name: Run the full serial workspace
+        run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
