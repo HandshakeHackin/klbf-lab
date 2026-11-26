@@ -1,4 +1,4 @@
-name: Verify win10-test workspace with PRs 37, 72 and 75
+name: Verify win10-test workspace with the Rust source limit
 on:
   push:
     branches: [verify-windows-beta-20261125]
@@ -20,7 +20,7 @@ jobs:
           set -euo pipefail
           git config user.name CI
           git config user.email ci@localhost
-          for sha in 3ecd80f610cf4954cc2377f328662e1fce600c0d ad121fe90d3768ab030c633d120b89f1a020af84; do
+          for sha in 5a4200b1b13f6bd15b629d8e931e0a9df4bbba43 3ecd80f610cf4954cc2377f328662e1fce600c0d ad121fe90d3768ab030c633d120b89f1a020af84; do
             git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git "$sha"
             git merge --no-edit "$sha"
           done
@@ -35,5 +35,5 @@ jobs:
           git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
           git apply "$RUNNER_TEMP/depth.patch"
           git show 06f4fcc --format= -- crates/victory-gpu/src/pipeline/host.rs | git apply -
-      - name: Run every workspace test suite
+      - name: Verify the asset policy\n        run: cargo xtask policy\n      - name: Run every workspace test suite
         run: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
