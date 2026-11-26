@@ -1,37 +1,27 @@
-name: Verify the win10-test descriptor alternative across the workspace
+name: Check PR 72 alone and run its descriptor tests with PR 37
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  workspace:
+  descriptors:
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 956410487c02014f361636cce1413c1f1c81fe39
+          ref: 54ca988330b6dcbceb3dd873afa43ef7c7674fbd
           fetch-depth: 0
           persist-credentials: false
-      - name: Integrate the current win10-test and previously verified corrections
+      - name: Compile victory-gpu at the standalone PR head
+        run: cargo check --locked -p victory-gpu --lib
+      - name: Merge the independent indirect and depth test repair
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 23db69d35bd7c55517f95e3a967ad26832ac3b9a 6b518fba3250b5e4c3afb76d14b5bda9c705ecc3
-          git -c user.name=CI -c user.email=ci@localhost merge --no-commit 23db69d35bd7c55517f95e3a967ad26832ac3b9a
-          git show 4c46f37 --format= | git apply -
-          git show 448b737 --format= | git apply -
-          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 06f4fccace3f6f6a87490afde34105b8b6a39603
-          git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
-          git apply "$RUNNER_TEMP/depth.patch"
-          git show 06f4fcc --format= -- crates/victory-gpu/src/pipeline/host.rs | git apply -
-          git diff --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy with diagnostics
-        if: success() || failure()
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Full Windows workspace tests
-        if: success() || failure()
-        run: cargo test --locked --workspace -- --test-threads=1
+          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 3ecd80f610cf4954cc2377f328662e1fce600c0d
+          git -c user.name=CI -c user.email=ci@localhost merge --no-commit FETCH_HEAD
+          test "$(git hash-object crates/victory-gpu/src/descriptor/host.rs)" = 54eb49ab5969ec4dd48b1408d6377304ae27dfd3
+      - name: Run the complete descriptor host test module
+        run: cargo test --locked -p victory-gpu --lib descriptor::host::tests:: -- --nocapture --test-threads=1
