@@ -3,6 +3,7 @@
 #   .\play.ps1                  play
 # Options: -GameDir <folder with the title's files>, -Exe <the title's exe, default: the largest .exe there>,
 #          -FfxDir <FidelityFX SDK signedbin folder>, -SeriesX (Series X mode, no FSR needed),
+#          -RenderS (with -SeriesX, report Series S ConsoleMode while retaining the Series X profile),
 #          -LowMemory (textures capped at 512 px instead of 1024: fewer freezes when the card or PC memory is full, softer textures),
 #          -SkipMovies open|end|fast (skips the opening movies),
 #          -NoAgility (skip the D3D12 Agility SDK check), -Yes (fetch it without asking).
@@ -16,7 +17,8 @@ param(
   [switch]$LowMemory,
   [string]$SkipMovies = '',
   [switch]$NoAgility,
-  [switch]$Yes
+  [switch]$Yes,
+  [switch]$RenderS
 )
 $ErrorActionPreference = 'Stop'
 $victory = Join-Path $PSScriptRoot 'target\release\victory.exe'
@@ -87,6 +89,7 @@ $set = [ordered]@{
   VICTORY_DYNAMIC_SLOTS = '786432'
   VICTORY_TEXTURE_MAX_DIM = '1024'; VICTORY_LIBRARY_LOCK = '0'
 }
+if ($RenderS) { $set['VICTORY_RENDER_S'] = '1' }
 if ($LowMemory) { $set['VICTORY_TEXTURE_MAX_DIM'] = '512' }
 if ($SkipMovies) { $set['VICTORY_SKIP_MOVIES'] = $SkipMovies }
 $console = @()
