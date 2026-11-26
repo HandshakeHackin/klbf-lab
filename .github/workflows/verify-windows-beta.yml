@@ -1,99 +1,97 @@
-name: Verify RDNA 2 defaults and win10-test workspace
+name: Verify beta-2 Radeon launcher overrides
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  workspace:
+  launcher:
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 54ca988330b6dcbceb3dd873afa43ef7c7674fbd
-          fetch-depth: 0
+          ref: 9e0db508382392414dd6cb17d1a49b153fd1ea9f
+          fetch-depth: 2
           persist-credentials: false
-      - name: Combine the published test heads
-        shell: bash
+      - name: Prepare a launcher probe outside the checkout
+        shell: pwsh
         run: |
-          set -euo pipefail
-          git config user.name CI
-          git config user.email ci@localhost
-          for sha in bfc742d4c89c88a3e0134e3ac10ae0e265839f73 3ecd80f610cf4954cc2377f328662e1fce600c0d ad121fe90d3768ab030c633d120b89f1a020af84; do
-            git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git "$sha"
-            git merge --no-edit "$sha"
-          done
-          git diff --check 23db69d35bd7c55517f95e3a967ad26832ac3b9a
-      - name: Apply the previously verified bounds and WARP-only runner changes
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 448b737fa8f4e669c3a9cede26c08a04d4cacd96
-          git show FETCH_HEAD --format= | git apply -
-          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 06f4fccace3f6f6a87490afde34105b8b6a39603
-          git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
-          git apply "$RUNNER_TEMP/depth.patch"
-          git show 06f4fcc --format= -- crates/victory-gpu/src/pipeline/host.rs | git apply -
-      - name: Verify the asset policy
-        run: cargo xtask policy
-      - name: Run every workspace test suite
-        run: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
-  rdna2:
+          $root = Join-Path $env:RUNNER_TEMP 'launcher probe'
+          New-Item -ItemType Directory -Force "$root/target/release","$root/docs/klbf" | Out-Null
+          Copy-Item docs/klbf/skip-amd.txt "$root/docs/klbf"
+          git show HEAD^:play.ps1 | Set-Content "$root/parent.ps1"
+          Copy-Item play.ps1 "$root/patched.ps1"
+          @'
+          fn main() {
+              let args: Vec<_> = std::env::args().collect();
+              let mut values = vec![args[1].clone()];
+              for k in ["AHEAD_FIRST", "CARD_FLAGGED", "PASSES_AHEAD", "RELAY", "UNRELATED_PROBE", "THIN"] {
+                  values.push(std::env::var(format!("VICTORY_{k}")).unwrap_or_else(|_| "-".into()));
+              }
+              std::fs::write(std::env::var("KLBF_RESULT").unwrap(), values.join(",")).unwrap();
+          }
+          '@ | Set-Content "$root/driver.rs"
+          rustc "$root/driver.rs" -o "$root/target/release/victory.exe"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          @'
+          $ErrorActionPreference = 'Stop'
+          $root = $PSScriptRoot
+          $env:KLBF_RESULT = Join-Path $root 'result.txt'
+          $keys = 'VICTORY_AHEAD_FIRST','VICTORY_CARD_FLAGGED','VICTORY_PASSES_AHEAD','VICTORY_RELAY'
+          foreach ($prebuild in $false,$true) {
+              $verb = if ($prebuild) { 'translate' } else { 'run' }
+              foreach ($case in 'parent','default','all','partial') {
+                  foreach ($key in $keys) { Remove-Item "Env:$key" -ErrorAction SilentlyContinue }
+                  if ($case -in 'parent','all') {
+                      $env:VICTORY_AHEAD_FIRST='0'; $env:VICTORY_CARD_FLAGGED='1'
+                      $env:VICTORY_PASSES_AHEAD='0'; $env:VICTORY_RELAY='2'
+                  } elseif ($case -eq 'partial') { $env:VICTORY_RELAY='1' }
+                  $env:VICTORY_UNRELATED_PROBE='clear me'
+                  Remove-Item $env:KLBF_RESULT -ErrorAction SilentlyContinue
+                  $script = if ($case -eq 'parent') { 'parent.ps1' } else { 'patched.ps1' }
+                  & (Join-Path $root $script) -GameDir $root -Exe fixture.exe -SeriesX -Prebuild:$prebuild
+                  $actual = Get-Content $env:KLBF_RESULT -Raw
+                  $expected = switch ($case) {
+                      all { "$verb,0,1,0,2,-,1" }
+                      partial { "$verb,-,-,-,1,-,1" }
+                      default { "$verb,-,-,-,-,-,1" }
+                  }
+                  if ($case -eq 'default' -or $case -eq 'parent') { $expected = "$verb,-,-,-,-,-,1" }
+                  if ($actual -ne $expected) { throw "$case $verb expected $expected, got $actual" }
+                  Write-Output "$case $actual"
+              }
+          }
+          '@ | Set-Content "$root/test.ps1"
+      - name: Compare parent and patched launchers in Windows PowerShell 5.1
+        shell: powershell
+        run: '& "$env:RUNNER_TEMP/launcher probe/test.ps1"'
+      - name: Compare parent and patched launchers in PowerShell 7
+        shell: pwsh
+        run: '& "$env:RUNNER_TEMP/launcher probe/test.ps1"'
+  beta2:
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 230021421223017c559b5f354c1b543db2ffbf39
+          ref: 9e0db508382392414dd6cb17d1a49b153fd1ea9f
           persist-credentials: false
-      - name: Run the adapter and override regression tests
-        run: cargo test --locked -p victory-gpu --lib --features diagnostics host::ahead::tests
-      - name: Check the launcher with unset and explicit overrides
+      - name: Run the upstream RDNA 2 classification test
+        run: cargo test --locked -p victory-gpu --lib --features diagnostics host::tests::rdna2_is_navi_2x_only -- --exact
+      - name: Build the diagnostics release for the physical retest
+        run: cargo build --locked --release -p victory --features diagnostics
+      - name: Record checksum and revision
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force target/release | Out-Null
-          @'
-          fn main() {
-              for key in ["AHEAD_FIRST", "CARD_FLAGGED", "PASSES_AHEAD", "UNRELATED_PROBE"] {
-                  print!("{} ", std::env::var(format!("VICTORY_{key}")).unwrap_or_else(|_| "unset".into()));
-              }
-          }
-          '@ | Set-Content "$env:RUNNER_TEMP/launcher_probe.rs"
-          rustc "$env:RUNNER_TEMP/launcher_probe.rs" -o target/release/victory.exe
-          if ($LASTEXITCODE) { throw "Probe compilation failed" }
-          $env:VICTORY_UNRELATED_PROBE = 'clear me'
-          $observed = & ./play.ps1 -SeriesX -GameDir $env:RUNNER_TEMP -Exe unused.exe
-          if ($observed.Trim() -ne 'unset unset unset unset') { throw "Unset settings: $observed" }
-          $env:VICTORY_AHEAD_FIRST = '1'
-          $env:VICTORY_CARD_FLAGGED = '0'
-          $env:VICTORY_PASSES_AHEAD = '1'
-          $env:VICTORY_UNRELATED_PROBE = 'clear me'
-          $observed = & ./play.ps1 -SeriesX -GameDir $env:RUNNER_TEMP -Exe unused.exe
-          if ($observed.Trim() -ne '1 0 1 unset') { throw "Explicit settings: $observed" }
-          Write-Output 'Launcher preserved all three overrides and cleared the unrelated entry.'
-      - name: Exercise the real selected WARP device in fresh processes
-        shell: pwsh
-        run: |
-          @'
-
-          #[test]
-          fn selected_warp_submission_settings() {
-              let h = super::host().expect("a WARP device");
-              let d = unsafe { h.adapter.as_ref().unwrap().GetDesc1() }.unwrap();
-              assert_ne!(d.Flags & windows::Win32::Graphics::Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32, 0);
-              let selected = settings();
-              let observed = format!("{} {} {}", selected.ahead_first, selected.card_flagged, selected.passes_ahead);
-              assert_eq!(observed, std::env::var("EXPECTED_AHEAD").unwrap());
-          }
-          '@ | Add-Content crates/victory-gpu/src/host/ahead.rs
-          $env:VICTORY_D3D12_WARP = '1'
-          $env:VICTORY_THIN = '1'
-          $env:EXPECTED_AHEAD = 'true true true'
-          cargo test --locked -p victory-gpu --lib --features diagnostics host::ahead::selected_warp_submission_settings -- --exact
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $env:VICTORY_AHEAD_FIRST = '0'
-          $env:VICTORY_PASSES_AHEAD = '0'
-          $env:EXPECTED_AHEAD = 'false true false'
-          cargo test --locked -p victory-gpu --lib --features diagnostics host::ahead::selected_warp_submission_settings -- --exact
+          $sum = (Get-FileHash target/release/victory.exe -Algorithm SHA256).Hash.ToLower()
+          "$sum  victory.exe" | Set-Content -Encoding ascii target/release/SHA256SUMS.txt
+          git rev-parse HEAD | Set-Content -Encoding ascii target/release/SOURCE.txt
+          Get-Content target/release/SHA256SUMS.txt, target/release/SOURCE.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: victory-beta2-9e0db50-windows-x64-diagnostics
+          path: |
+            target/release/victory.exe
+            target/release/SHA256SUMS.txt
+            target/release/SOURCE.txt
