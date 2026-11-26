@@ -1,0 +1,19 @@
+name: Wrapped timing records on Windows and Linux
+on:
+  push:
+    branches: [verify/pr21-powershell-records]
+permissions:
+  contents: read
+jobs:
+  timing-records:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check 41 wrap positions, encodings, boundaries and scene ranges
+        run: python tests/verify_wrapped_timing_records.py
