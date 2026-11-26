@@ -94,7 +94,7 @@ struct ResolvedAddr {
 }
 
 /// Computes per-block `(meet_before, meet_before_exit)` barrier placements for LDS regions in a
-/// `WaveSize(64)` shader lowered to 32-lane waves, or `None` if any `!all` region may have an
+/// `WaveSize(64)` shader lowered to 32-lane waves, or the reason a `!all` region may have an
 /// inter-half LDS hazard.
 pub(super) fn meetings(
     p: &Program,
@@ -103,7 +103,7 @@ pub(super) fn meetings(
     res: &Resources,
     cs: ComputeIo,
     all: &[bool],
-) -> Option<Vec<(bool, bool)>> {
+) -> Result<Vec<(bool, bool)>, &'static str> {
     let n = st.exits.len();
     let succ = |b: usize| -> Vec<usize> {
         match st.exits[b] {
@@ -226,8 +226,11 @@ pub(super) fn meetings(
         if region[r] != r {
             continue;
         }
-        if has_unknown[r] || has_barrier[r] {
-            return None;
+        if has_unknown[r] {
+            return Err("an unclassified LDS operation in a lane-branch region");
+        }
+        if has_barrier[r] {
+            return Err("an explicit barrier in a lane-branch region");
         }
         if reads[r] && writes[r] {
             // Cyclic `!all` regions lack an in-loop barrier, so Refinement A cannot prevent
@@ -235,11 +238,11 @@ pub(super) fn meetings(
             let disjoint_ok = !region_has_cycle[r] && region_disjoint_ranges(&region_accesses[r]);
             let safe = disjoint_ok || region_lane_private(&region_accesses[r], cs.threads);
             if !safe {
-                return None;
+                return Err("a mixed LDS region without a disjoint or lane-private proof");
             }
         } else if writes[r] && !has_rmw[r] {
             if has_provable_shared_waw(&region_accesses[r]) {
-                return None;
+                return Err("overlapping shared addresses in a write-only LDS region");
             }
             if region_has_cycle[r]
                 && region_accesses[r].iter().any(|a| {
@@ -248,7 +251,7 @@ pub(super) fn meetings(
                         .is_some_and(|e| e.tid == [0, 0, 0] && e.console_lane == 0)
                 })
             {
-                return None;
+                return Err("a shared address in a cyclic write-only LDS region");
             }
         }
     }
@@ -265,7 +268,7 @@ pub(super) fn meetings(
             }
         }
     }
-    Some(meet)
+    Ok(meet)
 }
 
 fn record_kind(reads: &mut bool, writes: &mut bool, has_rmw: &mut bool, kind: Kind) {
@@ -1910,7 +1913,7 @@ mod tests {
         lowered.expect("lower").wave_size.unwrap_or(64)
     }
 
-    fn run_meetings(body: &[u32], threads: [u32; 3], lds_blocks: u32) -> Option<Vec<(bool, bool)>> {
+    fn run_meetings(body: &[u32], threads: [u32; 3], lds_blocks: u32) -> Result<Vec<(bool, bool)>, &'static str> {
         let native = make_cs(body, threads, lds_blocks, 16);
         let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
         let st = structure::structure(&p).expect("structure");
@@ -2068,7 +2071,7 @@ mod tests {
         inner.extend(ds_read_b32(4, 2, 4));
         inner.extend(store_uav(4));
         let body = if_v0_lt_s0(&inner);
-        assert!(run_meetings(&body, [64, 1, 1], 1).is_some());
+        assert!(run_meetings(&body, [64, 1, 1], 1).is_ok());
         assert_eq!(lowered_wave(&body, [64, 1, 1], 1), 32);
     }
 
@@ -2079,7 +2082,7 @@ mod tests {
         inner.extend(ds_read_b32(4, 2, 4)); // [4, 8) overlaps write!
         inner.extend(store_uav(4));
         let body = if_v0_lt_s0(&inner);
-        assert!(run_meetings(&body, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&body, [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&body, [64, 1, 1], 1), 64);
     }
 
@@ -2297,6 +2300,10 @@ mod tests {
         waw.extend(ds_write_b32(2, 4, 0));
         waw.extend(store_uav(3));
         assert_eq!(lowered_wave(&if_v0_lt_s0(&waw), [64, 1, 1], 1), 64);
+        assert_eq!(
+            run_meetings(&if_v0_lt_s0(&waw), [64, 1, 1], 1).unwrap_err(),
+            "overlapping shared addresses in a write-only LDS region"
+        );
 
         // Dual write ds_write2_b32 hitting the exact same offset (off0 == off1 == 0) -> refused.
         let mut self_waw = vec![v_mov_k(2, 0), v_mov_k(3, 1), v_mov_k(4, 2)];
@@ -2370,12 +2377,12 @@ mod tests {
         let mut xchg2_shared = vec![v_mov_k(2, 0), v_mov_k(3, 1)];
         xchg2_shared.extend(ds_enc(0x2e, 0, 1, 2, 3, 3, 4));
         xchg2_shared.extend(store_uav(4));
-        assert!(run_meetings(&if_v0_lt_s0(&xchg2_shared), [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&if_v0_lt_s0(&xchg2_shared), [64, 1, 1], 1).is_err());
 
         let mut xchg2_priv = vec![v_lshlrev_k(2, 3, 0), v_mov_k(3, 1)];
         xchg2_priv.extend(ds_enc(0x2e, 0, 1, 2, 3, 3, 4));
         xchg2_priv.extend(store_uav(4));
-        assert!(run_meetings(&if_v0_lt_s0(&xchg2_priv), [64, 1, 1], 2).is_some());
+        assert!(run_meetings(&if_v0_lt_s0(&xchg2_priv), [64, 1, 1], 2).is_ok());
 
         // Divergent loop Phi inside `!all`: addr = phi(v2) incremented per loop step -> REFUSED.
         // block 1 loop: v2 += 4; ds_write_b32(v2, v3); ds_read_b32(v4, v2); v_cmp_gt vcc, s0, v2; s_cbranch_vccnz -8
@@ -2403,7 +2410,7 @@ mod tests {
         nop_body.extend(ds_enc(0x14, 0, 0, 0, 0, 0, 0)); // ds_nop
         nop_body.extend(ds_write_b32(2, 3, 0));
         nop_body.extend(store_uav(3));
-        assert!(run_meetings(&if_v0_lt_s0(&nop_body), [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&if_v0_lt_s0(&nop_body), [64, 1, 1], 1).is_err());
     }
 
     #[test]
@@ -2423,7 +2430,7 @@ mod tests {
         addc_inner.extend(ds_read_b32(4, 2, 4));
         addc_inner.extend(store_uav(4));
         addc_body.extend(if_v0_lt_s0(&addc_inner));
-        assert!(run_meetings(&addc_body, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&addc_body, [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&addc_body, [64, 1, 1], 1), 64);
 
         // 1b. s_bitset0_b32 mutating a non-uniform SGPR (reads old dst) -> MUST refuse (`64`).
@@ -2437,7 +2444,7 @@ mod tests {
         bitset_inner.extend(ds_read_b32(4, 2, 4));
         bitset_inner.extend(store_uav(4));
         bitset_body.extend(if_v0_lt_s0(&bitset_inner));
-        assert!(run_meetings(&bitset_body, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&bitset_body, [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&bitset_body, [64, 1, 1], 1), 64);
 
         // 1c. s_and_saveexec_b64 reading EXEC in `all` block -> old EXEC s2 MUST NOT be treated uniform!
@@ -2450,7 +2457,7 @@ mod tests {
         saveexec_inner.extend(ds_read_b32(4, 2, 4));
         saveexec_inner.extend(store_uav(4));
         saveexec_body.extend(if_v0_lt_s0(&saveexec_inner));
-        assert!(run_meetings(&saveexec_body, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&saveexec_body, [64, 1, 1], 1).is_err());
 
         // 2. Non-uniform s_cbranch_scc0 feeding a scalar Phi -> MUST refuse (`64`).
         let mut phi_cfg_body = vec![
@@ -2466,7 +2473,7 @@ mod tests {
         phi_inner.extend(ds_read_b32(4, 2, 4));
         phi_inner.extend(store_uav(4));
         phi_cfg_body.extend(if_v0_lt_s0(&phi_inner));
-        assert!(run_meetings(&phi_cfg_body, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&phi_cfg_body, [64, 1, 1], 1).is_err());
 
         // 3a. !all loop with constant disjoint [0, 4) write + [4, 8) read (Refinement A) -> MUST refuse (`64`)
         // because cross-iteration WAW on byte 0 has no in-loop barrier!
@@ -2487,7 +2494,7 @@ mod tests {
             0xBEFE_040C, // s_mov_b64 exec, s[12:13]
         ];
         loop_ref_a.extend(store_uav(4));
-        assert!(run_meetings(&loop_ref_a, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&loop_ref_a, [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&loop_ref_a, [64, 1, 1], 1), 64);
 
         // 3b. !all loop with Refinement B lane-private tid * 4 write+read -> ACCEPTED (`32`).
@@ -2507,7 +2514,7 @@ mod tests {
             0xBEFE_040C,
         ];
         loop_ref_b.extend(store_uav(4));
-        assert!(run_meetings(&loop_ref_b, [64, 1, 1], 1).is_some());
+        assert!(run_meetings(&loop_ref_b, [64, 1, 1], 1).is_ok());
         assert_eq!(lowered_wave(&loop_ref_b, [64, 1, 1], 1), 32);
 
         // 4. Fields::Smem mutable global MEMORY load (s_load_dword s2, s[0:1], 0) + UAV write -> MUST refuse.
@@ -2520,7 +2527,7 @@ mod tests {
         smem_inner.extend(ds_read_b32(4, 2, 4));
         smem_inner.extend(store_uav(4));
         smem_mut.extend(if_v0_lt_s0(&smem_inner));
-        assert!(run_meetings(&smem_mut, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&smem_mut, [64, 1, 1], 1).is_err());
 
         // 5. sym_shl overflow: (s1 << 16) << 16 wraps coeff to 0, and (tid << 16) << 16 wraps tid to 0 -> REFUSED.
         let mut shl_wrap_u = vec![
@@ -2531,7 +2538,7 @@ mod tests {
         shl_wrap_u.extend(ds_write_b32(2, 3, 0));
         shl_wrap_u.extend(ds_read_b32(4, 2, 0));
         shl_wrap_u.extend(store_uav(4));
-        assert!(run_meetings(&if_v0_lt_s0(&shl_wrap_u), [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&if_v0_lt_s0(&shl_wrap_u), [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&if_v0_lt_s0(&shl_wrap_u), [64, 1, 1], 1), 64);
 
         // Uniform base double shift inside !all: v2 = (s1 << 16) << 16 (wraps coeff to 0 -> looks like 0!)
@@ -2546,7 +2553,7 @@ mod tests {
         shl_wrap_coeff.extend(ds_write_b32(5, 3, 0));
         shl_wrap_coeff.extend(ds_read_b32(4, 2, 0));
         shl_wrap_coeff.extend(store_uav(4));
-        assert!(run_meetings(&if_v0_lt_s0(&shl_wrap_coeff), [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&if_v0_lt_s0(&shl_wrap_coeff), [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&if_v0_lt_s0(&shl_wrap_coeff), [64, 1, 1], 1), 64);
     }
 
@@ -2568,7 +2575,7 @@ mod tests {
         carry_priv.extend(ds_write_b32(3, 4, 0));
         carry_priv.extend(ds_read_b32(5, 3, 0));
         carry_priv.extend(store_uav(5));
-        assert!(run_meetings(&if_v0_lt_s0(&carry_priv), [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&if_v0_lt_s0(&carry_priv), [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&if_v0_lt_s0(&carry_priv), [64, 1, 1], 1), 64);
 
         // 1b. v_add_co_u32 carry-out SGPR (`s2`) from uniform inputs MUST NOT be treated uniform.
@@ -2579,7 +2586,7 @@ mod tests {
         carry_unif_inner.extend(ds_read_b32(5, 3, 4));
         carry_unif_inner.extend(store_uav(5));
         carry_unif.extend(if_v0_lt_s0(&carry_unif_inner));
-        assert!(run_meetings(&carry_unif, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&carry_unif, [64, 1, 1], 1).is_err());
 
         // 1c. Primary destination `v2` of v_add_co_u32 (`tid * 4 + 4`) remains lane-private (`32`).
         let mut primary_dst = vec![v_lshlrev_k(1, 2, 0)];
@@ -2588,7 +2595,7 @@ mod tests {
         primary_dst.extend(ds_write_b32(2, 4, 0));
         primary_dst.extend(ds_read_b32(5, 2, 0));
         primary_dst.extend(store_uav(5));
-        assert!(run_meetings(&if_v0_lt_s0(&primary_dst), [64, 1, 1], 1).is_some());
+        assert!(run_meetings(&if_v0_lt_s0(&primary_dst), [64, 1, 1], 1).is_ok());
         assert_eq!(lowered_wave(&if_v0_lt_s0(&primary_dst), [64, 1, 1], 1), 32);
 
         // 2a. Per-wave scratch_wave_offset SGPR (`rsrc2 & 1 != 0`) MUST NOT be treated as
@@ -2617,7 +2624,7 @@ mod tests {
                 unreachable!();
             };
             assert_eq!(cs.initialized_sgprs(), 7);
-            assert!(super::meetings(&p, &st, &io, &res, cs, &all).is_none());
+            assert!(super::meetings(&p, &st, &io, &res, cs, &all).is_err());
         }
         let mut tgid_native = make_cs(&scratch_body_s6, [64, 1, 1], 1, 16);
         if let StageIo::Cs(cs) = &mut tgid_native.io {
@@ -2634,7 +2641,7 @@ mod tests {
             let StageIo::Cs(cs) = tgid_native.io else {
                 unreachable!();
             };
-            assert!(super::meetings(&p, &st, &io, &res, cs, &all).is_some());
+            assert!(super::meetings(&p, &st, &io, &res, cs, &all).is_ok());
         }
 
         // 2b. Uninitialized SGPR `s14` (>= user_sgprs) MUST NOT be treated as group-uniform.
@@ -2644,7 +2651,7 @@ mod tests {
         uninit_inner.extend(ds_read_b32(4, 2, 4));
         uninit_inner.extend(store_uav(4));
         uninit_body.extend(if_v0_lt_s0(&uninit_inner));
-        assert!(run_meetings(&uninit_body, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&uninit_body, [64, 1, 1], 1).is_err());
 
         // 3a. s_barrier inside `!all` with otherwise-disjoint Refinement A LDS -> MUST refuse.
         let mut bar_disjoint = vec![v_mov_k(2, 0), v_mov_k(3, 7)];
@@ -2652,7 +2659,7 @@ mod tests {
         bar_disjoint.push(0xBF8A_0000); // s_barrier
         bar_disjoint.extend(ds_read_b32(4, 2, 4));
         bar_disjoint.extend(store_uav(4));
-        assert!(run_meetings(&if_v0_lt_s0(&bar_disjoint), [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&if_v0_lt_s0(&bar_disjoint), [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&if_v0_lt_s0(&bar_disjoint), [64, 1, 1], 1), 64);
 
         // 3b. s_barrier inside `!all` with otherwise-lane-private Refinement B LDS -> MUST refuse.
@@ -2661,7 +2668,7 @@ mod tests {
         bar_priv.push(0xBF8A_0000); // s_barrier
         bar_priv.extend(ds_read_b32(4, 2, 0));
         bar_priv.extend(store_uav(4));
-        assert!(run_meetings(&if_v0_lt_s0(&bar_priv), [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&if_v0_lt_s0(&bar_priv), [64, 1, 1], 1).is_err());
         assert_eq!(lowered_wave(&if_v0_lt_s0(&bar_priv), [64, 1, 1], 1), 64);
 
         // 4. Special non-inline SOP const (239 = POPS_EXITING_WAVE_ID) MUST NOT be group-uniform.
@@ -2674,6 +2681,6 @@ mod tests {
         pops_inner.extend(ds_read_b32(4, 2, 4));
         pops_inner.extend(store_uav(4));
         pops_body.extend(if_v0_lt_s0(&pops_inner));
-        assert!(run_meetings(&pops_body, [64, 1, 1], 1).is_none());
+        assert!(run_meetings(&pops_body, [64, 1, 1], 1).is_err());
     }
 }

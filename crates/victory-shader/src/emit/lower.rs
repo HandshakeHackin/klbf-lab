@@ -835,21 +835,6 @@ fn meeting_mode() -> u32 {
     if super::group_sync() == 0 { 8 } else { 1 | 8 }
 }
 
-/// LDS accesses of a console wave run as two host waves, where some sit in blocks that only
-/// some lanes run (`all` is [`all_lane_blocks`]): per IR block, whether the host waves meet (a
-/// group barrier) at its start and before its exit (`None` if barriers cannot keep order).
-/// Delegates to [`super::lds::meetings`] for hazard/disjointness/lane-privacy proof.
-fn lds_meetings(
-    p: &crate::ir::Program,
-    st: &Structured,
-    io: &crate::io::Io,
-    res: &crate::resource::Resources,
-    cs: crate::native::ComputeIo,
-    all: &[bool],
-) -> Option<Vec<(bool, bool)>> {
-    super::lds::meetings(p, st, io, res, cs, all)
-}
-
 /// Masks held as numbers or constant lane sets in guards or lane branches: the lane tests its
 /// own bit by its console lane.
 fn lane_constant_masks(st: &Structured) -> bool {
@@ -1347,6 +1332,7 @@ impl<'a> Lower<'a> {
                         || reads_mask_as_data(x.st, i)
                 }) || lane_constant_masks(x.st)
                     || !x.st.wide.is_empty();
+                let mut lds_refusal = None;
                 if !crosses && (s.lds_dwords == 0 || group <= 32) {
                     wave = 32;
                 } else {
@@ -1367,9 +1353,14 @@ impl<'a> Lower<'a> {
                             })
                         });
                         let mut lds_ok = !(s.lds_dwords > 0 && group > 32) || ok;
-                        if !lds_ok && let Some(meet) = lds_meetings(p, x.st, x.io, x.res, cs, &all) {
-                            lds_meet = Some((all.clone(), meet));
-                            lds_ok = true;
+                        if !lds_ok {
+                            match super::lds::meetings(p, x.st, x.io, x.res, cs, &all) {
+                                Ok(meet) => {
+                                    lds_meet = Some((all.clone(), meet));
+                                    lds_ok = true;
+                                }
+                                Err(reason) => lds_refusal = Some(reason),
+                            }
                         }
                         if !lds_ok {
                             // (the blocks whose LDS accesses not every lane runs: with the
@@ -1390,6 +1381,8 @@ impl<'a> Lower<'a> {
                                 s.lds_dwords += 2 * group.div_ceil(64);
                             }
                         }
+                    } else {
+                        lds_refusal = Some("an indirect exit");
                     }
                 }
                 // `VICTORY_WAVE_WHY=1`: why a program keeps 64-lane waves (one line per reason)
@@ -1419,12 +1412,8 @@ impl<'a> Lower<'a> {
                     }
                     if s.lds_dwords > 0 && group > 32 {
                         why.push("LDS in a group over 32");
-                        match all_lane_blocks(x.st) {
-                            None => why.push("an indirect exit"),
-                            Some(all) if lds_meetings(p, x.st, x.io, x.res, cs, &all).is_none() => {
-                                why.push("an LDS read and write in one lane-branch region")
-                            }
-                            Some(_) => {}
+                        if let Some(reason) = lds_refusal {
+                            why.push(reason);
                         }
                     }
                     why.sort_unstable();
