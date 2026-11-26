@@ -1,60 +1,54 @@
-name: Run the write-watch regression test under Wine
+name: Check ReBAR fallback on the native Windows software adapter
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  build:
+  warp:
     runs-on: windows-latest
     timeout-minutes: 25
+    env:
+      VICTORY_D3D12_WARP: '1'
+      VICTORY_REBAR: '2'
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 6f55eae05c4900b656ff5e723c7d685a3172ef3a
+          repository: PastiiJay/klbf-lab
+          ref: d29505a1d5a3eef400b75cc081d88b51bf6a5688
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Build the PR's Windows test executable
+      - name: Distinguish a live round trip from an unsupported-device fallback
         shell: python
         run: |
           from pathlib import Path
-          import json, shutil, subprocess
-          command = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "--no-run", "--message-format=json"]
-          result = subprocess.run(command, capture_output=True, text=True)
-          print(result.stderr)
+          import subprocess
+          path = Path("crates/victory-gpu/src/shadow.rs")
+          source = path.read_text(encoding="utf-8")
+          begin = source.index("fn rebar_wc_write_read_compare_roundtrip()")
+          stop = source.index("        let pattern:", begin)
+          original = source[begin:stop]
+          assert "if !rebar::supported()" in original and "rebar::gpu_upload_buffer(h, LEN as u64)" in original
+          probe = """
+              fn rebar_wc_write_read_compare_roundtrip() {
+                  let h = host().expect("a live software adapter is required");
+                  const LEN: usize = 256 << 10;
+                  assert_eq!(rebar::level(), 2);
+                  if !rebar::supported() {
+                      assert!(rebar::reserve(rebar::Kind::Window, LEN as u64, false).is_none());
+                      assert!(rebar::reserve(rebar::Kind::Buffer, LEN as u64, false).is_none());
+                      println!("WARP: GPU upload unsupported; window and buffer reservations both declined");
+                      return;
+                  }
+                  let (buffer, ptr) = rebar::gpu_upload_buffer(h, LEN as u64)
+                      .expect("the supported adapter must complete its upload allocation");
+                  println!("WARP: GPU upload supported; executing 256 KiB round trip");
+          """
+          path.write_text(source[:begin] + probe + source[stop:], encoding="utf-8")
+          test = "shadow::rebar_tests::rebar_wc_write_read_compare_roundtrip"
+          cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "--features", "diagnostics", test, "--", "--exact", "--nocapture"]
+          result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+          print(result.stdout)
           result.check_returncode()
-          messages = [json.loads(line) for line in result.stdout.splitlines()]
-          binaries = [m["executable"] for m in messages if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "victory_gpu" and m["profile"]["test"]]
-          assert len(binaries) == 1, binaries
-          shutil.copy2(binaries[0], "watch-test.exe")
-      - uses: actions/upload-artifact@v4
-        with:
-          name: write-watch-test
-          path: watch-test.exe
-          retention-days: 1
-  wine:
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    env:
-      WINEARCH: win64
-      WINEDEBUG: -all,err+module
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: write-watch-test
-      - name: Install the distribution's 64-bit Wine
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends wine64 xvfb xauth
-          /usr/lib/wine/wine64 --version
-      - name: Run the unchanged test, then the watch group
-        shell: bash
-        run: |
-          set -euo pipefail
-          test=watch::tests::written_pages_are_reported_to_every_asker
-          xvfb-run -a /usr/lib/wine/wine64 ./watch-test.exe "$test" --exact --test-threads=1 | tee /tmp/watch-focus.log
-          grep -F "$test ... ok" /tmp/watch-focus.log
-          xvfb-run -a /usr/lib/wine/wine64 ./watch-test.exe 'watch::tests::' --test-threads=1 | tee /tmp/watch-group.log
-          grep -F '11 passed; 0 failed' /tmp/watch-group.log
+          assert "WARP: GPU upload" in result.stdout and "1 passed; 0 failed" in result.stdout
