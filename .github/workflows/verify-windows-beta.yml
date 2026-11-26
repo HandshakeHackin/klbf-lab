@@ -1,109 +1,110 @@
-name: Verify positive control for app-local D3D12Core module reporting
+name: Verify PR 23 staging residency and pending texture bytes
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  modules:
+  residency:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
-      - name: Build a system probe and an SDK 620 probe
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: cbeed1e65e2bbb468e5bd9cfd932f44963d498a5
+          persist-credentials: false
+      - name: Check residency, pending bytes, recreation and drop on WARP
+        env:
+          VICTORY_D3D12_WARP: '1'
         shell: pwsh
         run: |
           @'
-          cmake_minimum_required(VERSION 3.20)
-          project(agility_module_check LANGUAGES CXX)
-          add_executable(system_probe probe.cpp)
-          add_executable(sdk620_probe probe.cpp)
-          target_compile_definitions(sdk620_probe PRIVATE APP_LOCAL)
-          target_link_libraries(system_probe PRIVATE d3d12 dxgi)
-          target_link_libraries(sdk620_probe PRIVATE d3d12 dxgi)
-          '@ | Set-Content CMakeLists.txt
-          @'
-          #include <d3d12.h>
-          #include <dxgi1_4.h>
-          #include <wrl/client.h>
-          #include <iostream>
-          using Microsoft::WRL::ComPtr;
-          #ifdef APP_LOCAL
-          extern "C" {
-          __declspec(dllexport) extern const UINT D3D12SDKVersion = 620;
-          __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
-          }
-          #endif
-          int main() {
-              // The parent samples the process both before and after device creation.
-              std::cout << "START" << std::endl;
-              if (std::cin.get() == EOF) return 1;
-              ComPtr<IDXGIFactory4> factory;
-              ComPtr<IDXGIAdapter> adapter;
-              ComPtr<ID3D12Device> device;
-              if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 2;
-              if (FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)))) return 3;
-              if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)))) return 4;
-              std::cout << "READY" << std::endl;
-              std::cin.get();
-          }
-          '@ | Set-Content probe.cpp
-          cmake -S . -B build -A x64
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cmake --build build --config Release
-      - name: Stage the official x64 SDK 620 core by verified digest
-        shell: python
-        run: |
-          import hashlib, io, urllib.request, zipfile
-          from pathlib import Path
-          u = "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.620.2/microsoft.direct3d.d3d12.1.620.2.nupkg"
-          with urllib.request.urlopen(u, timeout=60) as source:
-              package = source.read()
-          assert hashlib.sha512(package).hexdigest() == "d683ff7f5726906c3f43d299f6cdd4b1cad22f8329ccd27b3492d0a1413d9904102b8d543419bec3b3545c86bf49f6a500ebf42d95c999aa0969e5d693032735"
-          destination = Path("build/Release/D3D12")
-          destination.mkdir()
-          with zipfile.ZipFile(io.BytesIO(package)) as z:
-              (destination / "D3D12Core.dll").write_bytes(z.read("build/native/bin/x64/D3D12Core.dll"))
-      - name: Identify loaded modules while both WARP devices are alive
-        shell: pwsh
-        run: |
-          @'
-          function Get-CoreReport($process) {
-              $process.Refresh()
-              $exeFolder = Split-Path -LiteralPath $process.Path
-              $expected = Join-Path $exeFolder 'D3D12\D3D12Core.dll'
-              $systemCore = Join-Path ([Environment]::SystemDirectory) 'D3D12Core.dll'
-              foreach ($module in $process.Modules) {
-                  if ($module.ModuleName -ine 'D3D12Core.dll') { continue }
-                  $source = if ($module.FileName -ieq $expected) { 'app-local' }
-                            elseif ($module.FileName -ieq $systemCore) { 'Windows system' }
-                            else { 'other location' }
-                  [pscustomobject]@{ PID=$process.Id; Source=$source; Version=$module.FileVersionInfo.FileVersion }
+
+          #[cfg(all(test, feature = "diagnostics"))]
+          mod staging_residency_review {
+              use super::*;
+              use std::sync::atomic::Ordering::Relaxed;
+              use victory_formats::texture::{Desc, Dimension, Layout, Swizzle};
+
+              const BYTES: u64 = 256;
+
+              fn sample(changed: u64, waiting: u64) -> Arc<Staging> {
+                  let layout = Layout::new(&Desc {
+                      dimension: Dimension::Tex2d, width: 1, height: 1, depth: 1,
+                      mips: 1, element_bytes: 4, block: 1, samples: 1, swizzle: Swizzle::LINEAR,
+                  }).unwrap();
+                  STAGED[0].fetch_add(1, Relaxed);
+                  STAGED[1].fetch_add(BYTES, Relaxed);
+                  let s = Arc::new(Staging {
+                      mem: Mutex::new(None), size: BYTES, changed: changed.into(),
+                      footprints: vec![], rows: vec![], layout, mips: 1, bytes: BYTES,
+                      memory: std::ptr::null(), last: Mutex::default(), dirty: false.into(),
+                      uploaded: true.into(), used: crate::host::moment().into(), on_demand: true,
+                      detiled: 1.into(), judged: Default::default(), waiting: waiting.into(),
+                  });
+                  let (_, mapped) = s.buffer().expect("a mapped WARP upload buffer");
+                  // SAFETY: this fixture exclusively owns this live 256-byte mapping.
+                  unsafe { (mapped as *mut u8).write_bytes(0x75, BYTES as usize) };
+                  s
+              }
+
+              #[test]
+              fn sweep_preserves_pending_bytes_and_counts_live_buffers_through_recreation() {
+                  host().expect("WARP host");
+                  let changed = crate::host::moment();
+                  for _ in 0..32 {
+                      crate::frame::wait(std::ptr::null(), 0, 0, std::ptr::null(), 2, std::ptr::null_mut());
+                  }
+                  std::thread::sleep(std::time::Duration::from_millis(2150));
+                  assert!(crate::host::long_ago(changed, UNCHANGED_MS, UNCHANGED_FRAMES));
+                  let base = memory();
+                  let settled = sample(changed, 0);
+                  let pending = sample(changed, changed.max(1));
+                  {
+                      let mut table = STAGING.lock().unwrap();
+                      let map = table.get_or_insert_with(HashMap::new);
+                      assert!(map.insert(1, settled).is_none());
+                      assert!(map.insert(2, pending).is_none());
+                  }
+                  let before = memory();
+                  assert_eq!(before, [base[0]+2, base[1]+2*BYTES, base[2]+2, base[3]+2, base[4]+2*BYTES]);
+                  let start = lightened();
+                  let keep = staging_keep();
+                  let released = u64::from(!keep);
+                  let_go_idle();
+                  let after = memory();
+                  assert_eq!(&before[..3], &after[..3]);
+                  assert_eq!(after[3], before[3]-released);
+                  assert_eq!(after[4], before[4]-released*BYTES);
+                  let_go_idle();
+                  assert_eq!(memory(), after, "second sweep must preserve the counts");
+                  let (settled, pending) = {
+                      let mut table = STAGING.lock().unwrap();
+                      let map = table.as_mut().unwrap();
+                      (map.remove(&1).unwrap(), map.remove(&2).unwrap())
+                  };
+                  assert_eq!(settled.mem.lock().unwrap().is_some(), keep);
+                  assert!(pending.mem.lock().unwrap().is_some());
+                  let (_, data) = pending.buffer().unwrap();
+                  // SAFETY: pending still owns the live allocation and it has no GPU writers.
+                  let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, BYTES as usize) };
+                  assert!(bytes.iter().all(|&byte| byte == 0x75));
+                  settled.buffer().expect("settled buffer available on demand");
+                  settled.buffer().expect("second lookup reuses the resident allocation");
+                  let recreated = memory();
+                  assert_eq!(&recreated[3..], &before[3..]);
+                  let finish = lightened();
+                  assert_eq!(finish, [start[0]+released,start[1]+released*BYTES,start[2]+released,start[3]+released*BYTES]);
+                  drop((pending, settled));
+                  assert_eq!(memory(), base, "all record and resident counts must return to baseline");
+                  eprintln!("keep={keep} resident bytes {} -> {} -> {} -> {}; pending contents matched all {BYTES} bytes",
+                      before[4]-base[4], after[4]-base[4], recreated[4]-base[4], memory()[4]-base[4]);
               }
           }
-          '@ | Set-Content core-report.ps1
-          $ErrorActionPreference = 'Stop'
-          . ./core-report.ps1
-          foreach ($exe in 'system_probe','sdk620_probe') {
-              $si = [Diagnostics.ProcessStartInfo]::new((Resolve-Path "./build/Release/$exe.exe").Path)
-              $si.UseShellExecute = $false
-              $si.RedirectStandardInput = $true
-              $si.RedirectStandardOutput = $true
-              $child = [Diagnostics.Process]::Start($si)
-              try {
-                  if ($child.StandardOutput.ReadLine() -ne 'START') { throw 'Probe did not start' }
-                  $before = @(Get-CoreReport $child)
-                  Write-Host "$exe before D3D12CreateDevice, observed modules: $($before.Count)"
-                  $child.StandardInput.WriteLine()
-                  if ($child.StandardOutput.ReadLine() -ne 'READY') { throw 'Failed to create WARP device' }
-                  $loaded = @(Get-CoreReport $child)
-                  if ($loaded.Count -eq 0) { throw 'No D3D12Core module visible after device creation' }
-                  $loaded | Format-Table
-                  if ($exe -eq 'system_probe' -and $loaded.Source -notcontains 'Windows system') { throw 'System baseline did not find the system runtime' }
-                  if ($exe -eq 'sdk620_probe' -and $loaded.Source -notcontains 'app-local') { throw 'Positive control did not load the packaged runtime' }
-                  $child.StandardInput.WriteLine()
-                  if (!$child.WaitForExit(10000) -or $child.ExitCode -ne 0) { throw 'Child did not finish successfully' }
-              } finally {
-                  if (!$child.HasExited) { $child.Kill() }
-                  $child.Dispose()
-              }
+          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/texture.rs
+          foreach ($keep in '0','1') {
+              $env:VICTORY_STAGING_KEEP = $keep
+              cargo test --locked -p victory-gpu --features diagnostics --lib sweep_preserves_pending_bytes_and_counts_live_buffers_through_recreation -- --nocapture
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
