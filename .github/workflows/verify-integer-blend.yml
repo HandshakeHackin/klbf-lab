@@ -1,0 +1,23 @@
+name: Compare shared and independent blending on WARP
+on:
+  push:
+    branches: [verify/issue-55-integer-blend]
+permissions:
+  contents: read
+jobs:
+  blend:
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Create six D3D12 pipelines with an integer render target
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64
+          if errorlevel 1 exit /b 1
+          cl /nologo /EHsc /std:c++17 tests\warp_integer_blend.cpp /Fe:warp_integer_blend.exe d3d12.lib dxgi.lib d3dcompiler.lib
+          if errorlevel 1 exit /b 1
+          warp_integer_blend.exe
