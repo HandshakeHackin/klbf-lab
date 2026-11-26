@@ -1757,6 +1757,7 @@ fn halves_go_through_a_table_as_they_are_and_name_their_views() {
     let res =
         resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
     let io = io::raise(&p, &native).expect("io::raise");
+    let previous = lower::TEST_HALF_VIEWS.replace(Some(true));
     let lowered = lower::lower(&lower::Parts {
         native: &native,
         p: &p,
@@ -1769,6 +1770,7 @@ fn halves_go_through_a_table_as_they_are_and_name_their_views() {
         mesh_stride: 0,
     })
     .expect("lower");
+    lower::TEST_HALF_VIEWS.set(previous);
     assert_eq!(lowered.half_views, [(1, 0), (1, 8)]);
     let shader = HostShader {
         stage: HwStage::Cs,
@@ -1945,6 +1947,7 @@ fn half_places_are_the_descriptors_the_program_loads() {
     fixed.extend_from_slice(&mubuf_idxen(LOAD_D16_XYZW, 1, 0, 8));
     fixed.extend_from_slice(&mubuf_idxen(STORE_D16_XYZW, 1, 0, 12));
     fixed.push(S_ENDPGM);
+    let previous = lower::TEST_HALF_VIEWS.replace(Some(true));
     assert_eq!(lowered(&fixed).half_views, [(1, 8), (1, 16)]);
     // The load's offset in s20, from the first lane's thread index
     // (`v_readfirstlane_b32 s20, v0`): picked at run time. The pick may land
@@ -1957,6 +1960,7 @@ fn half_places_are_the_descriptors_the_program_loads() {
     runtime.extend_from_slice(&mubuf_idxen(STORE_D16_XYZW, 1, 0, 12));
     runtime.push(S_ENDPGM);
     assert!(lowered(&runtime).half_views.is_empty());
+    lower::TEST_HALF_VIEWS.set(previous);
 }
 
 /// A format load of whole dwords (`buffer_load_format_x`, not d16) whose
@@ -2064,6 +2068,7 @@ fn a_format_load_read_as_halves_loads_the_integer() {
     // v1 = first[v0] (one channel).
     let load = mubuf_idxen(LOAD_FORMAT_X, 1, 0, 8);
     let half = vop1(V_CVT_F32_F16, 2, vgpr(1));
+    let previous = lower::TEST_HALF_VIEWS.replace(Some(true));
     let as_halves = lowered(&[&load[..], &[half]].concat());
     assert_eq!(as_halves.half_views, [(1, 0)]);
     let as_float = lowered(&[&load[..], &[vop2(V_ADD_F32, 2, vgpr(1), 1)]].concat());
@@ -2105,10 +2110,10 @@ fn a_format_load_read_as_halves_loads_the_integer() {
     let d16_alone = lowered(&[&d16[..], &[half]].concat());
     assert_eq!(d16_alone.half_views, [(1, 0)]);
     // Disabling half views retains the original float path for both kinds.
-    let previous = super::lower::TEST_HALF_VIEWS.replace(Some(false));
+    lower::TEST_HALF_VIEWS.set(Some(false));
     assert!(lowered(&[&load[..], &[half]].concat()).half_views.is_empty());
     assert!(lowered(&[&d16[..], &[half]].concat()).half_views.is_empty());
-    super::lower::TEST_HALF_VIEWS.set(previous);
+    lower::TEST_HALF_VIEWS.set(Some(true));
     // ...and not beside a whole float read through the same place, which
     // would see the unsigned twin: v2 = half(d16 v1) + v3.
     let mut d16_beside = d16.to_vec();
@@ -2116,6 +2121,7 @@ fn a_format_load_read_as_halves_loads_the_integer() {
     d16_beside.push(half);
     d16_beside.push(vop2(V_ADD_F32, 2, vgpr(3), 2));
     assert!(lowered(&d16_beside).half_views.is_empty());
+    lower::TEST_HALF_VIEWS.set(previous);
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         for shader in [&as_halves, &branched, &d16_alone] {
             let mut dxil = shader.dxil.clone();
