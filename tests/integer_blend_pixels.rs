@@ -1,6 +1,6 @@
 #[test]
-fn corrected_integer_targets_render_the_expected_pixels() {
-    use windows::core::s;
+fn corrected_integer_targets_render_mesh_and_graphics_pixels() {
+    use windows::core::{s, Interface};
     let host = host().expect("native WARP device required");
     let (root, root_blob) = root_signature(&host.device, &[], &[], false).unwrap();
     let vs = crate::host::compile(VS, s!("main"), s!("vs_5_0")).unwrap();
@@ -9,12 +9,22 @@ fn corrected_integer_targets_render_the_expected_pixels() {
     let ps = crate::host::compile(outputs, s!("main"), s!("ps_5_0")).unwrap();
     let mesh_supported = host.mesh_shaders();
     eprintln!("WARP mesh shaders = {mesh_supported}, depth bounds = {}", host.depth_bounds());
-    let mesh_code = if mesh_supported {
+    assert!(mesh_supported, "this check requires a WARP version that supports mesh shaders");
+    let fullscreen_mesh = r#"struct V { float4 p : SV_Position; };
+        [outputtopology("triangle")] [numthreads(1,1,1)]
+        void main(out vertices V v[3], out indices uint3 triangles[1]) {
+            SetMeshOutputCounts(3,1);
+            v[0].p=float4(-1,-1,0.5,1);
+            v[1].p=float4(3,-1,0.5,1);
+            v[2].p=float4(-1,3,0.5,1);
+            triangles[0]=uint3(0,1,2);
+        }"#;
+    let mesh_code = {
         let dir = tempfile::tempdir().unwrap();
         let dxc = dxc().expect("PC DXC needed to verify the supported mesh path");
-        Some((compile(&dxc, dir.path(), MS, "ms_6_5"), compile(&dxc, dir.path(), outputs, "ps_6_5")))
-    } else { None };
-    for independent in [false, true] {
+        (compile(&dxc, dir.path(), fullscreen_mesh, "ms_6_5"), compile(&dxc, dir.path(), outputs, "ps_6_5"))
+    };
+    for (independent, mesh) in [(false, false), (false, true), (true, false), (true, true)] {
         let mut g = mixed_blend_state();
         g.depth.DepthEnable = false.into();
         g.rasterizer.CullMode = D3D12_CULL_MODE_NONE;
@@ -24,13 +34,6 @@ fn corrected_integer_targets_render_the_expected_pixels() {
             g.blend.RenderTarget[1].RenderTargetWriteMask = 2;
         }
         let blend = g.host_blend();
-        if let Some((ms, mesh_ps)) = &mesh_code {
-            let state = g.describe_with_blend(&blend);
-            let name = super::super::library::name("integer MRT mesh test", &root_blob, &[ms, mesh_ps], &state);
-            mesh_pipeline(&host.device, &root, [code(ms), code(mesh_ps)], &g, blend, false, &name)
-                .expect("mesh pipeline with writable R8_UINT");
-            eprintln!("mixed-target mesh PSO created for independent = {independent}");
-        }
         let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
             pRootSignature: unsafe { std::mem::transmute_copy(&root) },
             VS: code(&vs), PS: code(&ps), BlendState: blend,
@@ -39,7 +42,14 @@ fn corrected_integer_targets_render_the_expected_pixels() {
             NumRenderTargets: 3, RTVFormats: g.targets.RTFormats, SampleDesc: g.samples,
             ..Default::default()
         };
-        let pso: ID3D12PipelineState = unsafe { host.device.CreateGraphicsPipelineState(&desc) }.unwrap();
+        let pso: ID3D12PipelineState = if mesh {
+            let (ms, mesh_ps) = &mesh_code;
+            let state = g.describe_with_blend(&blend);
+            let name = super::super::library::name("integer mesh draw", &root_blob, &[ms, mesh_ps], &state);
+            mesh_pipeline(&host.device, &root, [code(ms), code(mesh_ps)], &g, blend, false, &name).unwrap()
+        } else {
+            unsafe { host.device.CreateGraphicsPipelineState(&desc) }.unwrap()
+        };
         let get_resource = |heap_type, rd, state| -> ID3D12Resource {
             let heap = D3D12_HEAP_PROPERTIES { Type: heap_type, ..Default::default() };
             let mut out = None;
@@ -67,8 +77,13 @@ fn corrected_integer_targets_render_the_expected_pixels() {
             list.list.RSSetScissorRects(&[windows::Win32::Foundation::RECT { left:0, top:0, right:4, bottom:4 }]);
             list.list.SetGraphicsRootSignature(&root);
             list.list.SetPipelineState(&pso);
-            list.list.IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            list.list.DrawInstanced(3, 1, 0, 0);
+            if mesh {
+                let list6: ID3D12GraphicsCommandList6 = list.list.cast().unwrap();
+                list6.DispatchMesh(1,1,1);
+            } else {
+                list.list.IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                list.list.DrawInstanced(3,1,0,0);
+            }
             for (slot, texture) in textures.iter().enumerate() {
                 list.list.ResourceBarrier(&[crate::host::transition(texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                 let src = D3D12_TEXTURE_COPY_LOCATION {
@@ -90,7 +105,7 @@ fn corrected_integer_targets_render_the_expected_pixels() {
         let mut ptr = std::ptr::null_mut();
         unsafe { readback.Map(0,None,Some(&mut ptr)) }.unwrap();
         let pixels = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(),3072) };
-        eprintln!("independent = {independent}: RT0 {:?}; RT1 {:?}; R8_UINT RT2 {}", &pixels[..4], &pixels[1024..1028], pixels[2048]);
+        eprintln!("mesh = {mesh}, independent = {independent}: RT0 {:?}; RT1 {:?}; R8_UINT RT2 {}", &pixels[..4], &pixels[1024..1028], pixels[2048]);
         for y in 0..4 {
             for x in 0..4 {
                 let i=y*256+x*4;

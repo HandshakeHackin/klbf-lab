@@ -1,7 +1,7 @@
-name: Read back all three mixed render targets
+name: Draw mixed targets through the mesh and graphics paths
 on:
   push:
-    branches: [verify/issue-55-rendered-pixels]
+    branches: [verify/issue-55-mesh-draw]
 permissions:
   contents: read
 jobs:
@@ -24,4 +24,4 @@ jobs:
       - name: Draw and compare all 16 pixels in every target for both blend modes
         env:
           VICTORY_D3D12_WARP: '1'
-        run: cargo test --locked -p victory-gpu --features diagnostics --lib corrected_integer_targets_render_the_expected_pixels -- --nocapture
+        run: cargo test --locked -p victory-gpu --features diagnostics --lib corrected_integer_targets_render_mesh_and_graphics_pixels -- --nocapture
