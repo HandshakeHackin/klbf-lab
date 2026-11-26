@@ -37,7 +37,7 @@ bands = [(18, 1e9, '18+'), (15, 18, '15-18'), (12, 15, '12-15'), (9, 12, '9-12')
 spread = {name: round(100 * sum(lo <= x < hi for x in v) / n) for lo, hi, name in bands}
 digest = hashlib.sha256(open(a.log, 'rb').read()).hexdigest()[:16]
 r = {'method': 'KLBF Lab shared measurement (docs/klbf/MEASUREMENT.md)', 'build': a.build, 'gpu': a.gpu, 'cpu': a.cpu,
-     'minutes': round((t[-1] - t[0]).total_seconds() / 60, 1) if len(t) > 1 else 0, 'average': round(sum(v) / n, 1), 'median': median(s), 'low_5pct': low(5), 'low_1pct': low(1),
+     'minutes': round((t[-1] - t[0]).total_seconds() / 60, 1) if len(t) > 1 else 0, 'average': round(sum(v) / n, 1), 'median': round(median(s), 2), 'low_5pct': low(5), 'low_1pct': low(1),
      'peak': s[-1], 'stability_index_pct': spread, 'samples': n,
      'from_utc': t[0].isoformat() if t else '', 'to_utc': t[-1].isoformat() if t else '', 'log_sha256_16': digest, 'consistency': 'ok' if bad == 0 else f'{bad} lines do not add up'}
 print(f"Average performance index: average {r['average']} fps, median {r['median']}, 5 % low {r['low_5pct']}, 1 % low {r['low_1pct']} ({n} samples, {r['minutes']} min)")

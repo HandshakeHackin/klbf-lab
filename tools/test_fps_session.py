@@ -12,6 +12,7 @@ class SessionReportTests(unittest.TestCase):
     def test_reported_statistics(self):
         cases = [
             ([10, 20], 15, 50),
+            ([2.6, 2.7], 2.65, 0),
             ([12, 15, 18], 15, 100),
             ([11, 12, 15, 18, 11, 11], 11.5, 50),
             ([9], 9, 0),
