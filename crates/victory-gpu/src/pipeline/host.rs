@@ -182,18 +182,18 @@ impl GraphicsState {
 
     /// Active render targets and their effective blend settings for a refused PSO.
     /// With independent blending off, every active target uses slot zero.
-    fn target_blends(&self) -> String {
+    fn target_blends(&self, descriptor: &D3D12_BLEND_DESC) -> String {
         let mut targets = Vec::new();
         for (slot, format) in self.targets.RTFormats.iter()
             .take(self.targets.NumRenderTargets as usize)
             .enumerate()
         {
-            let source = if self.blend.IndependentBlendEnable.as_bool() {
+            let source = if descriptor.IndependentBlendEnable.as_bool() {
                 slot
             } else {
                 0
             };
-            let blend = &self.blend.RenderTarget[source];
+            let blend = &descriptor.RenderTarget[source];
             targets.push(format!(
                 "RT{slot}: format={} blend={} write_mask={:#x}",
                 format.0, blend.BlendEnable.as_bool(), blend.RenderTargetWriteMask,
@@ -205,6 +205,10 @@ impl GraphicsState {
     /// Everything the state holds, as text: part of a pipeline's name in
     /// the library and of the key a title pipeline is started early by.
     pub(crate) fn describe(&self) -> String {
+        self.describe_with_blend(&self.blend)
+    }
+
+    fn describe_with_blend(&self, blend: &D3D12_BLEND_DESC) -> String {
         let inputs: Vec<String> = self
             .inputs
             .iter()
@@ -218,7 +222,7 @@ impl GraphicsState {
             .collect();
         format!(
             "{:?} {} {:?} {:?} {inputs:?} {} {} {:?} {} {:?}",
-            self.blend,
+            blend,
             self.sample_mask,
             self.rasterizer,
             self.depth,
@@ -228,6 +232,44 @@ impl GraphicsState {
             self.depth_format.0,
             self.samples
         )
+    }
+
+    /// D3D12 refuses blending on writable integer color targets. A title
+    /// can give a mixed set of targets the same blend state through slot 0.
+    fn host_blend(&self) -> D3D12_BLEND_DESC {
+        let mut blend = self.blend;
+        let targets = self.targets.NumRenderTargets as usize;
+        for (slot, &format) in self.targets.RTFormats.iter().take(targets).enumerate() {
+            let source = if blend.IndependentBlendEnable.as_bool() { slot } else { 0 };
+            let target = blend.RenderTarget[source];
+            if !target.BlendEnable.as_bool() || target.RenderTargetWriteMask == 0 {
+                continue;
+            }
+            if !matches!(
+                format,
+                DXGI_FORMAT_R8_UINT | DXGI_FORMAT_R8_SINT
+                    | DXGI_FORMAT_R8G8_UINT | DXGI_FORMAT_R8G8_SINT
+                    | DXGI_FORMAT_R8G8B8A8_UINT | DXGI_FORMAT_R8G8B8A8_SINT
+                    | DXGI_FORMAT_R10G10B10A2_UINT
+                    | DXGI_FORMAT_R16_UINT | DXGI_FORMAT_R16_SINT
+                    | DXGI_FORMAT_R16G16_UINT | DXGI_FORMAT_R16G16_SINT
+                    | DXGI_FORMAT_R16G16B16A16_UINT | DXGI_FORMAT_R16G16B16A16_SINT
+                    | DXGI_FORMAT_R32_UINT | DXGI_FORMAT_R32_SINT
+                    | DXGI_FORMAT_R32G32_UINT | DXGI_FORMAT_R32G32_SINT
+                    | DXGI_FORMAT_R32G32B32_UINT | DXGI_FORMAT_R32G32B32_SINT
+                    | DXGI_FORMAT_R32G32B32A32_UINT | DXGI_FORMAT_R32G32B32A32_SINT
+            ) {
+                continue;
+            }
+            if !blend.IndependentBlendEnable.as_bool() && targets > 1 {
+                // The other slots were ignored. Give each the complete
+                // effective state before changing this slot independently.
+                blend.RenderTarget.fill(target);
+                blend.IndependentBlendEnable = true.into();
+            }
+            blend.RenderTarget[slot].BlendEnable = false.into();
+        }
+        blend
     }
 
     /// The vertex buffer slots the input layout reads.
@@ -567,7 +609,11 @@ impl HostPipeline {
         let Some(g) = g else {
             return refuse("graphics state not kept (plain description)", shaders);
         };
-        let state = g.describe();
+        let blend = g.host_blend();
+        let state = g.describe_with_blend(&blend);
+        if blend != g.blend {
+            tracing::debug!(?shaders, captured = %g.target_blends(&g.blend), host = %g.target_blends(&blend), "integer target blend adjusted");
+        }
         if mesh.is_some() {
             // "triangles": the stream names its topology since it did not
             // load from the library without one (see `mesh_pipeline`); a
@@ -579,12 +625,12 @@ impl HostPipeline {
                 &[&code_bytes(&code(0)), &code_bytes(&code(1))],
                 &state,
             );
-            let pso = match mesh_pipeline(&host.device, &root, code(0), code(1), g, &name) {
+            let pso = match mesh_pipeline(&host.device, &root, [code(0), code(1)], g, blend, &name) {
                 Ok(pso) => pso,
                 Err(e) => {
                     tracing::warn!(
-                        error = %e, ?shaders, independent_blend = g.blend.IndependentBlendEnable.as_bool(),
-                        targets = %g.target_blends(), "host mesh pipeline refused"
+                        error = %e, ?shaders, independent_blend = blend.IndependentBlendEnable.as_bool(),
+                        targets = %g.target_blends(&blend), "host mesh pipeline refused"
                     );
                     host.log_messages();
                     return None;
@@ -630,7 +676,7 @@ impl HostPipeline {
                     BytecodeLength: gs.len(),
                 }
             }),
-            BlendState: g.blend,
+            BlendState: blend,
             SampleMask: g.sample_mask,
             RasterizerState: g.rasterizer,
             DepthStencilState: g.depth,
@@ -689,8 +735,8 @@ impl HostPipeline {
             Ok(pso) => pso,
             Err(e) => {
                 tracing::warn!(
-                    error = %e, ?shaders, independent_blend = g.blend.IndependentBlendEnable.as_bool(),
-                    targets = %g.target_blends(), "host pipeline refused"
+                    error = %e, ?shaders, independent_blend = blend.IndependentBlendEnable.as_bool(),
+                    targets = %g.target_blends(&blend), "host pipeline refused"
                 );
                 host.log_messages();
                 return None;
@@ -703,7 +749,7 @@ impl HostPipeline {
             depth = ?g.depth,
             dsv = g.depth_format.0,
             targets = ?&g.targets.RTFormats[..g.targets.NumRenderTargets.min(8) as usize],
-            blend = ?g.blend.RenderTarget[0],
+            blend = ?blend.RenderTarget[0],
             cull = g.rasterizer.CullMode.0,
             "host graphics state"
         );
@@ -718,7 +764,7 @@ impl HostPipeline {
             inputs: g.elements(),
             rects: rect_gs.is_some(),
             state: {
-                let (d, r, b) = (&g.depth, &g.rasterizer, &g.blend.RenderTarget[0]);
+                let (d, r, b) = (&g.depth, &g.rasterizer, &blend.RenderTarget[0]);
                 let face = |f: &D3D12_DEPTH_STENCILOP_DESC| {
                     format!(
                         "fail {} depth-fail {} pass {} func {}",
@@ -762,9 +808,9 @@ impl HostPipeline {
 fn mesh_pipeline(
     device: &ID3D12Device,
     root: &ID3D12RootSignature,
-    ms: D3D12_SHADER_BYTECODE,
-    ps: D3D12_SHADER_BYTECODE,
+    [ms, ps]: [D3D12_SHADER_BYTECODE; 2],
     g: &GraphicsState,
+    blend: D3D12_BLEND_DESC,
     name: &str,
 ) -> windows::core::Result<ID3D12PipelineState> {
     use windows::core::Interface;
@@ -789,7 +835,7 @@ fn mesh_pipeline(
         root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
         ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
         ps: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps),
-        blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, g.blend),
+        blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, blend),
         mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
         raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
         depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, g.depth),
@@ -890,7 +936,7 @@ mod tests {
         g.blend.RenderTarget[0].BlendEnable = true.into();
         g.blend.RenderTarget[2].RenderTargetWriteMask = 0;
         assert_eq!(
-            g.target_blends(),
+            g.target_blends(&g.blend),
             concat!(
                 "RT0: format=28 blend=true write_mask=0xf, ",
                 "RT1: format=28 blend=true write_mask=0xf, ",
@@ -899,13 +945,81 @@ mod tests {
         );
         g.blend.IndependentBlendEnable = true.into();
         assert_eq!(
-            g.target_blends(),
+            g.target_blends(&g.blend),
             concat!(
                 "RT0: format=28 blend=true write_mask=0xf, ",
                 "RT1: format=28 blend=false write_mask=0xf, ",
                 "RT2: format=62 blend=false write_mask=0x0",
             ),
         );
+    }
+
+    fn mixed_blend_state() -> GraphicsState {
+        let mut g = GraphicsState::default();
+        g.targets.NumRenderTargets = 3;
+        g.targets.RTFormats[..3].copy_from_slice(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R8_UINT,
+        ]);
+        let shared = &mut g.blend.RenderTarget[0];
+        shared.BlendEnable = true.into();
+        shared.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        shared.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        shared.RenderTargetWriteMask = 0x7;
+        g
+    }
+
+    #[test]
+    fn integer_blend_preserves_shared_color_state_and_title_key() {
+        let g = mixed_blend_state();
+        let title = g.describe();
+        let host = g.host_blend();
+        assert!(host.IndependentBlendEnable.as_bool());
+        let shared = g.blend.RenderTarget[0];
+        assert_eq!(host.RenderTarget[0], shared);
+        assert_eq!(host.RenderTarget[1], shared);
+        assert_eq!(host.RenderTarget[2], D3D12_RENDER_TARGET_BLEND_DESC {
+            BlendEnable: false.into(), ..shared
+        });
+        assert_eq!(g.describe(), title);
+        assert_ne!(g.describe_with_blend(&host), title);
+    }
+
+    #[test]
+    fn integer_blend_preserves_independent_and_masked_targets() {
+        let mut g = mixed_blend_state();
+        g.blend.IndependentBlendEnable = true.into();
+        g.blend.AlphaToCoverageEnable = true.into();
+        g.targets.RTFormats[..3].copy_from_slice(&[
+            DXGI_FORMAT_R16_SINT, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R32_UINT,
+        ]);
+        g.blend.RenderTarget[1].BlendEnable = true.into();
+        g.blend.RenderTarget[2].BlendEnable = true.into();
+        g.blend.RenderTarget[2].RenderTargetWriteMask = 0;
+        let mut expected = g.blend;
+        expected.RenderTarget[0].BlendEnable = false.into();
+        assert_eq!(g.host_blend(), expected);
+
+        g.blend.RenderTarget[0].BlendEnable = false.into();
+        g.blend.RenderTarget[0].LogicOpEnable = true.into();
+        assert_eq!(g.host_blend(), g.blend);
+    }
+
+    #[test]
+    fn integer_blend_leaves_unaffected_shared_state_intact() {
+        let mut g = mixed_blend_state();
+        g.targets.NumRenderTargets = 2;
+        assert_eq!(g.host_blend(), g.blend);
+        g.targets.NumRenderTargets = 3;
+        g.blend.RenderTarget[0].RenderTargetWriteMask = 0;
+        assert_eq!(g.host_blend(), g.blend);
+        g.targets.NumRenderTargets = 1;
+        g.targets.RTFormats[0] = DXGI_FORMAT_R8_UINT;
+        g.blend.RenderTarget[0].RenderTargetWriteMask = 1;
+        let mut expected = g.blend;
+        expected.RenderTarget[0].BlendEnable = false.into();
+        assert_eq!(g.host_blend(), expected);
     }
 
     /// A triangle mesh shader of our own and a pixel shader for it.
@@ -978,9 +1092,9 @@ mod tests {
         g.targets.NumRenderTargets = 1;
         g.targets.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         let name = super::super::library::name("mesh test", &root_blob, &[&ms, &ps], &g.describe());
-        mesh_pipeline(&host.device, &root, code(&ms), code(&ps), &g, &name).expect("made");
+        mesh_pipeline(&host.device, &root, [code(&ms), code(&ps)], &g, g.host_blend(), &name).expect("made");
         let loaded = super::super::library::LOADED.load(Ordering::Relaxed);
-        mesh_pipeline(&host.device, &root, code(&ms), code(&ps), &g, &name).expect("made again");
+        mesh_pipeline(&host.device, &root, [code(&ms), code(&ps)], &g, g.host_blend(), &name).expect("made again");
         assert!(
             super::super::library::LOADED.load(Ordering::Relaxed) > loaded,
             "the mesh pipeline was compiled again instead of loaded from the library"
