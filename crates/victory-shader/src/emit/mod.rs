@@ -101,6 +101,8 @@ mod valu_tests;
 #[cfg(all(test, windows))]
 mod waterfall_tests;
 #[cfg(all(test, windows))]
+mod latch_readback_tests;
+#[cfg(all(test, windows))]
 mod wave64_tests;
 mod wave;
 
