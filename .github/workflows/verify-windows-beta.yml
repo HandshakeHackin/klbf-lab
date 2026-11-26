@@ -1,43 +1,28 @@
-name: Compare both descriptor-size shader paths on win10-test
+name: Check PR 72 alone and run its descriptor tests with PR 37
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  readback:
+  descriptors:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: 23db69d35bd7c55517f95e3a967ad26832ac3b9a
+          ref: 54ca988330b6dcbceb3dd873afa43ef7c7674fbd
+          fetch-depth: 0
           persist-credentials: false
-      - name: Exercise the normal and measured lowering independently
-        shell: python
+      - name: Compile victory-gpu at the standalone PR head
+        run: cargo check --locked -p victory-gpu --lib
+      - name: Merge the independent indirect and depth test repair
+        shell: bash
         run: |
-          from pathlib import Path
-          p = Path('crates/victory-shader/src/emit/waterfall_tests.rs')
-          s = p.read_text()
-          start = s.index('    let refused = ',s.index('fn a_descriptor_only_read_as_data_gives_its_views_size'))
-          stop = s.index('    let (a, b) = ',start)
-          s = s[:start] + '''    let shader = if std::env::var_os("KLBF_MEASURED_ROUND").is_some() {
-                  lower::with_measured_descriptors(|| build_with(WATERFALL_SIZE_ONLY_WAVE32, false, 0))
-              } else {
-                  build_with(WATERFALL_SIZE_ONLY_WAVE32, false, 0)
-              };
-          ''' + s[stop:]
-          loc = s.index('    for (label, got) in run(&shader, &views)',start)
-          s = s[:loc] + s[loc:].replace('    for (label, got) in run(&shader, &views) {','''    let samples = run(&shader, &views);
-              assert!(samples.iter().any(|(label, _)| *label == "warp"));
-              for (label, got) in samples {
-                  println!("{label} lanes 0..7: {:?}", &got[..8]);''',1)
-          p.write_text(s)
-      - name: Normal lowering and actual view sizes
-        run: cargo test --locked -p victory-shader --lib a_descriptor_only_read_as_data_gives_its_views_size -- --nocapture
-      - name: Measured fallback and actual view sizes
-        if: success() || failure()
-        env:
-          KLBF_MEASURED_ROUND: '1'
-        run: cargo test --locked -p victory-shader --lib a_descriptor_only_read_as_data_gives_its_views_size -- --nocapture
+          set -euo pipefail
+          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 3ecd80f610cf4954cc2377f328662e1fce600c0d
+          git -c user.name=CI -c user.email=ci@localhost merge --no-commit FETCH_HEAD
+          test "$(git rev-parse :crates/victory-gpu/src/descriptor/host.rs)" = 4b774740f1848353e4107bfd4771772485121dce
+      - name: Run the complete descriptor host test module
+        run: |
+          cargo test --locked -p victory-gpu --lib descriptor::host::tests:: -- --nocapture --test-threads=1
