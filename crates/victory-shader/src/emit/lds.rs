@@ -238,6 +238,9 @@ pub(super) fn meetings(
             let disjoint_ok = !region_has_cycle[r] && region_disjoint_ranges(&region_accesses[r]);
             let safe = disjoint_ok || region_lane_private(&region_accesses[r], cs.threads);
             if !safe {
+                if has_rmw[r] && !region_accesses[r].iter().any(|a| a.kind == Kind::Read) {
+                    return Err("an LDS atomic without a plain LDS read or a lane-private proof");
+                }
                 return Err("a mixed LDS region without a disjoint or lane-private proof");
             }
         } else if writes[r] && !has_rmw[r] {
@@ -2180,7 +2183,24 @@ mod tests {
         shared_rtn.extend(store_uav(4));
         assert_eq!(lowered_wave(&if_v0_lt_s0(&shared_rtn), [64, 1, 1], 1), 64);
 
-        // Non-returning atomic ds_add_u32 + ds_write_b32 at shared address -> RMW -> MUST refuse.
+        assert_eq!(
+            run_meetings(&if_v0_lt_s0(&shared_rtn), [64, 1, 1], 1).unwrap_err(),
+            "an LDS atomic without a plain LDS read or a lane-private proof"
+        );
+
+        // Adding an explicit read at the same address must keep the mixed-region diagnosis.
+        let mut shared_read = vec![v_mov_k(2, 0), v_mov_k(3, 1)];
+        shared_read.extend(ds_add_u32(2, 3, 0));
+        shared_read.extend(ds_read_b32(4, 2, 0));
+        shared_read.extend(store_uav(4));
+        let body = if_v0_lt_s0(&shared_read);
+        assert_eq!(lowered_wave(&body, [64, 1, 1], 1), 64);
+        assert_eq!(
+            run_meetings(&body, [64, 1, 1], 1).unwrap_err(),
+            "a mixed LDS region without a disjoint or lane-private proof"
+        );
+
+        // A non-returning atomic at a shared address also requires a lane-private proof.
         let mut shared_add = vec![v_mov_k(2, 0), v_mov_k(3, 1)];
         shared_add.extend(ds_add_u32(2, 3, 0));
         shared_add.extend(store_uav(3));
