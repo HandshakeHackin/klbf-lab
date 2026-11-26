@@ -4,6 +4,8 @@ on:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
+env:
+  PYTHONUTF8: '1'
 jobs:
   replay:
     runs-on: windows-2025
