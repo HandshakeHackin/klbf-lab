@@ -1,108 +1,55 @@
-name: Identify the D3D12 core actually loaded after WARP device creation
+name: Compare PR 28's texture hashes across Rayon pool sizes
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  modules:
+  hashes:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
-      - name: Build a system probe and an SDK 614 probe
-        shell: pwsh
-        run: |
-          @'
-          cmake_minimum_required(VERSION 3.20)
-          project(agility_module_check LANGUAGES CXX)
-          add_executable(system_probe probe.cpp)
-          add_executable(sdk614_probe probe.cpp)
-          target_compile_definitions(sdk614_probe PRIVATE APP_LOCAL)
-          target_link_libraries(system_probe PRIVATE d3d12 dxgi)
-          target_link_libraries(sdk614_probe PRIVATE d3d12 dxgi)
-          '@ | Set-Content CMakeLists.txt
-          @'
-          #include <d3d12.h>
-          #include <dxgi1_4.h>
-          #include <wrl/client.h>
-          #include <iostream>
-          using Microsoft::WRL::ComPtr;
-          #ifdef APP_LOCAL
-          extern "C" {
-          __declspec(dllexport) extern const UINT D3D12SDKVersion = 614;
-          __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
-          }
-          #endif
-          int main() {
-              // The parent samples the process both before and after device creation.
-              std::cout << "START" << std::endl;
-              if (std::cin.get() == EOF) return 1;
-              ComPtr<IDXGIFactory4> factory;
-              ComPtr<IDXGIAdapter> adapter;
-              ComPtr<ID3D12Device> device;
-              if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 2;
-              if (FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)))) return 3;
-              if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)))) return 4;
-              std::cout << "READY" << std::endl;
-              std::cin.get();
-          }
-          '@ | Set-Content probe.cpp
-          cmake -S . -B build -A x64
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cmake --build build --config Release
-      - name: Stage the official x64 SDK 614 core by verified digest
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: 39ad8490478fa205f8f88a74acd237a1e517f97a
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Record CPU model and visible logical processors
+        run: Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
+      - name: Compare the unmodified release benchmark in interleaved rounds
         shell: python
         run: |
-          import hashlib, io, urllib.request, zipfile
-          from pathlib import Path
-          u = "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.614.1/microsoft.direct3d.d3d12.1.614.1.nupkg"
-          with urllib.request.urlopen(u, timeout=60) as source:
-              package = source.read()
-          assert hashlib.sha512(package).hexdigest() == "05baa55231684ab10a3e905c9b85ce78f04ade9360f7de84a06bbae3bfc3123bcccaa563647a25e151cc759106bc19e37740ef78563592d28e3a723fd744b42f"
-          destination = Path("build/Release/D3D12")
-          destination.mkdir()
-          with zipfile.ZipFile(io.BytesIO(package)) as z:
-              (destination / "D3D12Core.dll").write_bytes(z.read("build/native/bin/x64/D3D12Core.dll"))
-      - name: Identify loaded modules while both WARP devices are alive
-        shell: pwsh
-        run: |
-          @'
-          function Get-CoreReport($process) {
-              $process.Refresh()
-              $exeFolder = Split-Path -LiteralPath $process.Path
-              $expected = Join-Path $exeFolder 'D3D12\D3D12Core.dll'
-              $systemCore = Join-Path ([Environment]::SystemDirectory) 'D3D12Core.dll'
-              foreach ($module in $process.Modules) {
-                  if ($module.ModuleName -ine 'D3D12Core.dll') { continue }
-                  $source = if ($module.FileName -ieq $expected) { 'app-local' }
-                            elseif ($module.FileName -ieq $systemCore) { 'Windows system' }
-                            else { 'other location' }
-                  [pscustomobject]@{ PID=$process.Id; Source=$source; Version=$module.FileVersionInfo.FileVersion }
-              }
-          }
-          '@ | Set-Content core-report.ps1
-          $ErrorActionPreference = 'Stop'
-          . ./core-report.ps1
-          foreach ($exe in 'system_probe','sdk614_probe') {
-              $si = [Diagnostics.ProcessStartInfo]::new((Resolve-Path "./build/Release/$exe.exe").Path)
-              $si.UseShellExecute = $false
-              $si.RedirectStandardInput = $true
-              $si.RedirectStandardOutput = $true
-              $child = [Diagnostics.Process]::Start($si)
-              try {
-                  if ($child.StandardOutput.ReadLine() -ne 'START') { throw 'Probe did not start' }
-                  $before = @(Get-CoreReport $child)
-                  Write-Host "$exe before D3D12CreateDevice, observed modules: $($before.Count)"
-                  $child.StandardInput.WriteLine()
-                  if ($child.StandardOutput.ReadLine() -ne 'READY') { throw 'Failed to create WARP device' }
-                  $loaded = @(Get-CoreReport $child)
-                  if ($loaded.Count -eq 0) { throw 'No D3D12Core module visible after device creation' }
-                  $loaded | Format-Table
-                  if ($exe -eq 'system_probe' -and $loaded.Source -notcontains 'Windows system') { throw 'System baseline did not find the system runtime' }
-                  $child.StandardInput.WriteLine()
-                  if (!$child.WaitForExit(10000) -or $child.ExitCode -ne 0) { throw 'Child did not finish successfully' }
-              } finally {
-                  if (!$child.HasExited) { $child.Kill() }
-                  $child.Dispose()
-              }
-          }
+          import os, re, statistics, subprocess
+          from collections import defaultdict
+          results = defaultdict(list)
+          base = ["cargo", "test", "--release", "--locked", "-p", "victory-gpu", "--lib"]
+          prefix = "texture::content_hash_tests::"
+          def execute(case, workers, args):
+              env = dict(os.environ)
+              env.pop("RAYON_NUM_THREADS", None)
+              if workers != "default":
+                  env["RAYON_NUM_THREADS"] = workers
+              cmd = base + [prefix + case, "--", "--exact", *args]
+              result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+              if result.returncode or "1 passed; 0 failed" not in result.stdout:
+                  raise RuntimeError(result.stdout + result.stderr)
+              return result.stdout + result.stderr
+          pools = ["1", "2", "default"]
+          for pool in pools:
+              execute("the_wide_hash_is_the_hash", pool, [])
+          print("All three pool configurations passed all eleven byte-equality fixtures", flush=True)
+          for round_no in range(6):
+              for i in range(len(pools)):
+                  pool = pools[(round_no + i) % len(pools)]
+                  log = execute("content_hash_speed", pool, ["--ignored", "--nocapture"])
+                  rows = re.findall(r"(\d+) MB: one thread [\d.]+ GB/s \(([\d.]+) ms\), content_hash [\d.]+ GB/s \(([\d.]+) ms\)", log)
+                  assert len(rows) == 3, log
+                  for size,serial,wide in rows:
+                      print(f"round={round_no} pool={pool} MiB={size} serial_ms={serial} candidate_ms={wide}", flush=True)
+                      results[(pool, int(size))].append((float(serial),float(wide)))
+          for pool in pools:
+              for size in (1,4,16):
+                  serial,wide=zip(*results[(pool,size)])
+                  print(f"MEDIAN pool={pool} MiB={size} serial_ms={statistics.median(serial):.3f} candidate_ms={statistics.median(wide):.3f}", flush=True)
