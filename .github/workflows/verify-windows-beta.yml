@@ -71,9 +71,11 @@ jobs:
           git checkout ba88ab0607c7cc1b7fa83b3c6f3a4a9beb1093be -- crates/victory-shader/src/emit/lower.rs
           sed -i 's/("adjacent", words.as_slice(), "BWBRRBWBR")/("adjacent", words.as_slice(), "BWBRBRBWBR")/' crates/victory-shader/src/emit/wave64_tests.rs
           cargo test --locked -p victory-shader --lib split_lds_adjacent_reads_share_only_the_middle_meeting -- --nocapture
-      - name: Test and lint the published shader source
+      - name: Lint the published shader, then run all library tests with the upstream WARP runner fix
         shell: bash
         run: |
           git restore --source=HEAD --staged --worktree -- crates/victory-shader/src/emit/lower.rs crates/victory-shader/src/emit/wave64_tests.rs
           cargo clippy --locked -p victory-shader --all-targets -- -D warnings
+          git fetch --no-tags --depth=2 https://github.com/PastiiJay/klbf-lab.git 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          git show FETCH_HEAD -- crates/victory-shader/src/emit/valu_tests.rs | git apply
           cargo test --locked -p victory-shader --lib
