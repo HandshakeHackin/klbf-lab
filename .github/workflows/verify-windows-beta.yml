@@ -35,5 +35,7 @@ jobs:
           git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
           git apply "$RUNNER_TEMP/depth.patch"
           git show 06f4fcc --format= -- crates/victory-gpu/src/pipeline/host.rs | git apply -
-      - name: Verify the asset policy\n        run: cargo xtask policy\n      - name: Run every workspace test suite
+      - name: Verify the asset policy
+        run: cargo xtask policy
+      - name: Run every workspace test suite
         run: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
