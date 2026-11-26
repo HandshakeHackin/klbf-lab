@@ -49,10 +49,11 @@ int main() {
     auto vs = compile("float4 main(uint id:SV_VertexID):SV_Position { return float4(float(id),0,0,1); }", "vs_5_0");
     auto ps = compile("struct Out {float4 a:SV_Target0; float4 b:SV_Target1; uint c:SV_Target2;};"
                       "Out main(){ Out o; o.a=o.b=float4(1,0,0,0.5); o.c=7u; return o; }", "ps_5_0");
+    auto ps_without_rt2 = compile("struct Out {float4 a:SV_Target0; float4 b:SV_Target1;};"
+                                  "Out main(){ Out o; o.a=o.b=float4(1,0,0,0.5); return o; }", "ps_5_0");
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.pRootSignature = root.Get();
     pso.VS = {vs->GetBufferPointer(), vs->GetBufferSize()};
-    pso.PS = {ps->GetBufferPointer(), ps->GetBufferSize()};
     pso.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pso.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pso.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -81,16 +82,22 @@ int main() {
         {"independent, no RT2 blend or writes", true,true,false,false,true},
     };
     bool controls_pass = true;
-    for (const auto& c : cases) {
-        pso.BlendState.IndependentBlendEnable = c.independent;
-        for (auto& slot : pso.BlendState.RenderTarget) slot = rt;
-        pso.BlendState.RenderTarget[0].BlendEnable = pso.BlendState.RenderTarget[1].BlendEnable = c.blend0;
-        pso.BlendState.RenderTarget[2].BlendEnable = c.blend2;
-        pso.BlendState.RenderTarget[2].RenderTargetWriteMask = c.write2 ? D3D12_COLOR_WRITE_ENABLE_ALL : 0;
-        ComPtr<ID3D12PipelineState> result;
-        const auto hr = device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&result));
-        std::printf("%s -> 0x%08lX\n", c.name, static_cast<unsigned long>(hr));
-        if (c.control && FAILED(hr)) controls_pass = false;
-    }
+    auto compare = [&](ID3DBlob* pixel, const char* signature) {
+        pso.PS = {pixel->GetBufferPointer(), pixel->GetBufferSize()};
+        std::printf("\nPixel output signature: %s\n", signature);
+        for (const auto& c : cases) {
+            pso.BlendState.IndependentBlendEnable = c.independent;
+            for (auto& slot : pso.BlendState.RenderTarget) slot = rt;
+            pso.BlendState.RenderTarget[0].BlendEnable = pso.BlendState.RenderTarget[1].BlendEnable = c.blend0;
+            pso.BlendState.RenderTarget[2].BlendEnable = c.blend2;
+            pso.BlendState.RenderTarget[2].RenderTargetWriteMask = c.write2 ? D3D12_COLOR_WRITE_ENABLE_ALL : 0;
+            ComPtr<ID3D12PipelineState> result;
+            const auto hr = device->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&result));
+            std::printf("%s -> 0x%08lX\n", c.name, static_cast<unsigned long>(hr));
+            if (c.control && FAILED(hr)) controls_pass = false;
+        }
+    };
+    compare(ps.Get(), "RT0, RT1, RT2");
+    compare(ps_without_rt2.Get(), "RT0, RT1");
     return controls_pass ? 0 : 1;
 }
