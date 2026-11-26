@@ -1,0 +1,39 @@
+name: Beta workspace and Clippy with the integer blend fix
+on:
+  push:
+    branches: [verify/issue-55-beta-regression]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: 78ad5711ecaa7c8cbe5996f74c9d47d16167c061
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assemble the candidate with existing beta CI repairs
+        shell: python
+        run: |
+          import subprocess
+          def git(*args):
+              return subprocess.check_output(["git", "-c", "user.name=Verification", "-c", "user.email=ci@localhost", *args], text=True).strip()
+          heads = {18: "4ad2343c9b530bb1bb9081943cf2933ce1a882cf", 25: "6190ae2353cdc9ccd62b952a4b86ec9d9aa27f44", 27: "a375d01159cd71eb5d128c8838a1f0f6778d6f75", 61: "b88dfcde6150d7e6c8a09136f6a177cce448b94f"}
+          git("fetch", "--no-tags", "origin", *[f"refs/pull/{n}/head:refs/verify/{n}" for n in heads])
+          for number, sha in heads.items():
+              assert git("rev-parse", f"refs/verify/{number}") == sha
+              print("PR", number, sha, flush=True)
+              git("merge", "--no-edit", sha)
+          git("cherry-pick", "--no-commit", "448b737fa8f4e669c3a9cede26c08a04d4cacd96")
+          print("Tested tree", git("write-tree"), flush=True)
+          git("diff", "--check", "78ad571")
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo xtask policy
+      - run: cargo test --workspace --locked -- --test-threads=1
+      - run: cargo test --locked -p victory-gpu --lib integer_blend_ -- --include-ignored --nocapture
