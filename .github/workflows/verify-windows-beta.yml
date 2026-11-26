@@ -1,110 +1,129 @@
-name: Verify PR 23 staging residency and pending texture bytes
+name: Compare beta and win10-test with the identical SDK 614 DLL
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  residency:
-    runs-on: windows-latest
-    timeout-minutes: 25
+  agility:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - branch: beta
+            revision: 78ad5711ecaa7c8cbe5996f74c9d47d16167c061
+            expected: system
+          - branch: win10-test
+            revision: d006c10fe0159727c1fbd76455ce6ad9ecf4293b
+            expected: app-local
+    name: ${{ matrix.branch }} on Server 2022
+    runs-on: windows-2022
+    env:
+      EXPECTED_CORE: ${{ matrix.expected }}
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: cbeed1e65e2bbb468e5bd9cfd932f44963d498a5
+          ref: ${{ matrix.revision }}
           persist-credentials: false
-      - name: Check residency, pending bytes, recreation and drop on WARP
-        env:
-          VICTORY_D3D12_WARP: '1'
+      - name: Build the unmodified Windows test candidate
+        run: cargo build --release --locked -p victory
+      - name: Inspect both exported constants in the release executable
         shell: pwsh
         run: |
           @'
-
-          #[cfg(all(test, feature = "diagnostics"))]
-          mod staging_residency_review {
-              use super::*;
-              use std::sync::atomic::Ordering::Relaxed;
-              use victory_formats::texture::{Desc, Dimension, Layout, Swizzle};
-
-              const BYTES: u64 = 256;
-
-              fn sample(changed: u64, waiting: u64) -> Arc<Staging> {
-                  let layout = Layout::new(&Desc {
-                      dimension: Dimension::Tex2d, width: 1, height: 1, depth: 1,
-                      mips: 1, element_bytes: 4, block: 1, samples: 1, swizzle: Swizzle::LINEAR,
-                  }).unwrap();
-                  STAGED[0].fetch_add(1, Relaxed);
-                  STAGED[1].fetch_add(BYTES, Relaxed);
-                  let s = Arc::new(Staging {
-                      mem: Mutex::new(None), size: BYTES, changed: changed.into(),
-                      footprints: vec![], rows: vec![], layout, mips: 1, bytes: BYTES,
-                      memory: std::ptr::null(), last: Mutex::default(), dirty: false.into(),
-                      uploaded: true.into(), used: crate::host::moment().into(), on_demand: true,
-                      detiled: 1.into(), judged: Default::default(), waiting: waiting.into(),
-                  });
-                  let (_, mapped) = s.buffer().expect("a mapped WARP upload buffer");
-                  // SAFETY: this fixture exclusively owns this live 256-byte mapping.
-                  unsafe { (mapped as *mut u8).write_bytes(0x75, BYTES as usize) };
-                  s
+          import struct
+          import sys
+          from pathlib import Path
+          
+          exe = Path(sys.argv[1]).read_bytes()
+          u16 = lambda off: struct.unpack_from('<H', exe, off)[0]
+          u32 = lambda off: struct.unpack_from('<I', exe, off)[0]
+          u64 = lambda off: struct.unpack_from('<Q', exe, off)[0]
+          pe = u32(0x3c)
+          assert exe[pe:pe + 4] == b'PE\0\0' and u16(pe + 4) == 0x8664
+          opt = pe + 24
+          assert u16(opt) == 0x20b
+          image_base = u64(opt + 24)
+          first_section = opt + u16(pe + 20)
+          sections = [first_section + i * 40 for i in range(u16(pe + 6))]
+          
+          def locate(rva):
+              for s in sections:
+                  virtual = u32(s + 12)
+                  if virtual <= rva < virtual + u32(s + 16):
+                      return u32(s + 20) + rva - virtual
+              raise ValueError(f'RVA {rva:x} is outside the image sections')
+          
+          def string_at(rva):
+              start = locate(rva)
+              return exe[start:exe.index(0, start)].decode('ascii')
+          
+          locations = {}
+          if u32(opt + 112):
+              exports = locate(u32(opt + 112))
+              addresses = locate(u32(exports + 28))
+              names = locate(u32(exports + 32))
+              ordinals = locate(u32(exports + 36))
+              for i in range(u32(exports + 24)):
+                  name = string_at(u32(names + i * 4))
+                  rva = u32(addresses + u16(ordinals + i * 2) * 4)
+                  locations[name] = rva
+          import os
+          if os.environ['EXPECTED_CORE'] == 'system':
+              for symbol in ['D3D12SDKVersion', 'D3D12SDKPath']:
+                  assert symbol not in locations, f'unexpected export {symbol}'
+              print('Neither Agility SDK export is present')
+              sys.exit(0)
+          version = u32(locate(locations['D3D12SDKVersion']))
+          path = string_at(u64(locate(locations['D3D12SDKPath'])) - image_base)
+          print(f'Win64 victory.exe exports SDK version {version} and path {path!r}', flush=True)
+          assert version == 614 and path == '.\\D3D12\\'
+          '@ | python - target/release/victory.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage Microsoft's package as in issue 11
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1 -OutFile d3d12.zip
+          $hash = (Get-FileHash d3d12.zip -Algorithm SHA512).Hash
+          if ($hash -ne '05baa55231684ab10a3e905c9b85ce78f04ade9360f7de84a06bbae3bfc3123bcccaa563647a25e151cc759106bc19e37740ef78563592d28e3a723fd744b42f') { throw 'Unexpected SDK archive hash' }
+          Expand-Archive d3d12.zip d3d12pkg -Force
+          New-Item -ItemType Directory -Force target/release/D3D12 | Out-Null
+          Copy-Item d3d12pkg/build/native/bin/x64/D3D12Core.dll target/release/D3D12/
+          $dll = Get-Item target/release/D3D12/D3D12Core.dll
+          $dll.VersionInfo | Format-List FileVersion,ProductVersion
+          Get-FileHash $dll.FullName
+          Get-AuthenticodeSignature $dll.FullName | Select-Object Status, @{ Name='Signer'; Expression={$_.SignerCertificate.Subject} } | Format-List
+      - name: Observe the real CLI creating a WARP device and record the loaded runtime
+        shell: pwsh
+        env:
+          VICTORY_WARP: '1'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'agility-empty-shader-inputs'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $bytes = [byte[]]::new(4096)
+          for ($i=0; $i -lt 1600; $i++) { [IO.File]::WriteAllBytes((Join-Path $root "$i.bin"), $bytes) }
+          $info = [Diagnostics.ProcessStartInfo]::new((Resolve-Path target/release/victory.exe))
+          foreach ($arg in @('translate','--pipelines','--jobs','1',$root)) { $info.ArgumentList.Add($arg) }
+          $info.UseShellExecute = $false
+          $p = [Diagnostics.Process]::Start($info)
+          $seen = @{}
+          while (!$p.HasExited) {
+            try {
+              $p.Refresh()
+              foreach ($m in $p.Modules) {
+                if ($m.ModuleName -ieq 'D3D12Core.dll') { $seen[$m.FileName] = $m.FileVersionInfo.FileVersion }
               }
-
-              #[test]
-              fn sweep_preserves_pending_bytes_and_counts_live_buffers_through_recreation() {
-                  host().expect("WARP host");
-                  let changed = crate::host::moment();
-                  for _ in 0..32 {
-                      crate::frame::wait(std::ptr::null(), 0, 0, std::ptr::null(), 2, std::ptr::null_mut());
-                  }
-                  std::thread::sleep(std::time::Duration::from_millis(2150));
-                  assert!(crate::host::long_ago(changed, UNCHANGED_MS, UNCHANGED_FRAMES));
-                  let base = memory();
-                  let settled = sample(changed, 0);
-                  let pending = sample(changed, changed.max(1));
-                  {
-                      let mut table = STAGING.lock().unwrap();
-                      let map = table.get_or_insert_with(HashMap::new);
-                      assert!(map.insert(1, settled).is_none());
-                      assert!(map.insert(2, pending).is_none());
-                  }
-                  let before = memory();
-                  assert_eq!(before, [base[0]+2, base[1]+2*BYTES, base[2]+2, base[3]+2, base[4]+2*BYTES]);
-                  let start = lightened();
-                  let keep = staging_keep();
-                  let released = u64::from(!keep);
-                  let_go_idle();
-                  let after = memory();
-                  assert_eq!(&before[..3], &after[..3]);
-                  assert_eq!(after[3], before[3]-released);
-                  assert_eq!(after[4], before[4]-released*BYTES);
-                  let_go_idle();
-                  assert_eq!(memory(), after, "second sweep must preserve the counts");
-                  let (settled, pending) = {
-                      let mut table = STAGING.lock().unwrap();
-                      let map = table.as_mut().unwrap();
-                      (map.remove(&1).unwrap(), map.remove(&2).unwrap())
-                  };
-                  assert_eq!(settled.mem.lock().unwrap().is_some(), keep);
-                  assert!(pending.mem.lock().unwrap().is_some());
-                  let (_, data) = pending.buffer().unwrap();
-                  // SAFETY: pending still owns the live allocation and it has no GPU writers.
-                  let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, BYTES as usize) };
-                  assert!(bytes.iter().all(|&byte| byte == 0x75));
-                  settled.buffer().expect("settled buffer available on demand");
-                  settled.buffer().expect("second lookup reuses the resident allocation");
-                  let recreated = memory();
-                  assert_eq!(&recreated[3..], &before[3..]);
-                  let finish = lightened();
-                  assert_eq!(finish, [start[0]+released,start[1]+released*BYTES,start[2]+released,start[3]+released*BYTES]);
-                  drop((pending, settled));
-                  assert_eq!(memory(), base, "all record and resident counts must return to baseline");
-                  eprintln!("keep={keep} resident bytes {} -> {} -> {} -> {}; pending contents matched all {BYTES} bytes",
-                      before[4]-base[4], after[4]-base[4], recreated[4]-base[4], memory()[4]-base[4]);
-              }
+            } catch [System.InvalidOperationException] { break } catch [System.ComponentModel.Win32Exception] {}
+            Start-Sleep -Milliseconds 5
           }
-          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/texture.rs
-          foreach ($keep in '0','1') {
-              $env:VICTORY_STAGING_KEEP = $keep
-              cargo test --locked -p victory-gpu --features diagnostics --lib sweep_preserves_pending_bytes_and_counts_live_buffers_through_recreation -- --nocapture
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          $p.WaitForExit()
+          Write-Host "Host OS $([Environment]::OSVersion.Version) / victory exit $($p.ExitCode)"
+          foreach ($path in $seen.Keys) { Write-Host "Loaded D3D12Core: $path ($($seen[$path]))" }
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          if (!$seen.Count) { throw 'Process ended before a module path was observed' }
+          $expected = if ($env:EXPECTED_CORE -eq 'system') {
+            Join-Path ([Environment]::SystemDirectory) 'D3D12Core.dll'
+          } else { (Resolve-Path target/release/D3D12/D3D12Core.dll).Path }
+          if ($seen.Keys -notcontains $expected) { throw "Missing expected core: $expected" }
