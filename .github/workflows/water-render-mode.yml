@@ -1,0 +1,104 @@
+name: Separate the render-model registry query from the console profile
+on:
+  push:
+    branches: [verify/water-render-mode]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare the two Series X launcher invocations on PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force target/release | Out-Null
+          $src = Join-Path $env:RUNNER_TEMP 'probe.cs'
+          @'
+          using System;
+          using System.IO;
+          class Probe {
+              static void Main(string[] args) {
+                  File.WriteAllLines(Environment.GetEnvironmentVariable("PROBE_OUTPUT"), new string[] {
+                      string.Join("|", args), Environment.GetEnvironmentVariable("VICTORY_RENDER_S") ?? "unset",
+                      Environment.GetEnvironmentVariable("VICTORY_FSR_DLL") ?? "unset" });
+              }
+          }
+          '@ | Set-Content $src
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo "/out:target/release/victory.exe" $src
+          if ($LASTEXITCODE) { throw 'probe compile failed' }
+          $game = Join-Path $env:RUNNER_TEMP 'Title'
+          New-Item -ItemType Directory -Force $game | Out-Null
+          foreach ($file in 'title.exe','shaders.rpf') { [IO.File]::WriteAllText((Join-Path $game $file),'') }
+          $env:PROBE_OUTPUT = Join-Path $env:RUNNER_TEMP 'probe.txt'
+          foreach ($flag in 'unset','1') {
+            foreach ($action in 'translate','run') {
+              $options = @('-SeriesX','-GameDir',$game,'-NoAgility')
+              if ($flag -eq '1') { $options += '-RenderS' }
+              if ($action -eq 'translate') {
+                $options += '-Prebuild'
+                $expected = "translate|--cache|--pipelines|--jobs|8|$game\shaders.rpf"
+              } else { $expected = "run|$game\title.exe|--execute" }
+              & powershell -NoProfile -ExecutionPolicy Bypass -File ./play.ps1 @options
+              if ($LASTEXITCODE) { throw 'launcher failed' }
+              $rows = [IO.File]::ReadAllLines($env:PROBE_OUTPUT)
+              if (($rows -join ',') -cne "$expected,$flag,unset") { throw "unexpected probe: $rows" }
+              [IO.File]::Delete($env:PROBE_OUTPUT)
+              Write-Host "PASS $action, RENDER_S=$flag, no FSR, Series X arguments unchanged"
+            }
+          }
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Extend the existing registry-query test in this checkout only
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("crates/victory-hle/src/modules/xsystem.rs")
+          s = p.read_text()
+          header = "fn titles_read_the_chosen_model() {"
+          assert s.count(header) == 1
+          s = s.replace(header, header + """
+                      let profile = match std::env::var("PROBE_PROFILE").as_deref() {
+                          Ok("X") => Console::SeriesX,
+                          Ok("S") => Console::SeriesS,
+                          _ => panic!("profile missing"),
+                      };
+                      console::set(profile);""")
+          check = "assert_eq!(value, console_mode(console::current()));"
+          assert s.count(check) == 1
+          s = s.replace(check, """
+                      let want = u32::from_str_radix(&std::env::var("PROBE_MODE").unwrap(), 16).unwrap();
+                      assert_eq!(value, want);
+                      assert_eq!(console::current(), profile);
+                      let mut output = std::mem::MaybeUninit::<super::super::AnalyticsInfo>::uninit();
+                      super::super::analytics_info(std::ptr::null(), output.as_mut_ptr());
+                      // SAFETY: analytics_info wrote the entire struct into output.
+                      let info = unsafe { output.assume_init() };
+                      let form = std::ffi::CStr::from_bytes_until_nul(&info.form).unwrap().to_str().unwrap();
+                      let memory = console::current().title_memory();
+                      match profile {
+                          Console::SeriesX => {
+                              assert_eq!(form, "Xbox Series X");
+                              assert_eq!(memory, (10usize << 30, 3584usize << 20));
+                          }
+                          Console::SeriesS => {
+                              assert_eq!(form, "Xbox Series S");
+                              assert_eq!(memory, (0, 7776usize << 20));
+                          }
+                      }
+                      println!("profile={profile:?} registry={value:#x} analytics={form} title_memory={memory:?}");""")
+          p.write_text(s)
+      - name: Query declared model, analytics form and memory in fresh processes
+        shell: pwsh
+        run: |
+          foreach ($case in @('X,unset,64','X,1,60','S,unset,60')) {
+              $profile,$flag,$mode = $case.Split(',')
+              $env:PROBE_PROFILE = $profile
+              $env:PROBE_MODE = $mode
+              if ($flag -eq 'unset') { Remove-Item Env:VICTORY_RENDER_S -ErrorAction SilentlyContinue }
+              else { $env:VICTORY_RENDER_S = $flag }
+              cargo test --locked -p victory-hle titles_read_the_chosen_model -- --nocapture
+              if ($LASTEXITCODE) { throw "query failed for $case" }
+          }
