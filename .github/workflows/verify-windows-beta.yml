@@ -1,32 +1,70 @@
-name: Check beta-2 workspace with PRs 81, 83 and the depth fix from 27
+name: Verify replay identity on actual benchmark JSON
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  workspace:
-    runs-on: windows-latest
+  replay:
+    runs-on: windows-2025
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: parent
+            revision: d05ee764cc93c0e2c42c2737e8a3604c00be0b6d
+          - version: patched
+            revision: f1a4267de125a80acabef33bdc5e915860cca219
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 9e0db508382392414dd6cb17d1a49b153fd1ea9f
-          fetch-depth: 0
+          ref: ${{ matrix.revision }}
           persist-credentials: false
-      - name: Integrate the card tests and the production changes from PR 27
-        shell: bash
+      - name: Run the existing Python benchmark suite
+        run: python -X utf8 -m unittest tools/test_bench_loop.py
+      - name: Add an input source and one synthetic present for the test
+        shell: python
         run: |
-          set -euo pipefail
-          git config user.name CI
-          git config user.email ci@localhost
-          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 395efe9b00640069e660e62da5f4f0608ea8928b
-          git merge --no-edit FETCH_HEAD
-          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git d91ab6e14e0c37bfd511339f6bc7ecf94848bf7f
-          git show FETCH_HEAD --format= | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth27.patch"
-          git apply "$RUNNER_TEMP/depth27.patch"
-          git diff --check 8187780aeba81d8741a68ee39bcc7eacee05ed76
-      - name: Recheck the original failing depth-bounds pixel test
-        run: cargo test --locked -p victory-gpu --lib pipeline::host::tests::depth_bounds_pipeline_loads_and_filters_draws -- --exact --nocapture
-      - name: Run the full serial workspace
-        run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1
+          from pathlib import Path
+          from sys import argv
+          root=Path.cwd()
+          p=root/'crates/victory-hle/src/modules/gameinput_script.rs'
+          s=p.read_text()
+          marker='    static TEST_WFRAME: AtomicU64 = AtomicU64::new(0);'
+          assert s.count(marker)==1
+          s=s.replace(marker,'''    #[test]
+              fn write_replay_probe() {
+                  let source = MockSource(Arc::new(Mutex::new(MockHost::default())));
+                  let _wrapped = wrap(Box::new(source));
+                  victory_gpu::bench::emit_synthetic_frame_for_probe();
+              }
+
+          '''+marker)
+          p.write_text(s)
+          p=root/'crates/victory-gpu/src/bench.rs'
+          with p.open('a') as f:f.write('\npub fn emit_synthetic_frame_for_probe() { on_present(501, false); }\n')
+      - name: Check invalid and valid replay identity in fresh processes
+        shell: pwsh
+        env:
+          VERSION: ${{ matrix.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:VICTORY_BENCH_WARMUP = '0'
+          foreach ($kind in 'invalid','valid') {
+            $env:VICTORY_INPUT_REPLAY = Join-Path $env:RUNNER_TEMP "$kind-route.jsonl"
+            $env:VICTORY_BENCH_OUT = Join-Path $env:RUNNER_TEMP "$kind-benchmark.json"
+            $trace = if ($kind -eq 'valid') { '{"from":1,"to":2,"ly":1.0}' } else { 'unavailable route' }
+            [IO.File]::WriteAllText($env:VICTORY_INPUT_REPLAY, $trace)
+            cargo test --locked -p victory-hle --lib modules::gameinput_script::tests::write_replay_probe -- --exact
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            $report = Get-Content $env:VICTORY_BENCH_OUT -Raw | ConvertFrom-Json
+            if ($report.world_frames -ne 1) { throw 'Expected one measured frame in report' }
+            $hash = $report.input_script_sha256
+            Write-Output "$env:VERSION $kind frames=$($report.world_frames) digest=$hash"
+            if ($kind -eq 'invalid' -and $env:VERSION -eq 'patched') {
+              if ($null -ne $hash) { throw 'Inactive route was reported as loaded' }
+            } elseif ($hash -notmatch '^[a-f0-9]{64}$') {
+              throw 'Expected the original or positive-control digest'
+            }
+          }
