@@ -1,0 +1,71 @@
+name: Compare PR 22 runtime and shader adapter fallback on Windows
+on:
+  push:
+    branches: [verify/pr22-software-fallback]
+permissions:
+  contents: read
+jobs:
+  adapters:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: base
+            revision: c71c7d6bc627758ad858a736233cc2a4b14bd717
+          - version: candidate
+            revision: 6b4569bd4df9bfe6d965d43a2d4faa79bd944b13
+    name: Adapter selection (${{ matrix.version }})
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+      - name: Check actual WARP LUIDs for runtime and shader devices
+        shell: pwsh
+        run: |
+          @'
+
+          #[cfg(test)]
+          mod adapter_selection_review {
+              use super::*;
+              use victory_shader::emit::host::Host as ShaderHost;
+
+              fn identify(device: &ID3D12Device) -> DXGI_ADAPTER_DESC1 {
+                  // SAFETY: query the DXGI adapter for this live device.
+                  unsafe {
+                      let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
+                      let adapter: IDXGIAdapter1 = f.EnumAdapterByLuid(device.GetAdapterLuid()).unwrap();
+                      adapter.GetDesc1().unwrap()
+                  }
+              }
+
+              #[test]
+              fn compare_runtime_and_shader_selection() {
+                  let runtime = create().expect("runtime should create a device on this hosted runner");
+                  let rt = identify(&runtime.device);
+                  let name_end = rt.Description.iter().position(|&c| c == 0).unwrap_or(rt.Description.len());
+                  eprintln!("runtime: name={} vendor={:04x} device={:04x} flags={:#x}",
+                      String::from_utf16_lossy(&rt.Description[..name_end]), rt.VendorId, rt.DeviceId, rt.Flags);
+                  assert_ne!(rt.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32, 0);
+                  let software = ShaderHost::new(true).expect("explicit WARP shader host");
+                  let sw = identify(&software.device);
+                  assert_eq!((rt.AdapterLuid.HighPart, rt.AdapterLuid.LowPart),
+                             (sw.AdapterLuid.HighPart, sw.AdapterLuid.LowPart));
+                  let err = ShaderHost::new(false).err().expect("hardware-only shader host should reject software");
+                  eprintln!("shader hardware-only: {err}; explicitly requested shader WARP matches the runtime LUID");
+              }
+          }
+          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/host.rs
+          foreach ($mode in 'default', 'forced-warp') {
+              if ($mode -eq 'default') {
+                  Remove-Item Env:VICTORY_D3D12_WARP -ErrorAction SilentlyContinue
+              } else {
+                  $env:VICTORY_D3D12_WARP = '1'
+              }
+              Write-Host "Runtime selection: $mode"
+              cargo test --locked -p victory-gpu --features diagnostics,victory-shader/host --lib host::adapter_selection_review::compare_runtime_and_shader_selection -- --exact --nocapture
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
