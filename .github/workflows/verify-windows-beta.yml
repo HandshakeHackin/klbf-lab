@@ -1,36 +1,43 @@
-name: Verify missing DXGI readings and real present-counter wrap
+name: Compare both descriptor-size shader paths on win10-test
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  counts:
+  readback:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: d18474523030d0bda09080b48dd52c3a197bead4
+          repository: PastiiJay/klbf-lab
+          ref: 23db69d35bd7c55517f95e3a967ad26832ac3b9a
           persist-credentials: false
-      - name: Run the frame-generation tests against the compiled GPU library
+      - name: Exercise the normal and measured lowering independently
+        shell: python
         run: |
-          cargo test --locked -p victory-gpu --lib ffx::tests:: -- --nocapture
-      - name: Verify the same regression catches a missing count treated as zero
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
           from pathlib import Path
-          p = Path("crates/victory-gpu/src/ffx.rs")
+          p = Path('crates/victory-shader/src/emit/waterfall_tests.rs')
           s = p.read_text()
-          original = "let presented = presented?;"
-          assert s.count(original) == 1
-          p.write_text(s.replace(original, "let presented = presented.unwrap_or(0);"))
-          PY
-          if cargo test --locked -p victory-gpu --lib ffx::tests::present_rates_span_failed_queries_and_preserve_a_real_counter_wrap -- --exact --nocapture > "$RUNNER_TEMP/control.txt" 2>&1; then
-            cat "$RUNNER_TEMP/control.txt"
-            exit 1
-          fi
-          cat "$RUNNER_TEMP/control.txt"
-          grep -F 'left: Some((1.0, 4294967292.0))' "$RUNNER_TEMP/control.txt"
+          start = s.index('    let refused = ',s.index('fn a_descriptor_only_read_as_data_gives_its_views_size'))
+          stop = s.index('    let (a, b) = ',start)
+          s = s[:start] + '''    let shader = if std::env::var_os("KLBF_MEASURED_ROUND").is_some() {
+                  lower::with_measured_descriptors(|| build_with(WATERFALL_SIZE_ONLY_WAVE32, false, 0))
+              } else {
+                  build_with(WATERFALL_SIZE_ONLY_WAVE32, false, 0)
+              };
+          ''' + s[stop:]
+          loc = s.index('    for (label, got) in run(&shader, &views)',start)
+          s = s[:loc] + s[loc:].replace('    for (label, got) in run(&shader, &views) {','''    let samples = run(&shader, &views);
+              assert!(samples.iter().any(|(label, _)| *label == "warp"));
+              for (label, got) in samples {
+                  println!("{label} lanes 0..7: {:?}", &got[..8]);''',1)
+          p.write_text(s)
+      - name: Normal lowering and actual view sizes
+        run: cargo test --locked -p victory-shader --lib a_descriptor_only_read_as_data_gives_its_views_size -- --nocapture
+      - name: Measured fallback and actual view sizes
+        if: success() || failure()
+        env:
+          KLBF_MEASURED_ROUND: '1'
+        run: cargo test --locked -p victory-shader --lib a_descriptor_only_read_as_data_gives_its_views_size -- --nocapture
