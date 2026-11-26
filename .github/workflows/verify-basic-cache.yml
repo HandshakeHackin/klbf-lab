@@ -1,0 +1,76 @@
+name: Verify Basic Render Driver cache isolation
+on:
+  push:
+    branches: [verify/pr56-basic-cache]
+permissions:
+  contents: read
+jobs:
+  cache:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: original
+            revision: 356690c87817ddc643b10f28452a5a0e75c028f4
+          - version: fixed
+            revision: 91ef4c9e465e50312894682c87da5677a37a6427
+    name: Cache isolation (${{ matrix.version }})
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+      - name: Read a synthetic legacy cache with default and explicit software devices
+        shell: pwsh
+        env:
+          CACHE_PROBE_VERSION: ${{ matrix.version }}
+        run: |
+          @'
+
+          #[cfg(test)]
+          mod basic_driver_review {
+              use super::*;
+              use windows::Win32::Graphics::{Direct3D::D3D_FEATURE_LEVEL_12_0, Dxgi::*};
+
+              #[test]
+              fn observe_legacy_cache_selection_with_real_dxgi_devices() {
+                  let fixed = std::env::var("CACHE_PROBE_VERSION").unwrap() == "fixed";
+                  let dir = tempfile::tempdir().unwrap();
+                  let legacy = b"synthetic legacy cache fixture";
+                  std::fs::write(dir.path().join(LIBRARY_FILE), legacy).unwrap();
+                  for explicit_warp in [false, true] {
+                      let mut device: Option<ID3D12Device1> = None;
+                      // SAFETY: create local devices and query the matching adapter.
+                      let desc = unsafe {
+                          let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
+                          if explicit_warp {
+                              let a: IDXGIAdapter = f.EnumWarpAdapter().unwrap();
+                              D3D12CreateDevice(&a, D3D_FEATURE_LEVEL_12_0, &mut device).unwrap();
+                          } else {
+                              D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device).unwrap();
+                          }
+                          let luid = device.as_ref().unwrap().GetAdapterLuid();
+                          f.EnumAdapterByLuid::<IDXGIAdapter1>(luid).unwrap().GetDesc1().unwrap()
+                      };
+                      assert_eq!((desc.VendorId, desc.DeviceId), (0x1414, 0x008c));
+                      if !explicit_warp { assert_eq!(desc.Flags, 0, "require the unflagged default device"); }
+                      let key = adapter_key(device.as_ref().unwrap()).unwrap();
+                      let files = LibraryFiles::for_adapter(Some(key));
+                      let (blob, legacy_used) = Blob::of_files(dir.path(), &files);
+                      let flagged = desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
+                      let should_read = !fixed && !flagged;
+                      eprintln!("explicit_warp={explicit_warp} flags={:#x} key={} legacy_read={legacy_used} bytes={}",
+                                desc.Flags, key.slug(), blob.bytes().len());
+                      assert_eq!(key.software, fixed || flagged);
+                      assert_eq!(legacy_used, should_read);
+                      assert_eq!(blob.bytes(), if should_read { legacy.as_slice() } else { &[] });
+                  }
+                  assert_eq!(std::fs::read(dir.path().join(LIBRARY_FILE)).unwrap(), legacy);
+              }
+          }
+          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/pipeline/library.rs
+          cargo test --locked -p victory-gpu --lib pipeline::library::basic_driver_review::observe_legacy_cache_selection_with_real_dxgi_devices -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p victory-gpu --lib pipeline::library::tests -- --test-threads=1
