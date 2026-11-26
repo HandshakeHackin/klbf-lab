@@ -10,18 +10,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: f676858ea30591d5ed8c0a1ad4315bcbffc9fd2e
-          fetch-depth: 2
+          ref: 455f4b1eccf2d58f9ad7787919858872f4c04193
+          fetch-depth: 3
           persist-credentials: false
       - name: Verify the previous and corrected messages on the same shader fixture
         shell: bash
         run: |
-          git checkout --detach HEAD^
+          git checkout --detach 0948a4fd56d97548e0b746ae3c9b4bcbb881032e
           VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib waw_and_byte_access_and_u24_checks -- --nocapture 2>&1 | tee /tmp/old.log
           grep -F 'an LDS read and write in one lane-branch region' /tmp/old.log
-          git checkout --detach f676858ea30591d5ed8c0a1ad4315bcbffc9fd2e
+          git checkout --detach 455f4b1eccf2d58f9ad7787919858872f4c04193
           VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib waw_and_byte_access_and_u24_checks -- --nocapture 2>&1 | tee /tmp/new.log
           grep -F 'overlapping shared addresses in a write-only LDS region' /tmp/new.log
           grep -F 'a mixed LDS region without a disjoint or lane-private proof' /tmp/new.log
+      - name: Check diagnostics for atomics with and without an explicit read
+        shell: bash
+        run: |
+          VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib atomics_are_rmw_and_require_lane_privacy -- --nocapture 2>&1 | tee /tmp/atomics.log
+          grep -F 'an LDS atomic without a plain LDS read or a lane-private proof' /tmp/atomics.log
+          grep -F 'a mixed LDS region without a disjoint or lane-private proof' /tmp/atomics.log
       - name: Run the full shader library suite
         run: cargo test --locked -p victory-shader --lib
