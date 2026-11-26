@@ -1,0 +1,38 @@
+name: Matched main A/B build for issue 55
+on:
+  push:
+    branches: [verify/issue-55-matched-main]
+permissions:
+  contents: read
+jobs:
+  matched-main:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 450a9cd52fc7c0fc3927b6e7c41b6f9f2e1008fa
+          persist-credentials: false
+      - name: Run the three blend corrections and the refusal diagnostic
+        run: |
+          cargo test --locked -p victory-gpu --lib integer_blend_ -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p victory-gpu --lib refusal_shows_the_effective_blend_for_each_active_target
+      - name: Build the matching Windows executable
+        run: cargo build --locked --release -p victory
+      - name: Smoke test and checksum
+        shell: pwsh
+        run: |
+          ./target/release/victory.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $h = (Get-FileHash -Algorithm SHA256 target/release/victory.exe).Hash.ToLowerInvariant()
+          "$h  victory.exe" | Set-Content -Encoding ascii target/release/SHA256SUMS.txt
+          Get-Content target/release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: victory-main-issue-55-integer-fix-windows-x64
+          path: |
+            target/release/victory.exe
+            target/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
