@@ -1,0 +1,65 @@
+name: Reopen keyed compute pipelines across both Basic Render Driver devices
+on:
+  push:
+    branches: [verify/pr56-software-reopen]
+permissions:
+  contents: read
+jobs:
+  roundtrip:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 91ef4c9e465e50312894682c87da5677a37a6427
+          persist-credentials: false
+      - name: Exercise both directions with mapped and buffered cache storage
+        shell: pwsh
+        run: |
+          $src = 'crates/victory-gpu/src/pipeline/library.rs'
+          $before = Get-Content -Raw $src
+          $marker = '        // Child process runs ONLY the WARP device'
+          $fixture = @'
+                  if std::env::var_os("VICTORY_TEST_SOFTWARE_REOPEN").is_some() {
+                      let (default, warp): (ID3D12Device1, ID3D12Device1) = unsafe {
+                          let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
+                          let a: IDXGIAdapter = f.EnumWarpAdapter().unwrap();
+                          let (mut default, mut warp) = (None, None);
+                          D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut default).unwrap();
+                          D3D12CreateDevice(&a, D3D_FEATURE_LEVEL_12_0, &mut warp).unwrap();
+                          (default.unwrap(), warp.unwrap())
+                      };
+                      let a = unsafe { default.GetAdapterLuid() };
+                      let b = unsafe { warp.GetAdapterLuid() };
+                      assert_ne!((a.HighPart,a.LowPart),(b.HighPart,b.LowPart));
+                      for (label, writer, reader) in [("default to explicit", &default, &warp), ("explicit to default", &warp, &default)] {
+                          let dir = tempfile::tempdir().unwrap();
+                          let written = store_and_save(dir.path(), writer, PSO_NAME);
+                          let files = LibraryFiles::for_adapter(adapter_key(reader));
+                          assert_eq!(written.bin, files.bin);
+                          assert!(!files.legacy_fallback);
+                          let (blob, legacy) = Blob::of_files(dir.path(), &files);
+                          assert!(!legacy);
+                          let bytes = blob.bytes().len();
+                          assert!(bytes > 0);
+                          let lib = open_with(reader, blob, files.clone(), false).expect("reopen cache on the other device");
+                          let (_root, desc) = make_desc(reader);
+                          let wide = HSTRING::from(PSO_NAME);
+                          let loaded: windows::core::Result<ID3D12PipelineState> =
+                              unsafe { lib.library.LoadComputePipeline(PCWSTR(wide.as_ptr()), &desc) };
+                          assert!(loaded.is_ok(), "{label}: stored PSO was not found: {:?}", loaded.err());
+                          eprintln!("{label}: {} bytes, named compute PSO hit, file={}", bytes, files.bin);
+                      }
+                      return;
+                  }
+
+          '@
+          if (-not $before.Contains($marker)) { throw 'Expected test marker is missing' }
+          [IO.File]::WriteAllText((Resolve-Path $src), $before.Replace($marker, $fixture + [Environment]::NewLine + $marker))
+          $env:VICTORY_TEST_SOFTWARE_REOPEN = '1'
+          foreach ($map in '1','0') {
+              $env:VICTORY_LIBRARY_MAP = $map
+              Write-Host "VICTORY_LIBRARY_MAP=$map"
+              cargo test --locked -p victory-gpu --lib pipeline::library::tests::warp_save_does_not_discard_hardware_pipeline_library -- --exact --nocapture
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
