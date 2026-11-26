@@ -1,62 +1,27 @@
-name: Isolate the PR 50 write-only wave-width decision
+name: Verify Wave64 refusal messages and shader tests
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  compare:
+  diagnostics:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: 0948a4fd56d97548e0b746ae3c9b4bcbb881032e
+          ref: f676858ea30591d5ed8c0a1ad4315bcbffc9fd2e
+          fetch-depth: 2
           persist-credentials: false
-      - name: Exercise the lowering path with four synthetic kernels
+      - name: Verify the previous and corrected messages on the same shader fixture
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('crates/victory-shader/src/emit/lds.rs')
-          src=p.read_text()
-          marker='    #[test]\n    fn waw_and_byte_access_and_u24_checks()'
-          assert src.count(marker)==1
-          p.write_text(src.replace(marker, '''    #[test]
-              fn targeted_write_only_comparison() {
-                  let relaxed = std::env::var_os("EXPECT_RELAXED").is_some();
-                  for (name, second_offset, read, expected) in [
-                      ("write-only same dword", 0, None, if relaxed {32} else {64}),
-                      ("write-only separate dwords", 4, None, 32),
-                      ("shared read after write", 0, Some(0), 64),
-                      ("read disjoint from both writes", 4, Some(8), 32),
-                  ] {
-                      let mut body = vec![v_mov_k(2, 0), v_mov_k(3, 1), v_mov_k(4, 2)];
-                      body.extend(ds_write_b32(2, 3, 0));
-                      body.extend(ds_write_b32(2, 4, second_offset));
-                      if let Some(off) = read {
-                          body.extend(ds_read_b32(5, 2, off));
-                          body.extend(store_uav(5));
-                      } else {
-                          body.extend(store_uav(3));
-                      }
-                      let width = lowered_wave(&if_v0_lt_s0(&body), [64, 1, 1], 1);
-                      eprintln!("{name}: wave={width}");
-                      assert_eq!(width, expected, "{name}");
-                  }
-              }
-          '''+marker))
-          PY
-          cargo test --locked -p victory-shader --lib targeted_write_only_comparison -- --nocapture
-      - name: Relax only the write-only overlap check while keeping the cycle and read-write rules
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('crates/victory-shader/src/emit/lds.rs')
-          src=p.read_text()
-          check='            if has_provable_shared_waw(&region_accesses[r]) {\n                return None;\n            }\n'
-          assert src.count(check)==1
-          p.write_text(src.replace(check,''))
-          PY
-          EXPECT_RELAXED=1 cargo test --locked -p victory-shader --lib targeted_write_only_comparison -- --nocapture
+          git checkout --detach HEAD^
+          VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib waw_and_byte_access_and_u24_checks -- --nocapture 2>&1 | tee /tmp/old.log
+          grep -F 'an LDS read and write in one lane-branch region' /tmp/old.log
+          git checkout --detach f676858ea30591d5ed8c0a1ad4315bcbffc9fd2e
+          VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib waw_and_byte_access_and_u24_checks -- --nocapture 2>&1 | tee /tmp/new.log
+          grep -F 'overlapping shared addresses in a write-only LDS region' /tmp/new.log
+          grep -F 'a mixed LDS region without a disjoint or lane-private proof' /tmp/new.log
+      - name: Run the full shader library suite
+        run: cargo test --locked -p victory-shader --lib
