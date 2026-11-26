@@ -373,12 +373,12 @@ pub(crate) fn wrap(source: Box<dyn Source>) -> Box<dyn Source> {
 
     let replay = replay_path.and_then(|path| match std::fs::read(&path) {
         Ok(bytes) => {
-            let sha = victory_gpu::bench::register_input_script(&bytes);
             match std::str::from_utf8(&bytes)
                 .map_err(|e| format!("invalid UTF-8: {e}"))
                 .and_then(Script::parse)
             {
                 Ok(script) => {
+                    let sha = victory_gpu::bench::register_input_script(&bytes);
                     tracing::info!(path, sha256 = %sha, "replaying scripted world-frame inputs");
                     Some(script)
                 }
