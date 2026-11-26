@@ -1,0 +1,54 @@
+name: Verify PR 44 intersection masks and page boundaries
+on:
+  push:
+    branches: [verify/pr44-intersection-masks]
+permissions:
+  contents: read
+jobs:
+  bvh:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: 2e41aaf3281bf06d558da56030d54b3fa7248659
+          persist-credentials: false
+      - name: Extend the existing scalar-oracle fixtures in the test checkout
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/victory-shader/src/emit/intersect_tests.rs')
+          source = path.read_text(encoding='utf-8')
+          start = source.index('fn partial_dmask_packs_selected_channels_and_preserves_other_vgprs()')
+          boundary = source.index('fn directory_cross_page_box32_and_fault_isolation_on_the_card()', start)
+          fixture = source[start:boundary]
+          def once(source, before, after):
+              assert source.count(before) == 1, before
+              return source.replace(before, after)
+
+          fixture = once(fixture, '    let batch = &batches[0];\n    let data = buffer(&scene, batch, BASE + u64::from(NODES));\n', '')
+          fixture = once(fixture, '        for dmask in [0x3u32, 0x5u32] {', '        for dmask in 1u32..=0xf {')
+          dispatch = fixture.index('            let out = host')
+          end = fixture.index('        }\n        ran += 1;', dispatch)
+          block = fixture[dispatch:end]
+          loop = ('            for batch in &batches {\n'
+                  '                let data = buffer(&scene, batch, BASE + u64::from(NODES));\n'
+                  + ''.join('    ' + line for line in block.splitlines(keepends=True))
+                  + '            }\n'
+                  + '            eprintln!("mask={dmask:#x} batches={} lanes_per_batch={THREADS}", batches.len());\n')
+          fixture = fixture[:dispatch] + loop + fixture[end:]
+          fixture = once(fixture, '[("hardware", false), ("warp", true)]', '[("warp", true)]')
+          rest = source[boundary:]
+          device_start = rest.index('    let Ok(host) = Host::new(false) else {')
+          device_end = rest.index('    let (shader, _)', device_start)
+          rest = rest[:device_start] + '    let host = Host::new(true).expect("require a real WARP device");\n' + rest[device_end:]
+          path.write_text(source[:start] + fixture + rest, encoding='utf-8')
+      - name: Check all fifteen nonempty masks, the empty mask, and cross-page loads
+        shell: pwsh
+        run: |
+          foreach ($case in 'partial_dmask_packs_selected_channels_and_preserves_other_vgprs','directory_cross_page_box32_and_fault_isolation_on_the_card') {
+              cargo test --locked -p victory-shader --lib "emit::intersect_tests::$case" -- --exact --nocapture
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
