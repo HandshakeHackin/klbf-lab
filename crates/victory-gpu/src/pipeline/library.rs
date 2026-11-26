@@ -53,6 +53,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 
 use windows::Win32::Graphics::Direct3D12::*;
+use windows::Win32::Graphics::Dxgi::{DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE};
 use windows::core::{HSTRING, Interface, PCWSTR};
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -433,6 +434,18 @@ struct AdapterKey {
 }
 
 impl AdapterKey {
+    fn from_desc(desc: &DXGI_ADAPTER_DESC1) -> Self {
+        // The default Microsoft Basic Render Driver can expose this PCI ID
+        // without the software flag, even on the same PC as explicit WARP.
+        Self {
+            vendor: desc.VendorId,
+            device: desc.DeviceId,
+            revision: desc.Revision,
+            software: desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
+                || (desc.VendorId, desc.DeviceId) == (0x1414, 0x008c),
+        }
+    }
+
     fn slug(self) -> String {
         format!(
             "{:04x}-{:04x}-r{:02x}-{}",
@@ -448,8 +461,7 @@ impl AdapterKey {
 /// flag) behind `device`. Returns `None` if DXGI cannot enumerate the LUID.
 fn adapter_key(device: &ID3D12Device1) -> Option<AdapterKey> {
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory2, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1,
-        IDXGIFactory4,
+        CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4,
     };
     // SAFETY: plain DXGI query for the device's own adapter LUID.
     unsafe {
@@ -457,12 +469,7 @@ fn adapter_key(device: &ID3D12Device1) -> Option<AdapterKey> {
         let factory: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
         let adapter: IDXGIAdapter1 = factory.EnumAdapterByLuid(luid).ok()?;
         let desc = adapter.GetDesc1().ok()?;
-        Some(AdapterKey {
-            vendor: desc.VendorId,
-            device: desc.DeviceId,
-            revision: desc.Revision,
-            software: desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0,
-        })
+        Some(AdapterKey::from_desc(&desc))
     }
 }
 
@@ -1083,12 +1090,13 @@ mod tests {
 
     #[test]
     fn adapter_keys_produce_distinct_filenames_for_hardware_and_software() {
-        let nv = AdapterKey {
-            vendor: 0x10de,
-            device: 0x2783,
-            revision: 0xa1,
-            software: false,
+        let nv_desc = DXGI_ADAPTER_DESC1 {
+            VendorId: 0x10de,
+            DeviceId: 0x2783,
+            Revision: 0xa1,
+            ..Default::default()
         };
+        let nv = AdapterKey::from_desc(&nv_desc);
         let warp = AdapterKey {
             vendor: 0x1414,
             device: 0x008c,
@@ -1117,10 +1125,10 @@ mod tests {
         assert_eq!(fallback_files.next, NEXT_FILE);
         assert!(!fallback_files.legacy_fallback);
 
-        let spoofed_sw = AdapterKey {
-            software: true,
-            ..nv
-        };
+        let spoofed_sw = AdapterKey::from_desc(&DXGI_ADAPTER_DESC1 {
+            Flags: DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32,
+            ..nv_desc
+        });
         assert_ne!(
             LibraryFiles::for_adapter(Some(nv)).bin,
             LibraryFiles::for_adapter(Some(spoofed_sw)).bin
@@ -1136,12 +1144,12 @@ mod tests {
             revision: 0xa1,
             software: false,
         }));
-        let sw = LibraryFiles::for_adapter(Some(AdapterKey {
-            vendor: 0x1414,
-            device: 0x008c,
-            revision: 0x00,
-            software: true,
-        }));
+        let sw = LibraryFiles::for_adapter(Some(AdapterKey::from_desc(&DXGI_ADAPTER_DESC1 {
+            VendorId: 0x1414,
+            DeviceId: 0x008c,
+            Flags: 0,
+            ..Default::default()
+        })));
 
         let legacy_bytes = b"legacy-hardware-pso-blob".repeat(128);
         std::fs::write(dir.path().join(LIBRARY_FILE), &legacy_bytes).unwrap();
