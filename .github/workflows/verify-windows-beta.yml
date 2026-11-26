@@ -1,124 +1,36 @@
-name: Verify PR 64 against the current win10-test CLI
+name: Verify PR 64 with the queued beta CI fixes
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  win10-source:
-    runs-on: windows-2022
-    timeout-minutes: 35
+  integrated:
+    runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: d006c10fe0159727c1fbd76455ce6ad9ecf4293b
+          ref: 827b9badb3f7bb53b668c2ba26fa4df2665ce5a9
+          fetch-depth: 0
           persist-credentials: false
-      - name: Apply the exact two PR commits to win10-test
+      - name: Integrate the existing strict-lint, asset policy, depth, and test isolation patches
         shell: pwsh
         run: |
-          git fetch --no-tags --depth=3 https://github.com/HandshakeHackin/klbf-lab.git 827b9badb3f7bb53b668c2ba26fa4df2665ce5a9
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          git diff --binary --output=../pr64.patch 78ad5711ecaa7c8cbe5996f74c9d47d16167c061 827b9badb3f7bb53b668c2ba26fa4df2665ce5a9
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          git apply --check ../pr64.patch
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          git apply ../pr64.patch
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          git diff --stat
-      - name: Build the patched release
-        run: cargo build --locked --release -p victory
-      - name: Check uppercase CRLF list and retry priority through the release CLI
-        shell: pwsh
-        run: |
-          @'
-          """Exercise Windows pre-build resume with two synthetic no-op compute pipelines."""
-          from pathlib import Path
-          import os
-          import re
-          import struct
-          import subprocess
-          import sys
-          import tempfile
-          import zlib
-          
-          
-          def words(*values):
-              return struct.pack('<' + 'I' * len(values), *values)
-          
-          
-          def make_shader(tag):
-              # Two tagged v_nops followed by s_endpgm. The pack matches the first 24 bytes.
-              code = words(0xD5800000 | tag, 0x03ff0000, tag, 0xD5800000, 0x03ff0000, 0, 0xBF810000)
-              slots = bytearray(0x68)
-              struct.pack_into('<Q', slots, 0, 6)
-              for offset in (8, 16, 24, 32, 40, 48, 72):
-                  struct.pack_into('<Q', slots, offset, 0xDEADBEEFDEADBEEF)
-              struct.pack_into('<Q', slots, 0x60, len(slots))
-              record = bytearray(0x54)
-              stage = bytearray(0x34)
-              struct.pack_into('<III', stage, 0x28, 1, 1, 1)
-              struct.pack_into('<QQ', record, 0, len(slots) + len(record) + len(stage), len(code))
-              struct.pack_into('<I', record, 0x50, 4)
-              payload = slots + record + stage + code
-              fssm = b'FSSM' + struct.pack('<IQ', 0x101, len(payload)) + payload
-              packed = zlib.compress(fssm)
-              blob = b'XBCH' + struct.pack('<IQQ', 3, len(packed), len(fssm)) + packed
-              part = bytes(24) + b'XDAT' + words(1, 0x24, 0x0d, 48, len(blob)) + blob
-              dxbc = b'DXBC' + bytes(16) + words(1, 44 + len(part), 1, 36) + b'DXIL' + words(len(part)) + part
-              return code, dxbc
-          
-          
-          def fixture(directory):
-              header = bytearray(0x80)
-              header[:4] = b'PS\0\x09'
-              records, table, programs = bytearray(), bytearray(), bytearray()
-              for idx in range(2):
-                  code, dxbc = make_shader(idx + 1)
-                  (directory / f'{idx}.dxbc').write_bytes(dxbc)
-                  records.extend(struct.pack('<QIIII', idx + 1, 0, 0, idx, 0xffffffff))
-                  table.extend(words(len(programs), len(code)))
-                  programs.extend(code)
-              struct.pack_into('<IIIIII', header, 0x50, 0, 2, 1, 2, 1, len(programs))
-              (directory / 'pack.bin').write_bytes(header + records + words(0, 1) + table + b'\0' + programs)
-          
-          
-          def run(exe, inputs, cache, skip):
-              env = dict(os.environ, VICTORY_CACHE_DIR=str(cache), VICTORY_DATA_DIR=str(cache.parent / 'data'),
-                         VICTORY_SKIP_PIPELINES=skip, VICTORY_D3D12_WARP='1')
-              cmd = [str(exe), 'translate', '--cache', '--pipelines', '--jobs', '1', str(inputs)]
-              result = subprocess.run(cmd, cwd=cache.parent, env=env, capture_output=True, text=True, timeout=90)
-              print(result.stdout, flush=True)
-              if result.returncode:
-                  raise RuntimeError(result.stderr[-2500:])
-              return result.stdout
-          
-          
-          def attempted(output):
-              return re.findall(r'^> ([0-9a-f]{32}) \[compute ([0-9a-f]{16})\]', output, re.MULTILINE)
-          
-          
-          exe = Path(sys.argv[1]).resolve()
-          mode = sys.argv[2]
-          with tempfile.TemporaryDirectory() as tmp:
-              root = Path(tmp)
-              inputs = root / 'inputs'
-              inputs.mkdir()
-              fixture(inputs)
-              known = attempted(run(exe, inputs, root / 'discover', ''))
-              assert len(known) == len(set(known)) == 2, known
-              blocked, allowed = known
-              cache = root / 'resume'
-              journal = cache / 'pipelines' / 'prebuild-inflight.txt'
-              journal.parent.mkdir(parents=True)
-              journal.write_text(''.join(key + '\n' for key, _ in known))
-              result = run(exe, inputs, cache, "0011223344556677\r\n" + blocked[1].upper() + "\r\n")
-              sent = attempted(result)
-              if mode == 'before':
-                  assert set(sent) == set(known) and len(sent) == 2, sent
-              else:
-                  assert mode == 'after' and sent == [allowed], sent
-                  assert re.search(rf'1\s+skipped: VICTORY_SKIP_PIPELINES \({blocked[1]}\)', result), result
-              print(f'{mode}: {len(sent)} of 2 interrupted jobs reached make; manually skipped hash retried={blocked in sent}')
-          '@ | Set-Content "$env:RUNNER_TEMP/skip_resume.py" -Encoding utf8
-          python "$env:RUNNER_TEMP/skip_resume.py" target/release/victory.exe after
+          git config user.name "Integration check"
+          git config user.email "ci@localhost"
+          foreach ($head in @('6190ae2353cdc9ccd62b952a4b86ec9d9aa27f44','4ad2343c9b530bb1bb9081943cf2933ce1a882cf','a375d01159cd71eb5d128c8838a1f0f6778d6f75','6f55eae05c4900b656ff5e723c7d685a3172ef3a')) {
+            git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git $head
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            git merge --no-edit --no-ff $head
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
+          git rev-parse 'HEAD^{tree}'
+      - name: Strict workspace Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Strict workspace Clippy with diagnostics
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Workspace tests on WARP
+        env:
+          VICTORY_D3D12_WARP: '1'
+        run: cargo test --workspace --locked -- --test-threads=1
