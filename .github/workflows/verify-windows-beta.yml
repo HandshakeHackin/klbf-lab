@@ -1,39 +1,109 @@
-name: Verify ten beta PRs with upstream main's WARP-only test fix
+name: Verify positive control for app-local D3D12Core module reporting
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  windows:
+  modules:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-        with:
-          repository: PastiiJay/klbf-lab
-          ref: 78ad5711ecaa7c8cbe5996f74c9d47d16167c061
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Assemble the same ten PR heads reviewed locally
+      - name: Build a system probe and an SDK 620 probe
+        shell: pwsh
+        run: |
+          @'
+          cmake_minimum_required(VERSION 3.20)
+          project(agility_module_check LANGUAGES CXX)
+          add_executable(system_probe probe.cpp)
+          add_executable(sdk620_probe probe.cpp)
+          target_compile_definitions(sdk620_probe PRIVATE APP_LOCAL)
+          target_link_libraries(system_probe PRIVATE d3d12 dxgi)
+          target_link_libraries(sdk620_probe PRIVATE d3d12 dxgi)
+          '@ | Set-Content CMakeLists.txt
+          @'
+          #include <d3d12.h>
+          #include <dxgi1_4.h>
+          #include <wrl/client.h>
+          #include <iostream>
+          using Microsoft::WRL::ComPtr;
+          #ifdef APP_LOCAL
+          extern "C" {
+          __declspec(dllexport) extern const UINT D3D12SDKVersion = 620;
+          __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+          }
+          #endif
+          int main() {
+              // The parent samples the process both before and after device creation.
+              std::cout << "START" << std::endl;
+              if (std::cin.get() == EOF) return 1;
+              ComPtr<IDXGIFactory4> factory;
+              ComPtr<IDXGIAdapter> adapter;
+              ComPtr<ID3D12Device> device;
+              if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return 2;
+              if (FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)))) return 3;
+              if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)))) return 4;
+              std::cout << "READY" << std::endl;
+              std::cin.get();
+          }
+          '@ | Set-Content probe.cpp
+          cmake -S . -B build -A x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build --config Release
+      - name: Stage the official x64 SDK 620 core by verified digest
         shell: python
         run: |
-          import subprocess
-          prs = [13, 14, 17, 18, 20, 21, 25, 27, 49, 60]
-          refs = [f"refs/pull/{n}/head:refs/verify/{n}" for n in prs]
-          subprocess.run(["git", "fetch", "--no-tags", "origin", *refs], check=True)
-          merge = ["git", "-c", "user.name=Verification", "-c", "user.email=ci@localhost", "merge", "--no-edit"]
-          subprocess.run(merge + [f"refs/verify/{n}" for n in prs], check=True)
-          tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
-          print("Combined tree", tree)
-          assert tree == "89cdda44d4f1235e6cae576273b7d792fc0acd64"
-          subprocess.run(["git", "diff", "--check", "78ad571", "HEAD"], check=True)
-      - name: Apply the maintainer's software-only test condition from main
-        run: git cherry-pick --no-commit 448b737fa8f4e669c3a9cede26c08a04d4cacd96
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo xtask policy
-      - run: cargo test --workspace --locked -- --test-threads=1
-      - run: cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests -- --test-threads=1
+          import hashlib, io, urllib.request, zipfile
+          from pathlib import Path
+          u = "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.620.2/microsoft.direct3d.d3d12.1.620.2.nupkg"
+          with urllib.request.urlopen(u, timeout=60) as source:
+              package = source.read()
+          assert hashlib.sha512(package).hexdigest() == "d683ff7f5726906c3f43d299f6cdd4b1cad22f8329ccd27b3492d0a1413d9904102b8d543419bec3b3545c86bf49f6a500ebf42d95c999aa0969e5d693032735"
+          destination = Path("build/Release/D3D12")
+          destination.mkdir()
+          with zipfile.ZipFile(io.BytesIO(package)) as z:
+              (destination / "D3D12Core.dll").write_bytes(z.read("build/native/bin/x64/D3D12Core.dll"))
+      - name: Identify loaded modules while both WARP devices are alive
+        shell: pwsh
+        run: |
+          @'
+          function Get-CoreReport($process) {
+              $process.Refresh()
+              $exeFolder = Split-Path -LiteralPath $process.Path
+              $expected = Join-Path $exeFolder 'D3D12\D3D12Core.dll'
+              $systemCore = Join-Path ([Environment]::SystemDirectory) 'D3D12Core.dll'
+              foreach ($module in $process.Modules) {
+                  if ($module.ModuleName -ine 'D3D12Core.dll') { continue }
+                  $source = if ($module.FileName -ieq $expected) { 'app-local' }
+                            elseif ($module.FileName -ieq $systemCore) { 'Windows system' }
+                            else { 'other location' }
+                  [pscustomobject]@{ PID=$process.Id; Source=$source; Version=$module.FileVersionInfo.FileVersion }
+              }
+          }
+          '@ | Set-Content core-report.ps1
+          $ErrorActionPreference = 'Stop'
+          . ./core-report.ps1
+          foreach ($exe in 'system_probe','sdk620_probe') {
+              $si = [Diagnostics.ProcessStartInfo]::new((Resolve-Path "./build/Release/$exe.exe").Path)
+              $si.UseShellExecute = $false
+              $si.RedirectStandardInput = $true
+              $si.RedirectStandardOutput = $true
+              $child = [Diagnostics.Process]::Start($si)
+              try {
+                  if ($child.StandardOutput.ReadLine() -ne 'START') { throw 'Probe did not start' }
+                  $before = @(Get-CoreReport $child)
+                  Write-Host "$exe before D3D12CreateDevice, observed modules: $($before.Count)"
+                  $child.StandardInput.WriteLine()
+                  if ($child.StandardOutput.ReadLine() -ne 'READY') { throw 'Failed to create WARP device' }
+                  $loaded = @(Get-CoreReport $child)
+                  if ($loaded.Count -eq 0) { throw 'No D3D12Core module visible after device creation' }
+                  $loaded | Format-Table
+                  if ($exe -eq 'system_probe' -and $loaded.Source -notcontains 'Windows system') { throw 'System baseline did not find the system runtime' }
+                  if ($exe -eq 'sdk620_probe' -and $loaded.Source -notcontains 'app-local') { throw 'Positive control did not load the packaged runtime' }
+                  $child.StandardInput.WriteLine()
+                  if (!$child.WaitForExit(10000) -or $child.ExitCode -ne 0) { throw 'Child did not finish successfully' }
+              } finally {
+                  if (!$child.HasExited) { $child.Kill() }
+                  $child.Dispose()
+              }
+          }
