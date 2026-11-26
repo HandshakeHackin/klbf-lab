@@ -155,7 +155,11 @@ pub fn check(path: &str, content: &[u8]) -> Vec<String> {
     if !allowed {
         problems.push("file type not on the allowlist".to_owned());
     }
-    let limit = if ext.as_deref() == Some("rs") { MAX_RUST_SOURCE_SIZE } else { MAX_FILE_SIZE };
+    let limit = if ext.as_deref() == Some("rs") {
+        MAX_RUST_SOURCE_SIZE
+    } else {
+        MAX_FILE_SIZE
+    };
     if content.len() > limit {
         problems.push(format!(
             "{} bytes exceeds the {limit}-byte limit",
