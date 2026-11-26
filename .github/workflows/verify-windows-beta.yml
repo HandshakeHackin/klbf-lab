@@ -1,4 +1,4 @@
-name: Verify win10-test workspace with the Rust source limit
+name: Verify RDNA 2 defaults and win10-test workspace
 on:
   push:
     branches: [verify-windows-beta-20261125]
@@ -20,7 +20,7 @@ jobs:
           set -euo pipefail
           git config user.name CI
           git config user.email ci@localhost
-          for sha in 5a4200b1b13f6bd15b629d8e931e0a9df4bbba43 3ecd80f610cf4954cc2377f328662e1fce600c0d ad121fe90d3768ab030c633d120b89f1a020af84; do
+          for sha in bfc742d4c89c88a3e0134e3ac10ae0e265839f73 3ecd80f610cf4954cc2377f328662e1fce600c0d ad121fe90d3768ab030c633d120b89f1a020af84; do
             git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git "$sha"
             git merge --no-edit "$sha"
           done
@@ -39,3 +39,61 @@ jobs:
         run: cargo xtask policy
       - name: Run every workspace test suite
         run: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
+  rdna2:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 230021421223017c559b5f354c1b543db2ffbf39
+          persist-credentials: false
+      - name: Run the adapter and override regression tests
+        run: cargo test --locked -p victory-gpu --lib --features diagnostics host::ahead::tests
+      - name: Check the launcher with unset and explicit overrides
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force target/release | Out-Null
+          @'
+          fn main() {
+              for key in ["AHEAD_FIRST", "CARD_FLAGGED", "PASSES_AHEAD", "UNRELATED_PROBE"] {
+                  print!("{} ", std::env::var(format!("VICTORY_{key}")).unwrap_or_else(|_| "unset".into()));
+              }
+          }
+          '@ | Set-Content "$env:RUNNER_TEMP/launcher_probe.rs"
+          rustc "$env:RUNNER_TEMP/launcher_probe.rs" -o target/release/victory.exe
+          if ($LASTEXITCODE) { throw "Probe compilation failed" }
+          $env:VICTORY_UNRELATED_PROBE = 'clear me'
+          $observed = & ./play.ps1 -SeriesX -GameDir $env:RUNNER_TEMP -Exe unused.exe
+          if ($observed.Trim() -ne 'unset unset unset unset') { throw "Unset settings: $observed" }
+          $env:VICTORY_AHEAD_FIRST = '1'
+          $env:VICTORY_CARD_FLAGGED = '0'
+          $env:VICTORY_PASSES_AHEAD = '1'
+          $env:VICTORY_UNRELATED_PROBE = 'clear me'
+          $observed = & ./play.ps1 -SeriesX -GameDir $env:RUNNER_TEMP -Exe unused.exe
+          if ($observed.Trim() -ne '1 0 1 unset') { throw "Explicit settings: $observed" }
+          Write-Output 'Launcher preserved all three overrides and cleared the unrelated entry.'
+      - name: Exercise the real selected WARP device in fresh processes
+        shell: pwsh
+        run: |
+          @'
+
+          #[test]
+          fn selected_warp_submission_settings() {
+              let h = super::host().expect("a WARP device");
+              let d = unsafe { h.adapter.as_ref().unwrap().GetDesc1() }.unwrap();
+              assert_ne!(d.Flags & windows::Win32::Graphics::Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32, 0);
+              let selected = settings();
+              let observed = format!("{} {} {}", selected.ahead_first, selected.card_flagged, selected.passes_ahead);
+              assert_eq!(observed, std::env::var("EXPECTED_AHEAD").unwrap());
+          }
+          '@ | Add-Content crates/victory-gpu/src/host/ahead.rs
+          $env:VICTORY_D3D12_WARP = '1'
+          $env:VICTORY_THIN = '1'
+          $env:EXPECTED_AHEAD = 'true true true'
+          cargo test --locked -p victory-gpu --lib --features diagnostics host::ahead::selected_warp_submission_settings -- --exact
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:VICTORY_AHEAD_FIRST = '0'
+          $env:VICTORY_PASSES_AHEAD = '0'
+          $env:EXPECTED_AHEAD = 'false true false'
+          cargo test --locked -p victory-gpu --lib --features diagnostics host::ahead::selected_warp_submission_settings -- --exact
