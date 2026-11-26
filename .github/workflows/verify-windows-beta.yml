@@ -1,50 +1,37 @@
-name: Verify PR 27 depth pixels with and without the fix
+name: Verify the win10-test descriptor alternative across the workspace
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-2022, windows-2025]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  workspace:
+    runs-on: windows-2025
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 06f4fccace3f6f6a87490afde34105b8b6a39603
+          ref: 956410487c02014f361636cce1413c1f1c81fe39
           fetch-depth: 0
           persist-credentials: false
-      - name: Require a device, depth-bounds support and the shader compiler
-        shell: python
-        run: |
-          from pathlib import Path
-          p = Path("crates/victory-gpu/src/pipeline/host.rs")
-          s = p.read_text()
-          a = s.index("fn depth_bounds_pipeline_loads_and_filters_draws()")
-          b = s.index("let (root, root_blob)", a)
-          pre = s[a:b]
-          assert pre.count("return;") == 3
-          assert '"vs_6_0"' in pre and '"ps_6_0"' in pre
-          p.write_text(s[:a] + pre.replace("return;", 'panic!("required depth fixture unavailable");') + s[b:])
-      - name: Check pipeline library reuse and pixel rejection and acceptance at PR head
+      - name: Integrate the current win10-test and previously verified corrections
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p victory-gpu --lib pipeline::host::tests::depth_bounds_pipeline_loads_and_filters_draws -- --exact --nocapture
-      - name: Compare the same readback without the production depth change
-        shell: bash
-        run: |
-          set -euo pipefail
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 23db69d35bd7c55517f95e3a967ad26832ac3b9a 6b518fba3250b5e4c3afb76d14b5bda9c705ecc3
+          git -c user.name=CI -c user.email=ci@localhost merge --no-commit 23db69d35bd7c55517f95e3a967ad26832ac3b9a
+          git show 4c46f37 --format= | git apply -
+          git show 448b737 --format= | git apply -
+          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 06f4fccace3f6f6a87490afde34105b8b6a39603
           git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
-          git apply -R "$RUNNER_TEMP/depth.patch"
-          if cargo test --locked -p victory-gpu --lib pipeline::host::tests::depth_bounds_pipeline_loads_and_filters_draws -- --exact --nocapture > "$RUNNER_TEMP/control.txt" 2>&1; then
-            cat "$RUNNER_TEMP/control.txt"
-            echo 'Original production state also passed on this adapter.'
-          else
-            cat "$RUNNER_TEMP/control.txt"
-            grep -F 'depth 0.5 outside [0.6, 1.0] must be rejected' "$RUNNER_TEMP/control.txt"
-          fi
+          git apply "$RUNNER_TEMP/depth.patch"
+          git show 06f4fcc --format= -- crates/victory-gpu/src/pipeline/host.rs | git apply -
+          git diff --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy with diagnostics
+        if: success() || failure()
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Full Windows workspace tests
+        if: success() || failure()
+        run: cargo test --locked --workspace -- --test-threads=1
