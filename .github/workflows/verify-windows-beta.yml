@@ -1,97 +1,36 @@
-name: Verify beta-2 Radeon launcher overrides
+name: Verify beta-2 card patch and fetch on Windows WARP
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  launcher:
+  warp:
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 9e0db508382392414dd6cb17d1a49b153fd1ea9f
-          fetch-depth: 2
+          ref: 395efe9b00640069e660e62da5f4f0608ea8928b
           persist-credentials: false
-      - name: Prepare a launcher probe outside the checkout
+      - name: Run the checked-in card shader tests
+        run: cargo test --locked -p victory-gpu --lib --features diagnostics indirect::tests::warp_card -- --test-threads=1
+      - name: Require successful creation of a WARP test device
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("crates/victory-gpu/src/indirect.rs")
+          text = path.read_text(encoding="utf-8")
+          a = "let Some(mut warp) = WarpHarness::new() else {" + chr(10) + "            return;" + chr(10) + "        };"
+          for name in ["warp_card_patch_writes_the_masked_bytes_and_no_others", "warp_card_fetch_copies_flagged_pieces_to_their_slots"]:
+              start = text.index("fn " + name + "()")
+              offset = text.index(a, start, start + 400)
+              text = text[:offset] + text[offset:].replace(a, 'let mut warp = WarpHarness::new().expect("native WARP is required for this verification");', 1)
+          path.write_text(text, encoding="utf-8")
+      - name: Repeat both readbacks on required WARP devices in fresh processes
         shell: pwsh
         run: |
-          $root = Join-Path $env:RUNNER_TEMP 'launcher probe'
-          New-Item -ItemType Directory -Force "$root/target/release","$root/docs/klbf" | Out-Null
-          Copy-Item docs/klbf/skip-amd.txt "$root/docs/klbf"
-          git show HEAD^:play.ps1 | Set-Content "$root/parent.ps1"
-          Copy-Item play.ps1 "$root/patched.ps1"
-          @'
-          fn main() {
-              let args: Vec<_> = std::env::args().collect();
-              let mut values = vec![args[1].clone()];
-              for k in ["AHEAD_FIRST", "CARD_FLAGGED", "PASSES_AHEAD", "RELAY", "UNRELATED_PROBE", "THIN"] {
-                  values.push(std::env::var(format!("VICTORY_{k}")).unwrap_or_else(|_| "-".into()));
-              }
-              std::fs::write(std::env::var("KLBF_RESULT").unwrap(), values.join(",")).unwrap();
+          foreach ($repeat in 1,2) {
+            cargo test --locked -p victory-gpu --lib --features diagnostics indirect::tests::warp_card -- --test-threads=1
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
-          '@ | Set-Content "$root/driver.rs"
-          rustc "$root/driver.rs" -o "$root/target/release/victory.exe"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          @'
-          $ErrorActionPreference = 'Stop'
-          $root = $PSScriptRoot
-          $env:KLBF_RESULT = Join-Path $root 'result.txt'
-          $keys = 'VICTORY_AHEAD_FIRST','VICTORY_CARD_FLAGGED','VICTORY_PASSES_AHEAD','VICTORY_RELAY'
-          foreach ($prebuild in $false,$true) {
-              $verb = if ($prebuild) { 'translate' } else { 'run' }
-              foreach ($case in 'parent','default','all','partial') {
-                  foreach ($key in $keys) { Remove-Item "Env:$key" -ErrorAction SilentlyContinue }
-                  if ($case -in 'parent','all') {
-                      $env:VICTORY_AHEAD_FIRST='0'; $env:VICTORY_CARD_FLAGGED='1'
-                      $env:VICTORY_PASSES_AHEAD='0'; $env:VICTORY_RELAY='2'
-                  } elseif ($case -eq 'partial') { $env:VICTORY_RELAY='1' }
-                  $env:VICTORY_UNRELATED_PROBE='clear me'
-                  Remove-Item $env:KLBF_RESULT -ErrorAction SilentlyContinue
-                  $script = if ($case -eq 'parent') { 'parent.ps1' } else { 'patched.ps1' }
-                  & (Join-Path $root $script) -GameDir $root -Exe fixture.exe -SeriesX -Prebuild:$prebuild
-                  $actual = Get-Content $env:KLBF_RESULT -Raw
-                  $expected = switch ($case) {
-                      all { "$verb,0,1,0,2,-,1" }
-                      partial { "$verb,-,-,-,1,-,1" }
-                      default { "$verb,-,-,-,-,-,1" }
-                  }
-                  if ($case -eq 'default' -or $case -eq 'parent') { $expected = "$verb,-,-,-,-,-,1" }
-                  if ($actual -ne $expected) { throw "$case $verb expected $expected, got $actual" }
-                  Write-Output "$case $actual"
-              }
-          }
-          '@ | Set-Content "$root/test.ps1"
-      - name: Compare parent and patched launchers in Windows PowerShell 5.1
-        shell: powershell
-        run: '& "$env:RUNNER_TEMP/launcher probe/test.ps1"'
-      - name: Compare parent and patched launchers in PowerShell 7
-        shell: pwsh
-        run: '& "$env:RUNNER_TEMP/launcher probe/test.ps1"'
-  beta2:
-    runs-on: windows-2025
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: 9e0db508382392414dd6cb17d1a49b153fd1ea9f
-          persist-credentials: false
-      - name: Run the upstream RDNA 2 classification test
-        run: cargo test --locked -p victory-gpu --lib --features diagnostics host::tests::rdna2_is_navi_2x_only -- --exact
-      - name: Build the diagnostics release for the physical retest
-        run: cargo build --locked --release -p victory --features diagnostics
-      - name: Record checksum and revision
-        shell: pwsh
-        run: |
-          $sum = (Get-FileHash target/release/victory.exe -Algorithm SHA256).Hash.ToLower()
-          "$sum  victory.exe" | Set-Content -Encoding ascii target/release/SHA256SUMS.txt
-          git rev-parse HEAD | Set-Content -Encoding ascii target/release/SOURCE.txt
-          Get-Content target/release/SHA256SUMS.txt, target/release/SOURCE.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: victory-beta2-9e0db50-windows-x64-diagnostics
-          path: |
-            target/release/victory.exe
-            target/release/SHA256SUMS.txt
-            target/release/SOURCE.txt
