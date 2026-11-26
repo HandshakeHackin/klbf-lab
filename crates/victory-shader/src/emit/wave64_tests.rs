@@ -530,3 +530,69 @@ fn scc_of_a_mask_operation_joined_with_a_scalar_test_needs_the_skip_wave_wide() 
     }
     eprintln!("ran on the hardware device: the inner test's SCC for every lane once some lane is inside");
 }
+
+/// Thread t reads the old value from both halves, then replaces its own slot with its
+/// partner's value and reads the partner again. All three reads reach the output.
+#[test]
+fn split_lds_adjacent_reads_share_only_the_middle_meeting() {
+    let words = [
+        0x3404_0082,              // v2 = t * 4
+        0x3A06_00A0,              // v3 = t ^ 32
+        0x3406_0682,              // v3 *= 4
+        0xD834_0000, 0x0000_0002, // ds_write_b32 v2, v0
+        0xD8D8_0000, 0x0400_0003, // ds_read_b32 v4, v3 (partner)
+        0xD8D8_0000, 0x0500_0002, // ds_read_b32 v5, v2 (self)
+        0xD834_0000, 0x0000_0402, // ds_write_b32 v2, v4
+        0xD8D8_0000, 0x0600_0003, // ds_read_b32 v6, v3 (partner after overwrite)
+        0xE070_1000, 0x8002_0402, // out[t] = v4
+        0xE070_1100, 0x8002_0502, // out[64 + t] = v5
+        0xE070_1200, 0x8002_0602, // out[128 + t] = v6
+    ];
+    let mut native = native(&words);
+    let StageIo::Cs(cs) = &mut native.io else { unreachable!() };
+    cs.rsrc2 |= 1 << 15;
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    for (passes, expected) in [(0, "BWBRBRBWBR"), (super::bitcode::opt::BARRIERS, "BWBRRBWBR")] {
+        let shader = super::with_shader_opt(passes, || lowered(&native, &p, &HashSet::new())).expect("lower");
+        if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+            v.validate(&mut shader.dxil.clone()).expect("DXIL validation failed");
+        }
+        if let Some(dump) = super::tests::dump_dxil(&shader.dxil) {
+            let pattern: String = dump.lines().filter_map(|line| {
+                if line.contains("call void @dx.op.barrier(") {
+                    Some('B')
+                } else if line.contains("load i32, i32 addrspace(3)*") {
+                    Some('R')
+                } else if line.trim_start().starts_with("store i32") && line.contains("addrspace(3)*") {
+                    Some('W')
+                } else {
+                    None
+                }
+            }).collect();
+            assert_eq!(pattern, expected, "barriers, LDS reads and LDS writes, mask {passes}");
+            eprintln!("mask {passes}: {pattern}");
+        }
+        let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let pipeline = Host::new(false).and_then(|host| {
+            let (root, pso) = host.compute_pipeline(&shader)?;
+            Ok((host, root, pso))
+        });
+        let (host, root, pso) = match pipeline {
+            Ok(pipeline) => pipeline,
+            Err(e) => {
+                assert!(std::env::var_os("VICTORY_REQUIRE_HW_GPU").is_none(), "{e}");
+                eprintln!("GPU did not execute mask {passes}: {e}");
+                continue;
+            }
+        };
+        let ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+        let out = host.dispatch(&root, &pso, &Dispatch {
+            roots: vec![(0, Root::Constants(ud))], views: &[View::RawUav(192)],
+            samplers: &[], groups: [1, 1, 1],
+        }).expect("dispatch");
+        for (t, expected) in (0..64u32).map(|t| (t as usize, [t ^ 32, t, t])) {
+            assert_eq!([out[0][t], out[0][64 + t], out[0][128 + t]], expected, "thread {t}");
+        }
+        eprintln!("mask {passes}: all 192 output dwords matched");
+    }
+}

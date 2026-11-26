@@ -5012,11 +5012,20 @@ impl<'a> Lower<'a> {
             && !(name.starts_with("ds_swizzle") || name.contains("permute"))
             && self.lds_meet.as_ref().is_none_or(|(all, _)| all[b])
         {
-            // the two host waves of a console wave meet before each LDS access: what the other
-            // half wrote is visible, and what it still reads is not overwritten
-            let mode = self.s.m.i32(meeting_mode());
-            let void = self.s.t.void;
-            self.s.op(self.cur, "barrier", Attr::NoDuplicate, void, 80, &[mode]);
+            // Two consecutive unguarded dword loads in the same block can share the
+            // first load's meeting. Neither half writes LDS between the two loads.
+            let plain_read = |op: &Inst| {
+                matches!(op.fields, Fields::Ds { gds: false, .. }) && op.name() == "ds_read_b32"
+            };
+            let shares_meeting = plain_read(inst)
+                && i > 0
+                && plain_read(&self.x.p.blocks[b].insts[i - 1])
+                && self.x.st.guards[b][i - 1].is_none()
+                && self.x.st.guards[b][i].is_none()
+                && super::shader_opt() & super::bitcode::opt::BARRIERS != 0;
+            if !shares_meeting {
+                self.lds_meeting();
+            }
         }
         let r = match &inst.fields {
             Fields::Sop { .. } => self.sop(inst),

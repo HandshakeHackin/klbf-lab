@@ -181,7 +181,7 @@ pub fn group_sync() -> u8 {
 ///   non-aliasing local/shared forwarding, 32 a first-lane read of two host
 ///   waves without the round that asks which half has a lane (where every lane
 ///   has one), 64 pure loop-invariant code motion, 128 adjacent redundant
-///   barrier elimination.
+///   barrier elimination and shared meetings for consecutive LDS dword reads.
 ///
 /// Part of the translation: the shader cache keys on it (`victory-gpu`'s
 /// does).
@@ -1234,7 +1234,7 @@ mod tests {
     /// The LLVM text `dxc -dumpbin` prints for a DXIL container, when dxc
     /// is installed.
     #[cfg(windows)]
-    fn dump_dxil(container: &[u8]) -> Option<String> {
+    pub(super) fn dump_dxil(container: &[u8]) -> Option<String> {
         let dxc = match std::env::var_os("VICTORY_PC_DXC") {
             Some(p) => std::path::PathBuf::from(p),
             None => super::validator::Validator::default_path()?.with_file_name("dxc.exe"),
@@ -1242,7 +1242,9 @@ mod tests {
         if !dxc.exists() {
             return None;
         }
-        let file = std::env::temp_dir().join(format!("victory-interp-{}.dxil", std::process::id()));
+        let file = std::env::temp_dir().join(format!(
+            "victory-dump-{}-{:?}.dxil", std::process::id(), std::thread::current().id()
+        ));
         std::fs::write(&file, container).ok()?;
         let out = std::process::Command::new(dxc)
             .arg("-dumpbin")
