@@ -1,0 +1,40 @@
+name: Reproduce and verify half-view fixture isolation
+on:
+  push:
+    branches: [verify/half-view-fixtures]
+permissions:
+  contents: read
+jobs:
+  comparison:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 3
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Reproduce three fixture failures on PR head with switch disabled
+        shell: pwsh
+        env:
+          VICTORY_HALF_VIEWS: '0'
+        run: |
+          git checkout --detach 52388bb6b923cb671498155dbce84f1b5125079d
+          if ($LASTEXITCODE) { throw 'checkout failed' }
+          $log = cargo test -p victory-shader --lib --locked emit::valu_tests:: 2>&1
+          $code = $LASTEXITCODE
+          $log | Out-Host
+          if ($code -eq 0) { throw 'expected regression did not reproduce' }
+          foreach ($test in @('a_format_load_read_as_halves_loads_the_integer','half_places_are_the_descriptors_the_program_loads','halves_go_through_a_table_as_they_are_and_name_their_views')) {
+              if (!($log -match "test emit::valu_tests::${test} \.\.\. FAILED")) { throw "missing failure for $test" }
+          }
+          exit 0
+      - name: Run shader library with switch disabled after fixture change
+        env:
+          VICTORY_HALF_VIEWS: '0'
+        run: |
+          git checkout --detach b649205f6bff0f029da4636e0c2e4a4ea435283e
+          if ($LASTEXITCODE) { throw 'checkout failed' }
+          cargo test -p victory-shader --lib --locked
+      - name: Check the same fixtures again with launcher default
+        run: cargo test -p victory-shader --lib --locked emit::valu_tests::
