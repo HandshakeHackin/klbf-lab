@@ -287,24 +287,23 @@ const WATERFALL_SIZE_ONLY_WAVE32: &[u32] = &[
 
 #[test]
 fn a_descriptor_only_read_as_data_gives_its_views_size() {
-    // Without a use no instruction names the view's kind; the table's range
-    // does (an image: taken for 2D). The lowering used to refuse.
-    let refused = std::panic::catch_unwind(|| build_with(WATERFALL_SIZE_ONLY_WAVE32, false, 0));
-    assert!(refused.is_err(), "only a program refused otherwise measures");
-    let shader =
-        lower::with_measured_descriptors(|| build_with(WATERFALL_SIZE_ONLY_WAVE32, false, 0));
+    // The table identifies an eight-dword SRV. Its dimensions can be read
+    // by the normal lowering as well as with measured descriptors enabled.
+    let build = || build_with(WATERFALL_SIZE_ONLY_WAVE32, false, 0);
     let (a, b) = ([[0.0f32; 4]; 8 * 4], [[0.0f32; 4]; 4 * 2]);
     let views = [
         View::Texture(8, 4, &a),
         View::Texture(4, 2, &b),
         View::RawUav(32),
     ];
-    for (label, got) in run(&shader, &views) {
-        // Even lanes hold entry 0's offset (8 x 4), odd lanes entry 1's (4 x 2).
-        let want: Vec<u32> = (0..32)
-            .map(|l| if l & 1 == 0 { 7 | 3 << 16 } else { 3 | 1 << 16 })
-            .collect();
-        assert_eq!(got, want, "{label}");
+    // Even lanes hold entry 0's offset (8 x 4), odd lanes entry 1's (4 x 2).
+    let want: Vec<u32> = (0..32)
+        .map(|l| if l & 1 == 0 { 7 | 3 << 16 } else { 3 | 1 << 16 })
+        .collect();
+    for (mode, shader) in [("normal", build()), ("measured", lower::with_measured_descriptors(build))] {
+        for (label, got) in run(&shader, &views) {
+            assert_eq!(got, want, "{label}, {mode}");
+        }
     }
 }
 
