@@ -180,6 +180,28 @@ impl GraphicsState {
         }
     }
 
+    /// Active render targets and their effective blend settings for a refused PSO.
+    /// With independent blending off, every active target uses slot zero.
+    fn target_blends(&self) -> String {
+        let mut targets = Vec::new();
+        for (slot, format) in self.targets.RTFormats.iter()
+            .take(self.targets.NumRenderTargets as usize)
+            .enumerate()
+        {
+            let source = if self.blend.IndependentBlendEnable.as_bool() {
+                slot
+            } else {
+                0
+            };
+            let blend = &self.blend.RenderTarget[source];
+            targets.push(format!(
+                "RT{slot}: format={} blend={} write_mask={:#x}",
+                format.0, blend.BlendEnable.as_bool(), blend.RenderTargetWriteMask,
+            ));
+        }
+        targets.join(", ")
+    }
+
     /// Everything the state holds, as text: part of a pipeline's name in
     /// the library and of the key a title pipeline is started early by.
     pub(crate) fn describe(&self) -> String {
@@ -560,7 +582,10 @@ impl HostPipeline {
             let pso = match mesh_pipeline(&host.device, &root, code(0), code(1), g, &name) {
                 Ok(pso) => pso,
                 Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host mesh pipeline refused");
+                    tracing::warn!(
+                        error = %e, ?shaders, independent_blend = g.blend.IndependentBlendEnable.as_bool(),
+                        targets = %g.target_blends(), "host mesh pipeline refused"
+                    );
                     host.log_messages();
                     return None;
                 }
@@ -663,7 +688,10 @@ impl HostPipeline {
         let pso = match made {
             Ok(pso) => pso,
             Err(e) => {
-                tracing::warn!(error = %e, ?shaders, "host pipeline refused");
+                tracing::warn!(
+                    error = %e, ?shaders, independent_blend = g.blend.IndependentBlendEnable.as_bool(),
+                    targets = %g.target_blends(), "host pipeline refused"
+                );
                 host.log_messages();
                 return None;
             }
@@ -849,6 +877,36 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
+
+    #[test]
+    fn refusal_shows_the_effective_blend_for_each_active_target() {
+        let mut g = GraphicsState::default();
+        g.targets.NumRenderTargets = 3;
+        g.targets.RTFormats[..3].copy_from_slice(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R8_UINT,
+        ]);
+        g.blend.RenderTarget[0].BlendEnable = true.into();
+        g.blend.RenderTarget[2].RenderTargetWriteMask = 0;
+        assert_eq!(
+            g.target_blends(),
+            concat!(
+                "RT0: format=28 blend=true write_mask=0xf, ",
+                "RT1: format=28 blend=true write_mask=0xf, ",
+                "RT2: format=62 blend=true write_mask=0xf",
+            ),
+        );
+        g.blend.IndependentBlendEnable = true.into();
+        assert_eq!(
+            g.target_blends(),
+            concat!(
+                "RT0: format=28 blend=true write_mask=0xf, ",
+                "RT1: format=28 blend=false write_mask=0xf, ",
+                "RT2: format=62 blend=false write_mask=0x0",
+            ),
+        );
+    }
 
     /// A triangle mesh shader of our own and a pixel shader for it.
     const MS: &str = "struct V { float4 p : SV_Position; };
