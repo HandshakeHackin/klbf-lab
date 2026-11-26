@@ -31,6 +31,6 @@ jobs:
           cargo test --locked -p victory-gpu --features diagnostics --lib predicted_clashes_match_the_slots_invalidated_by_a_write -- --nocapture | tee "$RUNNER_TEMP/overlap.log"
           grep -F '1 passed; 0 failed' "$RUNNER_TEMP/overlap.log"
           cargo test --locked -p victory-gpu --features diagnostics --lib watch::tests:: -- --test-threads=1 | tee "$RUNNER_TEMP/watch.log"
-          grep -F '14 passed; 0 failed' "$RUNNER_TEMP/watch.log"
+          grep -F '15 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/watch.log"
       - name: Run all GPU library tests sequentially
         run: cargo test --locked -p victory-gpu --lib -- --test-threads=1
