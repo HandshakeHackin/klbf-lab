@@ -106,7 +106,7 @@ fn early_budgets() -> (u64, u64) {
 /// (Neptune) Whether the once-a-frame passes over the heap's views (the buffers and the
 /// textures shaders pick by an index they compute) are recorded into a list of ours that
 /// runs ahead of the frame's first submission (`VICTORY_PASSES_AHEAD`: 1 or 0; unset: with
-/// `VICTORY_THIN=1`).
+/// `VICTORY_THIN=1` except on RDNA 2).
 ///
 /// They were recorded into the list whose draw asked first, in the order the title records:
 /// its first list of a frame, which it also submits first. With lists translated by threads
@@ -114,11 +114,7 @@ fn early_budgets() -> (u64, u64) {
 /// it read last frame's buffers through the heap (run ve167: hair and whole people drawn
 /// from old bones, 44 dark patches in 25 s; one translating thread: 2).
 pub(crate) fn passes_ahead() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("VICTORY_PASSES_AHEAD") {
-        Ok(v) => v.trim() != "0",
-        Err(_) => crate::list::thin::wanted(),
-    })
+    crate::host::ahead::settings().passes_ahead
 }
 
 /// (Neptune) The title's view heap a draw last had set ([`passes_ahead`]; 0: none yet).

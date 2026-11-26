@@ -836,8 +836,7 @@ static AHEAD_NONE: AtomicBool = AtomicBool::new(false);
 /// either way, run ve175), so it goes first, as in the runs the picture was judged in.
 #[cfg(windows)]
 fn ahead_first() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_AHEAD_FIRST").is_none_or(|v| v != "0"))
+    crate::host::ahead::settings().ahead_first
 }
 
 /// (Neptune) Whether the list ahead of a frame is begun at the title's present call

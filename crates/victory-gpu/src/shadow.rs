@@ -250,8 +250,7 @@ static CARDED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
 static FLAGGED: Mutex<Vec<std::sync::Weak<Shadow>>> = Mutex::new(Vec::new());
 
 fn flagged_line() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_FLAGGED").is_none_or(|v| v != "0"))
+    crate::host::ahead::settings().card_flagged
 }
 
 /// (Neptune) `shadow` is shared from now on: if it has a card side it is among [`CARDED`],
