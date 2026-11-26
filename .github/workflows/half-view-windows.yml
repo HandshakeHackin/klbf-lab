@@ -1,0 +1,62 @@
+name: Verify half-view launcher and shader tests
+on:
+  push:
+    branches: [verify/half-views-win]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Windows PowerShell 5.1 launcher matrix
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Join-Path $env:RUNNER_TEMP 'half-view-test'
+          $game = Join-Path $base 'game'
+          $release = Join-Path $base 'target\release'
+          $docs = Join-Path $base 'docs\klbf'
+          foreach ($dir in $game,$release,$docs) { [IO.Directory]::CreateDirectory($dir) | Out-Null }
+          Copy-Item play.ps1 $base
+          Copy-Item docs\klbf\skip-amd.txt $docs
+          foreach ($file in 'game.exe','shaders.rpf','amd_fidelityfx_upscaler_dx12.dll') { [IO.File]::WriteAllText((Join-Path $game $file),'') }
+          $src = Join-Path $base 'probe.cs'
+          @'
+          using System;
+          using System.IO;
+          class Probe {
+              static void Main(string[] args) {
+                  File.WriteAllLines(Environment.GetEnvironmentVariable("PROBE_OUTPUT"), new string[] {
+                      args[0], Environment.GetEnvironmentVariable("VICTORY_HALF_VIEWS") ?? "unset",
+                      Environment.GetEnvironmentVariable("VICTORY_UNUSED_PROBE") ?? "unset" });
+              }
+          }
+          '@ | Set-Content $src
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo "/out:$release\victory.exe" $src
+          if ($LASTEXITCODE) { throw 'probe compilation failed' }
+          $env:PROBE_OUTPUT = Join-Path $base 'probe.txt'
+          $env:VICTORY_UNUSED_PROBE = 'must be cleared'
+          foreach ($value in 'unset','0','1') {
+              if ($value -eq 'unset') { Remove-Item Env:VICTORY_HALF_VIEWS -ErrorAction SilentlyContinue }
+              else { $env:VICTORY_HALF_VIEWS = $value }
+              foreach ($mode in 'translate','run') {
+                  $opts = @('-NoAgility','-GameDir',$game,'-FfxDir',$game)
+                  if ($mode -eq 'translate') { $opts += '-Prebuild' }
+                  & powershell -NoProfile -ExecutionPolicy Bypass -File "$base\play.ps1" @opts
+                  if ($LASTEXITCODE) { throw "launcher failed for $mode $value" }
+                  $actual = [IO.File]::ReadAllLines($env:PROBE_OUTPUT) -join ','
+                  if ($actual -cne "$mode,$value,unset") { throw "unexpected child state $actual" }
+                  [IO.File]::Delete($env:PROBE_OUTPUT)
+                  Write-Host "PASS mode=$mode HALF_VIEWS=$value unrelated variable cleared"
+              }
+          }
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Native shader library suite
+        run: cargo test -p victory-shader --lib --locked
+      - name: Cache fingerprint in a fresh process with override
+        env:
+          VICTORY_HALF_VIEWS: '0'
+        run: cargo test -p victory-shader --lib --locked emit::tests::half_view_setting_is_part_of_the_shader_cache_fingerprint -- --exact
