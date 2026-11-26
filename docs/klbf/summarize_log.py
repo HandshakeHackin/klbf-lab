@@ -3,7 +3,8 @@
     py -3 docs/klbf/summarize_log.py run.log --lines 1200 2500 --breakdown
 
 Choose inclusive line numbers around one scene, or pass a log already trimmed
-to that scene. The output gives medians of logged samples, not per-frame lows.
+to that scene. Line ranges use the original physical lines, including wraps.
+The output gives medians of logged samples, not per-frame lows.
 Only complete timing records contribute to the breakdown. Copy and texture
 preparation are included in CPU preparation time.
 """
@@ -31,6 +32,9 @@ FRAMEGEN = re.compile(
 )
 STATE = re.compile(r"\bon=(true|false)\b")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+ENTRY = re.compile(r"^\s*\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
+TIMING_START = re.compile(rf"{DECIMAL} fps,|ffx: frame generation:")
+TIMING_LOGGER = re.compile(r"\bvictory_gpu::(?:host|ffx):")
 
 
 def format_fps(value):
@@ -38,16 +42,32 @@ def format_fps(value):
     return f"{value:.2f}" if 0 < value < 1 else f"{value:.1f}"
 
 
-def summarize(lines, first, last, breakdown=False):
-    host = []
-    stages = []
-    framegen = {}
+def timing_records(lines, first, last):
+    # PowerShell can wrap one tracing event over several physical lines.
+    # Join only the timing events and end them at the next event or sample.
+    parts = []
     for number, line in enumerate(lines, 1):
         if last is not None and number > last:
             break
         if number < first:
             continue
-        line = ANSI.sub("", line)
+        line = ANSI.sub("", line).strip()
+        entry = ENTRY.match(line)
+        timing = TIMING_START.search(line)
+        if parts and (entry or timing):
+            yield " ".join(parts)
+            parts = []
+        if parts or timing or (entry and TIMING_LOGGER.search(line)):
+            parts.append(line)
+    if parts:
+        yield " ".join(parts)
+
+
+def summarize(lines, first, last, breakdown=False):
+    host = []
+    stages = []
+    framegen = {}
+    for line in timing_records(lines, first, last):
         match = HOST.search(line)
         if match:
             host.append(tuple(map(float, match.groups())))
