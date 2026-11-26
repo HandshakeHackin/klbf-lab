@@ -1,28 +1,36 @@
-name: Check PR 72 alone and run its descriptor tests with PR 37
+name: Verify missing DXGI readings and real present-counter wrap
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  descriptors:
+  counts:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 54ca988330b6dcbceb3dd873afa43ef7c7674fbd
-          fetch-depth: 0
+          ref: d18474523030d0bda09080b48dd52c3a197bead4
           persist-credentials: false
-      - name: Compile victory-gpu at the standalone PR head
-        run: cargo check --locked -p victory-gpu --lib
-      - name: Merge the independent indirect and depth test repair
+      - name: Run the frame-generation tests against the compiled GPU library
+        run: |
+          cargo test --locked -p victory-gpu --lib ffx::tests:: -- --nocapture
+      - name: Verify the same regression catches a missing count treated as zero
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 3ecd80f610cf4954cc2377f328662e1fce600c0d
-          git -c user.name=CI -c user.email=ci@localhost merge --no-commit FETCH_HEAD
-          test "$(git hash-object crates/victory-gpu/src/descriptor/host.rs)" = 54eb49ab5969ec4dd48b1408d6377304ae27dfd3
-      - name: Run the complete descriptor host test module
-        run: |
-          cargo test --locked -p victory-gpu --lib descriptor::host::tests:: -- --nocapture --test-threads=1
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("crates/victory-gpu/src/ffx.rs")
+          s = p.read_text()
+          original = "let presented = presented?;"
+          assert s.count(original) == 1
+          p.write_text(s.replace(original, "let presented = presented.unwrap_or(0);"))
+          PY
+          if cargo test --locked -p victory-gpu --lib ffx::tests::present_rates_span_failed_queries_and_preserve_a_real_counter_wrap -- --exact --nocapture > "$RUNNER_TEMP/control.txt" 2>&1; then
+            cat "$RUNNER_TEMP/control.txt"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/control.txt"
+          grep -F 'left: Some((1.0, 4294967292.0))' "$RUNNER_TEMP/control.txt"
