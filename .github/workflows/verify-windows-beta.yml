@@ -1,101 +1,38 @@
-name: Build the PR 63 Windows release for the RTX 2080 comparison
+name: Test PR 67 on native Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  compare:
-    runs-on: windows-latest
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: 56d62d099217e8f78f22e243d68bd0e0dbad1415
+          ref: 7d8286d7841184d3015ede82b6fcdc0ff1db103b
+          fetch-depth: 2
           persist-credentials: false
-      - name: Build the unmodified PR 63 release and verify startup
-        shell: pwsh
+      - name: Compile the exact PR source with diagnostics
+        run: cargo check --locked -p victory-gpu --features diagnostics --lib
+      - name: Apply PR 37's existing test-target repairs
+        shell: bash
         run: |
-          cargo build --release --locked -p victory
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          target/release/victory.exe --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Path cap-build | Out-Null
-          Copy-Item target/release/victory.exe cap-build/victory.exe
-          $digest = (Get-FileHash -Algorithm SHA256 cap-build/victory.exe).Hash.ToLowerInvariant()
-          "$digest  victory.exe" | Tee-Object -FilePath cap-build/SHA256SUMS.txt
-          git rev-parse HEAD | Tee-Object -FilePath cap-build/COMMIT.txt
-      - name: Verify capped and uncapped BC1 data with padded host row pitches
-        env:
-          VICTORY_D3D12_WARP: '1'
-        shell: pwsh
+          set -euo pipefail
+          git fetch --no-tags --depth=5 https://github.com/HandshakeHackin/klbf-lab.git 8aea65cc7325507b2bceafca58bd21f6253cb4bc
+          git diff d006c10fe0159727c1fbd76455ce6ad9ecf4293b 8aea65cc7325507b2bceafca58bd21f6253cb4bc | git apply
+          git diff --exit-code HEAD -- crates/victory-gpu/src/watch.rs crates/victory-gpu/src/drvwatch.rs
+      - name: Run all write-watch tests and the Windows event subscription test
+        shell: bash
         run: |
-          @'
-
-          #[cfg(test)]
-          mod mip_cap_review {
-              use super::*;
-
-              #[test]
-              fn every_retained_bc_row_matches_its_title_mip() {
-                  use crate::resource::{first_host_mip, host_resource, placed_bytes, texture_at};
-
-                  let mut desc = [0u32; 14];
-                  desc[0] = 3;
-                  desc[4] = 768;
-                  desc[6] = 512;
-                  desc[7] = (4 << 16) | 1;
-                  desc[8] = 71; // BC1, 8 bytes per 4x4 block
-                  desc[9] = 1;
-                  desc[11] = 1;
-                  let data = Box::leak(vec![0xee; placed_bytes(&desc).unwrap() as usize].into_boxed_slice());
-                  let resource = texture_at(data.as_ptr() as u64, &desc).unwrap();
-                  let texture = host_resource(resource).expect("WARP texture");
-                  let first_mip = match std::env::var("VICTORY_TEXTURE_MAX_DIM").as_deref().unwrap_or("") {
-                      "512" => 1,
-                      "" => 0,
-                      _ => unreachable!(),
-                  };
-                  let expected = (first_mip > 0).then_some((first_mip, 4 - first_mip));
-                  assert_eq!(first_host_mip(resource, texture), expected);
-                  let staging = staging(resource, texture).unwrap();
-                  let mut images = Vec::new();
-                  for mip in 0..4 {
-                      let row_bytes = (768usize >> mip) / 4 * 8;
-                      let rows = (512usize >> mip) / 4;
-                      let bytes: Vec<_> = (0..row_bytes*rows).map(|i| ((i%row_bytes*19 + i/row_bytes*37 + mip*61)%251) as u8).collect();
-                      staging.layout.tile(data, mip as u32, 0, &bytes, row_bytes, bytes.len()).unwrap();
-                      images.push((bytes, row_bytes, rows));
-                  }
-                  staging.detile(data);
-                  assert_eq!(staging.footprints.len(), 4 - first_mip as usize);
-                  let mut checked = 0usize;
-                  for (idx, f) in staging.footprints.iter().enumerate() {
-                      let (image, row_bytes, rows) = &images[first_mip as usize + idx];
-                      assert_eq!(staging.rows[idx] as usize,*rows);
-                      for y in 0..*rows {
-                          let offset = f.Offset as usize + y * f.Footprint.RowPitch as usize;
-                          assert!(offset + row_bytes <= staging.bytes as usize);
-                          // SAFETY: the live staging allocation contains this initialized BC row.
-                          let row = unsafe { std::slice::from_raw_parts(staging.data.add(offset), *row_bytes) };
-                          assert_eq!(row, &image[y*row_bytes..(y+1)*row_bytes], "host mip {idx}, row {y}");
-                          checked += row_bytes;
-                      }
-                  }
-                  eprintln!("first title mip={first_mip}, checked {checked} active bytes across {} host levels", staging.footprints.len());
-                  unstage(resource);
-              }
-          }
-          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/texture.rs
-          foreach ($cap in 'unset','512') {
-              if ($cap -eq 'unset') { Remove-Item Env:VICTORY_TEXTURE_MAX_DIM -ErrorAction SilentlyContinue } else { $env:VICTORY_TEXTURE_MAX_DIM = $cap }
-              cargo test --locked -p victory-gpu --features diagnostics --lib every_retained_bc_row_matches_its_title_mip -- --nocapture
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pr63-56d62d0-windows-x64
-          path: cap-build/
-          if-no-files-found: error
-          retention-days: 14
+          set -euo pipefail
+          cargo test --locked -p victory-gpu --features diagnostics --lib 'watch::tests::' -- --test-threads=1 --skip 'drvwatch::' --nocapture 2>&1 | tee "$RUNNER_TEMP/watch.txt"
+          grep -F '13 passed; 0 failed' "$RUNNER_TEMP/watch.txt"
+          cargo test --locked -p victory-gpu --features diagnostics --lib 'drvwatch::tests::the_system_takes_the_subscription' -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/event.txt"
+          grep -F '1 passed; 0 failed' "$RUNNER_TEMP/event.txt"
