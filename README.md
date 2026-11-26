@@ -120,6 +120,7 @@ From what testers have reported so far. To measure and compare on your machine, 
 
 `play.ps1` sets these (the pre-build and the game must use the same ones: the shader cache depends on them):
 
+- If character mouths distort on Proton, set `VICTORY_HALF_VIEWS=0` before pre-build and play to use the older 16-bit buffer path. This may leave facial animation at rest. Unset it to use the default path; the shader cache distinguishes the settings.
 - Our pre-build and skip list: `VICTORY_SKIP_PIPELINES` = [docs/klbf/skip-amd.txt](docs/klbf/skip-amd.txt); pipelines the driver crashed on are skipped from `prebuild-crashed.txt`.
 - New in this build: `VICTORY_CLAMP_AFTER_WRITER=1` (zm0kiemedia), `VICTORY_PORT_CONSTANTS=1` and `VICTORY_PORT_DESCRIPTORS=1` (avatarmanz's renderer port), `VICTORY_DYNAMIC_SLOTS=786432` (more descriptor slots: no more draws dropped, fixes flicker), `VICTORY_INDIRECT_RAW=0` and `VICTORY_STAGE_POOL_MB=2048` (WillyboPeep).
 - New in Lab 62: `VICTORY_TEXTURE_MAX_DIM=1024` by default (Evan-Lowry's cap; loading screens, menus and short-mip images are kept at full size, `VICTORY_TEXTURE_MAX_DIM_KEEP_UI=0` turns that off), `-LowMemory` sets 512. `VICTORY_LIBRARY_LOCK=0`: Ammar Zubair's AMD pipeline-library lock is on by default on AMD in the code, but the serialized compile was too slow in play, so the launcher turns it off (remove the line to try it). `VICTORY_TEXTURE_LRU=1` (samishating) is available, off by default.

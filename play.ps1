@@ -60,11 +60,11 @@ if (-not $NoAgility -and -not (Test-Path (Join-Path $agility 'D3D12Core.dll'))) 
 if (-not $Exe) { $Exe = (Get-ChildItem $GameDir -Filter *.exe | Sort-Object Length -Descending | Select-Object -First 1).FullName }
 
 # The same settings for pre-build and play: the shader cache key depends on them.
-# Preserve explicit adapter overrides for hardware retests. With none set, the
-# executable chooses its defaults using the D3D12 adapter it actually opened.
-$adapterOverrides = @('VICTORY_AHEAD_FIRST', 'VICTORY_CARD_FLAGGED', 'VICTORY_PASSES_AHEAD', 'VICTORY_RELAY')
+# Preserve explicit adapter and shader overrides for retests. Without adapter
+# overrides, the executable chooses defaults for the D3D12 adapter it opened.
+$overrides = @('VICTORY_AHEAD_FIRST', 'VICTORY_CARD_FLAGGED', 'VICTORY_PASSES_AHEAD', 'VICTORY_RELAY', 'VICTORY_HALF_VIEWS')
 Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -notin $adapterOverrides } | Remove-Item
+  Where-Object { $_.Name -notin $overrides } | Remove-Item
 $set = [ordered]@{
   VICTORY_GAME_DIR = $GameDir
   VICTORY_OVERLAY = '0'

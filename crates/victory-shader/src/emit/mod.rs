@@ -1126,6 +1126,18 @@ mod tests {
     use super::parse_loop_limit;
 
     #[test]
+    fn half_view_setting_is_part_of_the_shader_cache_fingerprint() {
+        let name = "VICTORY_HALF_VIEWS";
+        assert!(env!("VICTORY_SHADER_SWITCHES").split(',').any(|switch| switch == name));
+        let mut entry = format!("{name}=").into_bytes();
+        if let Some(value) = std::env::var_os(name) {
+            entry.extend_from_slice(value.as_encoded_bytes());
+        }
+        entry.push(0);
+        assert!(super::translation_fingerprint().windows(entry.len()).any(|part| part == entry));
+    }
+
+    #[test]
     fn the_clean_up_switch_parses_or_runs_every_pass() {
         let all = super::bitcode::opt::ALL;
         assert_eq!(parse_shader_opt(None), all);

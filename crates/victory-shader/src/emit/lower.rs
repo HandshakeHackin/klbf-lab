@@ -914,6 +914,23 @@ fn f16_nearest_on() -> bool {
 thread_local! {
     /// A test's choice for [`f16_nearest_on`], for its thread only.
     pub(super) static TEST_F16_NEAREST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// A test's choice for [`half_views_on`], for its thread only.
+    pub(super) static TEST_HALF_VIEWS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// `VICTORY_HALF_VIEWS=0` keeps the original float path for 16-bit views.
+/// The unsigned half-view path remains on by default.
+fn half_views_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_HALF_VIEWS.get() {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| half_views_setting(std::env::var_os("VICTORY_HALF_VIEWS").as_deref()))
+}
+
+fn half_views_setting(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|v| v != "0")
 }
 
 /// `VICTORY_WAVE_OWN_BITS=0`: a wave OR where not every lane runs is refused as before
@@ -2239,7 +2256,9 @@ impl<'a> Lower<'a> {
 
     fn run(mut self) -> Result<Lowered, Stop> {
         let p = self.x.p;
-        self.halves_only = self.places_read_as_halves();
+        if half_views_on() {
+            self.halves_only = self.places_read_as_halves();
+        }
         let order = crate::ir::reverse_postorder(&p.blocks);
         for (n, &b) in order.iter().enumerate() {
             self.rpo[b] = n;
@@ -11372,6 +11391,16 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    #[test]
+    fn half_views_remain_enabled_unless_explicitly_disabled() {
+        use std::ffi::OsStr;
+        assert!(super::half_views_setting(None));
+        assert!(!super::half_views_setting(Some(OsStr::new("0"))));
+        for value in ["", "1", "other"] {
+            assert!(super::half_views_setting(Some(OsStr::new(value))));
+        }
+    }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {

@@ -2104,6 +2104,11 @@ fn a_format_load_read_as_halves_loads_the_integer() {
     let d16 = mubuf_idxen(LOAD_FORMAT_D16_X, 1, 0, 8);
     let d16_alone = lowered(&[&d16[..], &[half]].concat());
     assert_eq!(d16_alone.half_views, [(1, 0)]);
+    // Disabling half views retains the original float path for both kinds.
+    let previous = super::lower::TEST_HALF_VIEWS.replace(Some(false));
+    assert!(lowered(&[&load[..], &[half]].concat()).half_views.is_empty());
+    assert!(lowered(&[&d16[..], &[half]].concat()).half_views.is_empty());
+    super::lower::TEST_HALF_VIEWS.set(previous);
     // ...and not beside a whole float read through the same place, which
     // would see the unsigned twin: v2 = half(d16 v1) + v3.
     let mut d16_beside = d16.to_vec();
