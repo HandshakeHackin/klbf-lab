@@ -20,13 +20,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $victory = Join-Path $PSScriptRoot 'target\release\victory.exe'
-if (-not (Test-Path $victory)) { throw "Build first: cargo build --release ($victory not found)" }
-if (-not (Test-Path $GameDir)) { throw "Game folder not found: $GameDir (use -GameDir)" }
+if (-not (Test-Path -LiteralPath $victory)) { throw "Build first: cargo build --release ($victory not found)" }
+if (-not (Test-Path -LiteralPath $GameDir)) { throw "Game folder not found: $GameDir (use -GameDir)" }
 
 # victory.exe loads Microsoft's D3D12 Agility SDK from D3D12\ beside it (Windows 10's in-box D3D12
 # refuses our root signatures, #11 #85); without it the game does not start. Fetched once, with consent.
 $agility = Join-Path (Split-Path $victory) 'D3D12'
-if (-not $NoAgility -and -not (Test-Path (Join-Path $agility 'D3D12Core.dll'))) {
+if (-not $NoAgility -and -not (Test-Path -LiteralPath (Join-Path $agility 'D3D12Core.dll'))) {
   $ver = '1.620.2'
   $url = "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/$ver/microsoft.direct3d.d3d12.$ver.nupkg"
   if (-not $Yes) {
@@ -57,7 +57,7 @@ if (-not $NoAgility -and -not (Test-Path (Join-Path $agility 'D3D12Core.dll'))) 
     "Agility SDK $ver installed in $agility"
   } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
 }
-if (-not $Exe) { $Exe = (Get-ChildItem $GameDir -Filter *.exe | Sort-Object Length -Descending | Select-Object -First 1).FullName }
+if (-not $Exe) { $Exe = (Get-ChildItem -LiteralPath $GameDir -Filter *.exe | Sort-Object Length -Descending | Select-Object -First 1).FullName }
 
 # The same settings for pre-build and play: the shader cache key depends on them.
 # Preserve explicit adapter overrides for hardware retests. With none set, the
@@ -68,7 +68,7 @@ Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue |
 $set = [ordered]@{
   VICTORY_GAME_DIR = $GameDir
   VICTORY_OVERLAY = '0'
-  VICTORY_SKIP_PIPELINES = (Get-Content (Join-Path $PSScriptRoot 'docs\klbf\skip-amd.txt') -Raw).Trim()
+  VICTORY_SKIP_PIPELINES = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'docs\klbf\skip-amd.txt') -Raw).Trim()
   VICTORY_CARD_WINDOWS_MB = '4096'; VICTORY_BAKE_TEXTURES_MS = '10000'; VICTORY_EARLY_TEXTURES_MS = '40'
   VICTORY_WAVE_OWN_LDS_GROUPS = '64,128'; VICTORY_WIDE_MERGE = '1'; VICTORY_RELAY_OWN_QUEUE = '1'
   VICTORY_UNDER_WRITES_WORDS = '1'; VICTORY_UNDER_WRITES_RUNS = '100000'; VICTORY_UNDER_WRITES_MASKS = '1'
@@ -92,7 +92,7 @@ if ($SkipMovies) { $set['VICTORY_SKIP_MOVIES'] = $SkipMovies }
 $console = @()
 $fsr = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
 if (-not $SeriesX) {
-  if (-not (Test-Path $fsr)) { throw "AMD FSR not found: $fsr (use -FfxDir, or -SeriesX)" }
+  if (-not (Test-Path -LiteralPath $fsr)) { throw "AMD FSR not found: $fsr (use -FfxDir, or -SeriesX)" }
   $set['VICTORY_FSR_DLL'] = $fsr
   $console = @('--console', 'series-s')
 }
