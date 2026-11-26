@@ -1,26 +1,17 @@
-name: Verify win10-test shader suite and view dimensions
+name: Read back a synthetic tile mask before and after its GPU writer
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  shader:
+  tile-mask:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ad121fe90d3768ab030c633d120b89f1a020af84
-          fetch-depth: 0
+          ref: d34906c1d64a31dfe85f64d9ca2e9bc5f0e25faa
           persist-credentials: false
-      - name: Check descriptor dimensions on the proposed head
-        run: cargo test --locked -p victory-shader --lib a_descriptor_only_read_as_data_gives_its_views_size -- --nocapture
-      - name: Apply main's existing hosted-runner hardware detection to the other shader test
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 448b737fa8f4e669c3a9cede26c08a04d4cacd96
-          git show FETCH_HEAD --format= | git apply -
-      - name: Run the full shader test suite
-        run: cargo test --locked -p victory-shader --lib -- --test-threads=1
+      - name: Dispatch from the actual beta-2 clamp and read back both tile masks
+        run: cargo test --locked -p victory-gpu --lib ordered_argument_snapshot_drives_the_current_tile_mask -- --nocapture
