@@ -1,0 +1,55 @@
+name: Check launcher paths on Windows
+on:
+  push:
+    branches: [verify/literal-launcher-folders]
+permissions:
+  contents: read
+jobs:
+  paths:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise play and prebuild on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Join-Path $env:RUNNER_TEMP 'repo [beta]'
+          $game = Join-Path $base 'game [Series S]'
+          $sdk = Join-Path $base 'SDK [AMD]'
+          $release = Join-Path $base 'target\release'
+          $docs = Join-Path $base 'docs\klbf'
+          foreach ($dir in $game,$sdk,$release,$docs) { [IO.Directory]::CreateDirectory($dir) | Out-Null }
+          [IO.File]::Copy((Resolve-Path play.ps1).Path, "$base\play.ps1")
+          [IO.File]::Copy((Resolve-Path docs\klbf\skip-amd.txt).Path, "$docs\skip-amd.txt")
+          $fsr = Join-Path $sdk 'amd_fidelityfx_upscaler_dx12.dll'
+          foreach ($file in $fsr,"$game\game.exe","$game\shaders.rpf") { [IO.File]::WriteAllText($file, '') }
+          $source = Join-Path $env:RUNNER_TEMP 'probe.cs'
+          @'
+          using System;
+          using System.IO;
+          class Probe {
+              static void Main(string[] args) {
+                  File.WriteAllLines(Environment.GetEnvironmentVariable("PROBE_OUTPUT"), args);
+                  File.AppendAllText(Environment.GetEnvironmentVariable("PROBE_OUTPUT"), Environment.GetEnvironmentVariable("VICTORY_FSR_DLL"));
+              }
+          }
+          '@ | Set-Content -LiteralPath $source
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo "/out:$release\victory.exe" $source
+          if ($LASTEXITCODE) { throw 'probe compilation failed' }
+          $env:PROBE_OUTPUT = Join-Path $env:RUNNER_TEMP 'launcher-arguments.txt'
+          foreach ($mode in 'prebuild','play') {
+              $options = @('-NoAgility', '-GameDir', $game, '-FfxDir', $sdk)
+              if ($mode -eq 'prebuild') {
+                  $options += '-Prebuild'
+                  $expected = @('translate','--cache','--pipelines','--jobs','8',"$game\shaders.rpf",$fsr)
+              } else {
+                  $expected = @('run',"$game\game.exe",'--execute','--console','series-s',$fsr)
+              }
+              & powershell -NoProfile -ExecutionPolicy Bypass -File "$base\play.ps1" @options
+              if ($LASTEXITCODE) { throw "$mode failed" }
+              $actual = [IO.File]::ReadAllLines($env:PROBE_OUTPUT)
+              if (($actual -join '|') -cne ($expected -join '|')) { throw "Unexpected $mode invocation: $actual" }
+              [IO.File]::Delete($env:PROBE_OUTPUT)
+              Write-Host "$mode passed with literal brackets and spaces in all three paths."
+          }
