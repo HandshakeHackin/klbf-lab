@@ -11,6 +11,7 @@ ap.add_argument('--build', default='?'); ap.add_argument('--out', default='fps-r
 a = ap.parse_args()
 ansi = re.compile(r'\x1b\[[0-9;]*m')
 from datetime import datetime
+from statistics import median
 v, t = [], []
 bad = 0
 for line in open(a.log, encoding='utf8', errors='ignore'):
@@ -36,13 +37,13 @@ bands = [(18, 1e9, '18+'), (15, 18, '15-18'), (12, 15, '12-15'), (9, 12, '9-12')
 spread = {name: round(100 * sum(lo <= x < hi for x in v) / n) for lo, hi, name in bands}
 digest = hashlib.sha256(open(a.log, 'rb').read()).hexdigest()[:16]
 r = {'method': 'KLBF Lab shared measurement (docs/klbf/MEASUREMENT.md)', 'build': a.build, 'gpu': a.gpu, 'cpu': a.cpu,
-     'minutes': round((t[-1] - t[0]).total_seconds() / 60, 1) if len(t) > 1 else 0, 'average': round(sum(v) / n, 1), 'median': s[n // 2], 'low_5pct': low(5), 'low_1pct': low(1),
+     'minutes': round((t[-1] - t[0]).total_seconds() / 60, 1) if len(t) > 1 else 0, 'average': round(sum(v) / n, 1), 'median': median(s), 'low_5pct': low(5), 'low_1pct': low(1),
      'peak': s[-1], 'stability_index_pct': spread, 'samples': n,
      'from_utc': t[0].isoformat() if t else '', 'to_utc': t[-1].isoformat() if t else '', 'log_sha256_16': digest, 'consistency': 'ok' if bad == 0 else f'{bad} lines do not add up'}
 print(f"Average performance index: average {r['average']} fps, median {r['median']}, 5 % low {r['low_5pct']}, 1 % low {r['low_1pct']} ({n} samples, {r['minutes']} min)")
 print('Stability index: ' + ', '.join(f'{k} {p} %' for k, p in spread.items()))
 share = (f"[KLBF benchmark] {a.build} | {a.gpu} | {a.cpu} | {r['minutes']} min real play | avg {r['average']} fps, "
-         f"median {r['median']}, 1% low {r['low_1pct']}, peak {r['peak']} | time at 12+ fps: {spread['18+'] + spread['15-18'] + spread['12-15']} % "
+         f"median {r['median']}, 1% low {r['low_1pct']}, peak {r['peak']} | time at 12+ fps: {round(100 * sum(fps >= 12 for fps in v) / n)} % "
          f"| {n} samples {r['from_utc'][11:16]}-{r['to_utc'][11:16]} UTC | log {digest} | check {r['consistency']}")
 print('\nShare this line:\n' + share)
 json.dump(r, open(a.out, 'w', encoding='utf8'), indent=2)
