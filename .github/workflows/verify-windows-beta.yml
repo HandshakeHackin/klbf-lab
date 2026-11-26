@@ -1,54 +1,37 @@
-name: Check ReBAR fallback on the native Windows software adapter
+name: Verify all ten open beta contributions together on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  warp:
+  windows:
     runs-on: windows-latest
-    timeout-minutes: 25
-    env:
-      VICTORY_D3D12_WARP: '1'
-      VICTORY_REBAR: '2'
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: d29505a1d5a3eef400b75cc081d88b51bf6a5688
+          ref: 78ad5711ecaa7c8cbe5996f74c9d47d16167c061
+          fetch-depth: 0
           persist-credentials: false
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Distinguish a live round trip from an unsupported-device fallback
+      - name: Assemble the same ten PR heads reviewed locally
         shell: python
         run: |
-          from pathlib import Path
           import subprocess
-          path = Path("crates/victory-gpu/src/shadow.rs")
-          source = path.read_text(encoding="utf-8")
-          begin = source.index("fn rebar_wc_write_read_compare_roundtrip()")
-          stop = source.index("        let pattern:", begin)
-          original = source[begin:stop]
-          assert "if !rebar::supported()" in original and "rebar::gpu_upload_buffer(h, LEN as u64)" in original
-          probe = """
-              fn rebar_wc_write_read_compare_roundtrip() {
-                  let h = host().expect("a live software adapter is required");
-                  const LEN: usize = 256 << 10;
-                  assert_eq!(rebar::level(), 2);
-                  if !rebar::supported() {
-                      assert!(rebar::reserve(rebar::Kind::Window, LEN as u64, false).is_none());
-                      assert!(rebar::reserve(rebar::Kind::Buffer, LEN as u64, false).is_none());
-                      println!("WARP: GPU upload unsupported; window and buffer reservations both declined");
-                      return;
-                  }
-                  let (buffer, ptr) = rebar::gpu_upload_buffer(h, LEN as u64)
-                      .expect("the supported adapter must complete its upload allocation");
-                  println!("WARP: GPU upload supported; executing 256 KiB round trip");
-          """
-          path.write_text(source[:begin] + probe + source[stop:], encoding="utf-8")
-          test = "shadow::rebar_tests::rebar_wc_write_read_compare_roundtrip"
-          cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", "--features", "diagnostics", test, "--", "--exact", "--nocapture"]
-          result = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
-          print(result.stdout)
-          result.check_returncode()
-          assert "WARP: GPU upload" in result.stdout and "1 passed; 0 failed" in result.stdout
+          prs = [13, 14, 17, 18, 20, 21, 25, 27, 49, 60]
+          refs = [f"refs/pull/{n}/head:refs/verify/{n}" for n in prs]
+          subprocess.run(["git", "fetch", "--no-tags", "origin", *refs], check=True)
+          merge = ["git", "-c", "user.name=Verification", "-c", "user.email=ci@localhost", "merge", "--no-edit"]
+          subprocess.run(merge + [f"refs/verify/{n}" for n in prs], check=True)
+          tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+          print("Combined tree", tree)
+          assert tree == "89cdda44d4f1235e6cae576273b7d792fc0acd64"
+          subprocess.run(["git", "diff", "--check", "78ad571", "HEAD"], check=True)
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo xtask policy
+      - run: cargo test --workspace --locked -- --test-threads=1
+      - run: cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests -- --test-threads=1
