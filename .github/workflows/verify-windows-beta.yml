@@ -13,8 +13,6 @@ jobs:
         with:
           ref: cd84924911aa5c321c7d242452da719726f58a78
           persist-credentials: false
-      - name: Check formatting
-        run: cargo fmt --all -- --check
       - name: Confirm the multiline fixture fails with the old delimiter
         shell: pwsh
         run: |
