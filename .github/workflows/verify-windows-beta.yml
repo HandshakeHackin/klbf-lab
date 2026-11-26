@@ -1,28 +1,26 @@
-name: Check PR 72 alone and run its descriptor tests with PR 37
+name: Verify win10-test shader suite and view dimensions
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  descriptors:
+  shader:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 54ca988330b6dcbceb3dd873afa43ef7c7674fbd
+          ref: ad121fe90d3768ab030c633d120b89f1a020af84
           fetch-depth: 0
           persist-credentials: false
-      - name: Compile victory-gpu at the standalone PR head
-        run: cargo check --locked -p victory-gpu --lib
-      - name: Merge the independent indirect and depth test repair
+      - name: Check descriptor dimensions on the proposed head
+        run: cargo test --locked -p victory-shader --lib a_descriptor_only_read_as_data_gives_its_views_size -- --nocapture
+      - name: Apply main's existing hosted-runner hardware detection to the other shader test
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 3ecd80f610cf4954cc2377f328662e1fce600c0d
-          git -c user.name=CI -c user.email=ci@localhost merge --no-commit FETCH_HEAD
-          test "$(git rev-parse :crates/victory-gpu/src/descriptor/host.rs)" = 4b774740f1848353e4107bfd4771772485121dce
-      - name: Run the complete descriptor host test module
-        run: |
-          cargo test --locked -p victory-gpu --lib descriptor::host::tests:: -- --nocapture --test-threads=1
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          git show FETCH_HEAD --format= | git apply -
+      - name: Run the full shader test suite
+        run: cargo test --locked -p victory-shader --lib -- --test-threads=1
