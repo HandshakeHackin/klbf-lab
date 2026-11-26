@@ -706,7 +706,10 @@ fn high_performance_adapter() -> Option<(IDXGIAdapter1, String)> {
             })
             .find_map(|adapter| {
                 let desc = adapter.GetDesc1().ok()?;
-                if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+                // The default Basic Render Driver can have no software flag.
+                if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
+                    || (desc.VendorId, desc.DeviceId) == (0x1414, 0x008c)
+                {
                     return None;
                 }
                 let mut probe: Option<ID3D12Device> = None;
