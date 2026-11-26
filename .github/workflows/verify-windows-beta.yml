@@ -1,48 +1,62 @@
-name: Verify beta write-watch test with retained page history
+name: Verify native Windows profiler for PR 53
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  journal:
+  native:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 6f55eae05c4900b656ff5e723c7d685a3172ef3a
-          fetch-depth: 2
+          repository: PastiiJay/klbf-lab
+          ref: d006c10fe0159727c1fbd76455ce6ad9ecf4293b
           persist-credentials: false
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Exercise the original assertion with a retained page stamp
+      - name: Fetch the comparison revisions
+        run: |
+          git fetch --no-tags origin refs/pull/53/head
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ((git rev-parse FETCH_HEAD) -ne 'd973b9d2143ccaf4e4012f5268982c2a321f7024') { throw 'Review head changed' }
+          git restore --source=FETCH_HEAD -- crates/victory-gpu/src/profile/tests.rs
+      - name: Build an integration target for the two unchanged profiler tests
         shell: python
         run: |
           from pathlib import Path
-          import subprocess
-          path = Path("crates/victory-gpu/src/watch.rs")
-          subprocess.run(["git", "restore", "--source=HEAD^", "--", str(path)], check=True)
-          source = path.read_text(encoding="utf-8")
-          needle = '        let (_, before) = writes(start, end, false).expect("watched");'
-          assert source.count(needle) == 1
-          # Simulate an earlier user of this virtual address through the normal
-          # write-watch path, so the kernel bit is reset but the journal remembers.
-          seed = '        unsafe { (p as *mut u8).write(1) };\n        writes(start, end, false).expect("seed history");\n'
-          path.write_text(source.replace(needle, seed + needle), encoding="utf-8")
-          test = "watch::tests::written_pages_are_reported_to_every_asker"
-          cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", test, "--", "--exact", "--test-threads=1"]
-          old = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-          print(old.stdout, flush=True)
-          assert old.returncode and "assertion failed: before.is_empty()" in old.stdout, "Expected the original history assertion"
-          subprocess.run(["git", "restore", "--", str(path)], check=True)
-      - name: Run the unmodified candidate test and its watch suite
+          crate = Path("crates/victory-gpu")
+          with (crate / "Cargo.toml").open("a", encoding="utf-8") as manifest:
+              manifest.write('\n[[test]]\nname = "profile_handoff"\npath = "src/profile_handoff.rs"\n')
+          (crate / "src/profile_handoff.rs").write_text("#![allow(dead_code)]\nmod profile;\n", encoding="utf-8")
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify Windows supplies the native cycle counter
+        shell: python
+        run: |
+          from ctypes import WinDLL, POINTER, byref, c_int, c_ulonglong, c_void_p
+          api = WinDLL("kernel32", use_last_error=True)
+          api.GetCurrentThread.restype = c_void_p
+          api.QueryThreadCycleTime.argtypes = [c_void_p, POINTER(c_ulonglong)]
+          api.QueryThreadCycleTime.restype = c_int
+          value = c_ulonglong()
+          assert api.QueryThreadCycleTime(api.GetCurrentThread(), byref(value)) and value.value
+          print(f"Native cycle counter available ({value.value} cycles)")
+      - name: Exercise the same tests before and after PR 53
         shell: python
         run: |
           import subprocess
-          for tests, exact in [("watch::tests::written_pages_are_reported_to_every_asker", ["--exact"]), ("watch::tests::", [])]:
-              args = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", tests, "--", *exact, "--test-threads=1"]
-              result = subprocess.run(args, stdout=subprocess.PIPE, text=True)
-              print(result.stdout, flush=True)
-              result.check_returncode()
-              assert "watch::tests::written_pages_are_reported_to_every_asker ... ok" in result.stdout
+          gpu = "crates/victory-gpu/src/profile.rs"
+          # This integration target uses the unmodified profiler and skips unrelated descriptor unit tests.
+          # Both revisions run the same profile tests from PR 53.
+          for revision in ("baseline", "candidate"):
+              if revision == "candidate":
+                  subprocess.run(["git", "restore", "--source=d973b9d2143ccaf4e4012f5268982c2a321f7024", "--", gpu], check=True)
+              for case in ("a_blocked_thread_is_sampled_in_a_kernel_wait", "time_goes_to_the_function_that_spent_it"):
+                  name = "profile::tests::" + case
+                  print(f"Testing {revision} {name}", flush=True)
+                  command = ["cargo", "test", "--locked", "-p", "victory-gpu", "--features", "diagnostics", "--test", "profile_handoff", name, "--", "--exact", "--test-threads=1"]
+                  result = subprocess.run(command, stdout=subprocess.PIPE, text=True)
+                  print(result.stdout, flush=True)
+                  result.check_returncode()
+                  if "1 passed; 0 failed" not in result.stdout:
+                      raise RuntimeError(f"Expected one executed test for {name}")
