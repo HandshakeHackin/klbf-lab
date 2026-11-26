@@ -1,0 +1,68 @@
+name: Beta workspace and Clippy with the integer blend fix
+on:
+  push:
+    branches: [verify/issue-55-beta-final]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: PastiiJay/klbf-lab
+          ref: 78ad5711ecaa7c8cbe5996f74c9d47d16167c061
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assemble the candidate with existing beta CI repairs
+        shell: python
+        run: |
+          import subprocess
+          def git(*args):
+              return subprocess.check_output(["git", "-c", "user.name=Verification", "-c", "user.email=ci@localhost", *args], text=True).strip()
+          heads = {18: "4ad2343c9b530bb1bb9081943cf2933ce1a882cf", 25: "6190ae2353cdc9ccd62b952a4b86ec9d9aa27f44", 27: "a375d01159cd71eb5d128c8838a1f0f6778d6f75", 61: "5f2ed97357aa1941dadaa933b194cff39c645db2"}
+          git("fetch", "--no-tags", "origin", *[f"refs/pull/{n}/head:refs/verify/{n}" for n in heads])
+          for number, sha in heads.items():
+              assert git("rev-parse", f"refs/verify/{number}") == sha
+              print("PR", number, sha, flush=True)
+              git("merge", "--no-edit", sha)
+          assert git("rev-parse", "HEAD^{tree}") == "329f9ac0900462edca6322f6ac7933e611e0668b"
+          git("cherry-pick", "--no-commit", "448b737fa8f4e669c3a9cede26c08a04d4cacd96")
+          print("Tested tree", git("write-tree"), flush=True)
+          git("diff", "--check", "78ad571")
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo xtask policy
+      - run: cargo test --workspace --locked -- --test-threads=1
+      - run: cargo test --locked -p victory-gpu --lib integer_blend_ -- --include-ignored --nocapture
+  mixed-render-targets:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 5f2ed97357aa1941dadaa933b194cff39c645db2
+          persist-credentials: false
+      - name: Exercise mixed-target blending on native Windows WARP
+        run: cargo test --locked -p victory-gpu --lib integer_blend_ -- --include-ignored --nocapture
+      - name: Build the Windows beta test executable
+        run: cargo build --locked --release -p victory
+      - name: Smoke-test the executable and record its checksum
+        shell: pwsh
+        run: |
+          ./target/release/victory.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $h = (Get-FileHash -Algorithm SHA256 target/release/victory.exe).Hash.ToLowerInvariant()
+          "$h  victory.exe" | Out-File -Encoding ascii target/release/SHA256SUMS.txt
+          Get-Content target/release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: victory-beta-integer-blend-windows-x64
+          path: |
+            target/release/victory.exe
+            target/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
