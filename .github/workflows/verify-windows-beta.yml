@@ -1,33 +1,39 @@
-name: Read back a synthetic tile mask before and after its GPU writer
+name: Verify win10-test workspace with PRs 37, 72 and 75
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  tile-mask:
+  workspace:
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: d34906c1d64a31dfe85f64d9ca2e9bc5f0e25faa
+          ref: 54ca988330b6dcbceb3dd873afa43ef7c7674fbd
+          fetch-depth: 0
           persist-credentials: false
-      - name: Isolate the probe from three unrelated beta-2 test bodies that do not compile
-        shell: python
+      - name: Combine the published test heads
+        shell: bash
         run: |
-          from pathlib import Path
-          root = Path("crates/victory-gpu/src")
-          cases = {
-              "port.rs": "warp_a_stretch_of_a_reserved_section_is_used_in_place_through_a_view_of_ours",
-              "descriptor/host.rs": "spans_say_the_next_start_and_the_lowest_level_viewed",
-              "shadow.rs": "a_title_byte_sent_after_a_flight_survives_its_slot",
-          }
-          for path, case in cases.items():
-              p = root / path
-              s = p.read_text()
-              key = f"    #[test]\n    fn {case}("
-              assert s.count(key) == 1
-              p.write_text(s.replace(key, "    #[cfg(any())]\n" + key))
-      - name: Dispatch from the actual beta-2 clamp and read back both tile masks
-        run: cargo test --locked -p victory-gpu --lib ordered_argument_snapshot_drives_the_current_tile_mask -- --nocapture
+          set -euo pipefail
+          git config user.name CI
+          git config user.email ci@localhost
+          for sha in 3ecd80f610cf4954cc2377f328662e1fce600c0d ad121fe90d3768ab030c633d120b89f1a020af84; do
+            git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git "$sha"
+            git merge --no-edit "$sha"
+          done
+          git diff --check 23db69d35bd7c55517f95e3a967ad26832ac3b9a
+      - name: Apply the previously verified bounds and WARP-only runner changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          git show FETCH_HEAD --format= | git apply -
+          git fetch --no-tags https://github.com/HandshakeHackin/klbf-lab.git 06f4fccace3f6f6a87490afde34105b8b6a39603
+          git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
+          git apply "$RUNNER_TEMP/depth.patch"
+          git show 06f4fcc --format= -- crates/victory-gpu/src/pipeline/host.rs | git apply -
+      - name: Run every workspace test suite
+        run: cargo test --locked --workspace --no-fail-fast -- --test-threads=1
