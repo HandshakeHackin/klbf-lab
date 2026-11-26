@@ -1,17 +1,17 @@
-name: Verify PR 37 with the merged guard-page fix
+name: Compare depth-bounds fixture profiles on WARP
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  windows:
+  verify:
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2022, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
@@ -19,27 +19,30 @@ jobs:
           ref: 956410487c02014f361636cce1413c1f1c81fe39
           fetch-depth: 0
           persist-credentials: false
-      - name: Integrate the current win10-test base
+      - name: Apply the merged guard-page change and PR 27 bounds fix
         shell: bash
         run: |
+          set -euo pipefail
           git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 23db69d35bd7c55517f95e3a967ad26832ac3b9a
           git -c user.name=CI -c user.email=ci@localhost merge --no-commit FETCH_HEAD
-      - name: Run overlap, write-watch, and event log regressions with diagnostics
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p victory-gpu --features diagnostics --lib predicted_clashes_match_the_slots_invalidated_by_a_write -- --nocapture | tee "$RUNNER_TEMP/overlap.log"
-          grep -F '1 passed; 0 failed' "$RUNNER_TEMP/overlap.log"
-          cargo test --locked -p victory-gpu --features diagnostics --lib watch::tests:: -- --test-threads=1 | tee "$RUNNER_TEMP/watch.log"
-          grep -F '15 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/watch.log"
-      - name: Run the native GPU suite apart from the known depth-bounds failure in PR 27
-        run: cargo test --locked -p victory-gpu --lib -- --test-threads=1 --skip depth_bounds_pipeline_loads_and_filters_draws
-      - name: Verify the remaining failure with the existing PR 27 production fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git refs/pull/27/head
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git a375d01159cd71eb5d128c8838a1f0f6778d6f75
           git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
           git apply "$RUNNER_TEMP/depth.patch"
-          cargo test --locked -p victory-gpu --lib depth_bounds_pipeline_loads_and_filters_draws -- --nocapture | tee "$RUNNER_TEMP/depth.log"
-          grep -F '1 passed; 0 failed' "$RUNNER_TEMP/depth.log"
+      - name: Use shader model 6.0 for the non-mesh triangle and require all prerequisites
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('crates/victory-gpu/src/pipeline/host.rs')
+          code = p.read_text()
+          start = code.index('fn depth_bounds_pipeline_loads_and_filters_draws()')
+          end = code.index('let (root, root_blob)', start)
+          test = code[start:end]
+          assert test.count('return;') == 3 and test.count('_6_5') == 2
+          test = test.replace('return;', 'panic!("required depth fixture unavailable");').replace('_6_5','_6_0')
+          p.write_text(code[:start] + test + code[end:])
+      - name: Check library reuse and culled and visible pixels, then run the whole suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p victory-gpu --lib depth_bounds_pipeline_loads_and_filters_draws -- --nocapture
+          cargo test --locked -p victory-gpu --lib -- --test-threads=1
