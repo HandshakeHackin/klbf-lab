@@ -1,83 +1,35 @@
-name: Verify every active BC row with and without the PR 63 mip cap
+name: Verify multiline shader skip lists on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  compare:
+  parser:
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: 56d62d099217e8f78f22e243d68bd0e0dbad1415
+          ref: cd84924911aa5c321c7d242452da719726f58a78
           persist-credentials: false
-      - name: Verify capped and uncapped BC1 data with padded host row pitches
-        env:
-          VICTORY_D3D12_WARP: '1'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Confirm the multiline fixture fails with the old delimiter
         shell: pwsh
         run: |
-          @'
-
-          #[cfg(test)]
-          mod mip_cap_review {
-              use super::*;
-
-              #[test]
-              fn every_retained_bc_row_matches_its_title_mip() {
-                  use crate::resource::{first_host_mip, host_resource, placed_bytes, texture_at};
-
-                  let mut desc = [0u32; 14];
-                  desc[0] = 3;
-                  desc[4] = 768;
-                  desc[6] = 512;
-                  desc[7] = (4 << 16) | 1;
-                  desc[8] = 71; // BC1, 8 bytes per 4x4 block
-                  desc[9] = 1;
-                  desc[11] = 1;
-                  let data = Box::leak(vec![0xee; placed_bytes(&desc).unwrap() as usize].into_boxed_slice());
-                  let resource = texture_at(data.as_ptr() as u64, &desc).unwrap();
-                  let texture = host_resource(resource).expect("WARP texture");
-                  let first_mip = match std::env::var("VICTORY_TEXTURE_MAX_DIM").unwrap().as_str() {
-                      "256" => 2,
-                      "0" => 0,
-                      _ => unreachable!(),
-                  };
-                  let expected = (first_mip > 0).then_some((first_mip, 4 - first_mip));
-                  assert_eq!(first_host_mip(resource, texture), expected);
-                  let staging = staging(resource, texture).unwrap();
-                  let mut images = Vec::new();
-                  for mip in 0..4 {
-                      let row_bytes = (768usize >> mip) / 4 * 8;
-                      let rows = (512usize >> mip) / 4;
-                      let bytes: Vec<_> = (0..row_bytes*rows).map(|i| ((i%row_bytes*19 + i/row_bytes*37 + mip*61)%251) as u8).collect();
-                      staging.layout.tile(data, mip as u32, 0, &bytes, row_bytes, bytes.len()).unwrap();
-                      images.push((bytes, row_bytes, rows));
-                  }
-                  staging.detile(data);
-                  assert_eq!(staging.footprints.len(), 4 - first_mip as usize);
-                  let mut checked = 0usize;
-                  for (idx, f) in staging.footprints.iter().enumerate() {
-                      let (image, row_bytes, rows) = &images[first_mip as usize + idx];
-                      assert_eq!(staging.rows[idx] as usize,*rows);
-                      for y in 0..*rows {
-                          let offset = f.Offset as usize + y * f.Footprint.RowPitch as usize;
-                          assert!(offset + row_bytes <= staging.bytes as usize);
-                          // SAFETY: the live staging allocation contains this initialized BC row.
-                          let row = unsafe { std::slice::from_raw_parts(staging.data.add(offset), *row_bytes) };
-                          assert_eq!(row, &image[y*row_bytes..(y+1)*row_bytes], "host mip {idx}, row {y}");
-                          checked += row_bytes;
-                      }
-                  }
-                  eprintln!("first title mip={first_mip}, checked {checked} active bytes across {} host levels", staging.footprints.len());
-                  unstage(resource);
-              }
-          }
-          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/texture.rs
-          foreach ($cap in '0','256') {
-              $env:VICTORY_TEXTURE_MAX_DIM = $cap
-              cargo test --locked -p victory-gpu --features diagnostics --lib every_retained_bc_row_matches_its_title_mip -- --nocapture
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          $path = 'crates/victory-gpu/src/pipeline.rs'
+          $current = [IO.File]::ReadAllText($path)
+          $old = $current.Replace(".split([',', '\r', '\n'])", ".split(',')")
+          if ($old -ceq $current) { throw 'delimiter substitution failed' }
+          [IO.File]::WriteAllText($path, $old)
+          cargo test --locked -p victory-gpu --lib pipeline::tests::skip_hashes_accepts_multiline_files -- --exact 2>&1 | Tee-Object "$env:RUNNER_TEMP/red.log"
+          $rc = $LASTEXITCODE
+          git restore -- $path
+          if ($rc -ne 101 -or !(Select-String -Quiet -SimpleMatch 'test pipeline::tests::skip_hashes_accepts_multiline_files ... FAILED' "$env:RUNNER_TEMP/red.log")) { throw 'expected a failing assertion in the multiline parser test' }
+          exit 0
+      - name: Verify both Windows parser tests with the fix
+        shell: pwsh
+        run: |
+          cargo test --locked -p victory-gpu --lib pipeline::tests::skip_hashes_ 2>&1 | Tee-Object "$env:RUNNER_TEMP/green.log"
+          if ($LASTEXITCODE -ne 0 -or !(Select-String -Quiet -SimpleMatch '2 passed; 0 failed' "$env:RUNNER_TEMP/green.log")) { throw 'expected both parser tests to pass' }
