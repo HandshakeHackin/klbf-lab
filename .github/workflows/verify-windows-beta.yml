@@ -1,4 +1,4 @@
-name: Test PR 67 on native Windows
+name: Verify PR 37 with the merged guard-page fix
 on:
   push:
     branches: [verify-windows-beta-20261125]
@@ -11,37 +11,26 @@ jobs:
       matrix:
         os: [windows-2022, windows-2025]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
-          ref: 7d8286d7841184d3015ede82b6fcdc0ff1db103b
-          fetch-depth: 2
+          repository: HandshakeHackin/klbf-lab
+          ref: 3a648ab5f9d0a1b47e3b85f00f980d1b44de5901
+          fetch-depth: 0
           persist-credentials: false
-      - name: Compile the exact PR source with diagnostics
-        run: cargo check --locked -p victory-gpu --features diagnostics --lib
-      - name: Apply PR 37's existing test-target repairs
+      - name: Integrate the current win10-test base
+        shell: bash
+        run: |
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 23db69d35bd7c55517f95e3a967ad26832ac3b9a
+          git -c user.name=CI -c user.email=ci@localhost merge --no-commit FETCH_HEAD
+      - name: Run overlap, write-watch, and event log regressions with diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=5 https://github.com/HandshakeHackin/klbf-lab.git 8aea65cc7325507b2bceafca58bd21f6253cb4bc
-          git diff d006c10fe0159727c1fbd76455ce6ad9ecf4293b 8aea65cc7325507b2bceafca58bd21f6253cb4bc | git apply
-          git diff --exit-code HEAD -- crates/victory-gpu/src/watch.rs crates/victory-gpu/src/drvwatch.rs
-      - name: Isolate the unrelated descriptor unit module with stale APIs
-        shell: python
-        run: |
-          from pathlib import Path
-          p = Path('crates/victory-gpu/src/descriptor/host.rs')
-          s = p.read_text()
-          marker = '#[cfg(test)]\nmod tests {'
-          assert s.count(marker) == 1
-          p.write_text(s.replace(marker, '#[cfg(any())]\nmod tests {'))
-      - name: Run all write-watch tests and the Windows event subscription test
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p victory-gpu --features diagnostics --lib 'watch::tests::' -- --test-threads=1 --skip 'drvwatch::' --nocapture 2>&1 | tee "$RUNNER_TEMP/watch.txt"
-          grep -F '13 passed; 0 failed' "$RUNNER_TEMP/watch.txt"
-          cargo test --locked -p victory-gpu --features diagnostics --lib 'drvwatch::tests::the_system_takes_the_subscription' -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/event.txt"
-          grep -F '1 passed; 0 failed' "$RUNNER_TEMP/event.txt"
+          cargo test --locked -p victory-gpu --features diagnostics --lib predicted_clashes_match_the_slots_invalidated_by_a_write -- --nocapture | tee "$RUNNER_TEMP/overlap.log"
+          grep -F '1 passed; 0 failed' "$RUNNER_TEMP/overlap.log"
+          cargo test --locked -p victory-gpu --features diagnostics --lib watch::tests:: -- --test-threads=1 | tee "$RUNNER_TEMP/watch.log"
+          grep -F '14 passed; 0 failed' "$RUNNER_TEMP/watch.log"
+      - name: Run all GPU library tests sequentially
+        run: cargo test --locked -p victory-gpu --lib -- --test-threads=1
