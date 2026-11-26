@@ -1,33 +1,62 @@
-name: Verify Wave64 refusal messages and shader tests
+name: Check consecutive LDS reads on Windows
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  diagnostics:
-    runs-on: ubuntu-latest
+  verify:
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 455f4b1eccf2d58f9ad7787919858872f4c04193
-          fetch-depth: 3
+          ref: d7c27e3e788870f33c531608767bf2a7a18c7e91
           persist-credentials: false
-      - name: Verify the previous and corrected messages on the same shader fixture
-        shell: bash
+      - name: Require the SDK validator and disassembler, save shader entry points
+        shell: python
         run: |
-          git checkout --detach 0948a4fd56d97548e0b746ae3c9b4bcbb881032e
-          VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib waw_and_byte_access_and_u24_checks -- --nocapture 2>&1 | tee /tmp/old.log
-          grep -F 'an LDS read and write in one lane-branch region' /tmp/old.log
-          git checkout --detach 455f4b1eccf2d58f9ad7787919858872f4c04193
-          VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib waw_and_byte_access_and_u24_checks -- --nocapture 2>&1 | tee /tmp/new.log
-          grep -F 'overlapping shared addresses in a write-only LDS region' /tmp/new.log
-          grep -F 'a mixed LDS region without a disjoint or lane-private proof' /tmp/new.log
-      - name: Check diagnostics for atomics with and without an explicit read
+          from pathlib import Path
+          p = Path('crates/victory-shader/src/emit/wave64_tests.rs')
+          text = p.read_text()
+          marker = 'fn split_lds_adjacent_reads_share_only_the_middle_meeting()'
+          prefix, case = text.split(marker)
+          a = 'if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {'
+          assert case.count(a) == 1
+          case = case.replace(a, '{ let mut v = validator::Validator::load(validator::Validator::default_path().as_deref()).expect("SDK validator required");')
+          a = 'if let Some(dump) = super::tests::dump_dxil(&shader.dxil) {'
+          assert case.count(a) == 1
+          case = case.replace(a, '''{ let dump = super::tests::dump_dxil(&shader.dxil).expect("SDK dxc required");
+                      let ir = dump.split("define void @main()").nth(1).expect("entry point").split("\\n}").next().unwrap();
+                      assert!(!ir.contains("dx.op.wave"), "fixture must be independent of wave intrinsics");
+                      std::fs::write(format!("entry-{}-{passes}.txt", std::env::var("CASE").unwrap()), ir).unwrap();''')
+          p.write_text(prefix + marker + case)
+      - name: Validate and inspect the exact Wave32 shaders
         shell: bash
+        env:
+          CASE: wave32
+        run: cargo test --locked -p victory-shader --lib split_lds_adjacent_reads_share_only_the_middle_meeting -- --nocapture
+      - name: Omit the wave-width declaration only for the WARP control
+        shell: python
         run: |
-          VICTORY_WAVE_WHY=1 cargo test --locked -p victory-shader --lib atomics_are_rmw_and_require_lane_privacy -- --nocapture 2>&1 | tee /tmp/atomics.log
-          grep -F 'an LDS atomic without a plain LDS read or a lane-private proof' /tmp/atomics.log
-          grep -F 'a mixed LDS region without a disjoint or lane-private proof' /tmp/atomics.log
-      - name: Run the full shader library suite
-        run: cargo test --locked -p victory-shader --lib
+          from pathlib import Path
+          p = Path('crates/victory-shader/src/emit/lower.rs')
+          s = p.read_text()
+          old = 'if console_lanes || one_wave && s.lds_dwords > 0 {'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, 'if console_lanes {'))
+      - name: Require WARP readback at all 192 dwords for each mask
+        shell: bash
+        env:
+          CASE: warp
+          VICTORY_WARP: '1'
+          VICTORY_REQUIRE_HW_GPU: '1'
+        run: cargo test --locked -p victory-shader --lib split_lds_adjacent_reads_share_only_the_middle_meeting -- --nocapture
+      - name: Check that each WARP control ran the identical entry-point instructions
+        shell: python
+        run: |
+          from pathlib import Path
+          for mask in (0,128):
+              a = Path(f'entry-wave32-{mask}.txt').read_text()
+              b = Path(f'entry-warp-{mask}.txt').read_text()
+              assert a == b, f'entry instructions differ for mask {mask}'
+              print(f'Mask {mask}: {len(a.splitlines())} identical entry-point lines')
