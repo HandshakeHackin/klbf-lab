@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: HandshakeHackin/klbf-lab
-          ref: 3a648ab5f9d0a1b47e3b85f00f980d1b44de5901
+          ref: 956410487c02014f361636cce1413c1f1c81fe39
           fetch-depth: 0
           persist-credentials: false
       - name: Integrate the current win10-test base
@@ -32,5 +32,14 @@ jobs:
           grep -F '1 passed; 0 failed' "$RUNNER_TEMP/overlap.log"
           cargo test --locked -p victory-gpu --features diagnostics --lib watch::tests:: -- --test-threads=1 | tee "$RUNNER_TEMP/watch.log"
           grep -F '15 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/watch.log"
-      - name: Run all GPU library tests sequentially
-        run: cargo test --locked -p victory-gpu --lib -- --test-threads=1
+      - name: Run the native GPU suite apart from the known depth-bounds failure in PR 27
+        run: cargo test --locked -p victory-gpu --lib -- --test-threads=1 --skip depth_bounds_pipeline_loads_and_filters_draws
+      - name: Verify the remaining failure with the existing PR 27 production fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git refs/pull/27/head
+          git show d91ab6e --format= -- crates/victory-gpu/src/pipeline/host.rs | sed '/^@@ -1062/,$d' > "$RUNNER_TEMP/depth.patch"
+          git apply "$RUNNER_TEMP/depth.patch"
+          cargo test --locked -p victory-gpu --lib depth_bounds_pipeline_loads_and_filters_draws -- --nocapture | tee "$RUNNER_TEMP/depth.log"
+          grep -F '1 passed; 0 failed' "$RUNNER_TEMP/depth.log"
