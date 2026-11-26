@@ -1,135 +1,83 @@
-name: Compare beta and win10-test with the identical SDK 614 DLL
+name: Verify every active BC row with and without the PR 63 mip cap
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  agility:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - branch: beta
-            revision: 78ad5711ecaa7c8cbe5996f74c9d47d16167c061
-            expected: system
-          - branch: win10-test
-            revision: d006c10fe0159727c1fbd76455ce6ad9ecf4293b
-            expected: app-local
-    name: ${{ matrix.branch }} on Server 2022
-    runs-on: windows-2022
-    env:
-      EXPECTED_CORE: ${{ matrix.expected }}
-    timeout-minutes: 35
+  compare:
+    runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: ${{ matrix.revision }}
+          ref: 56d62d099217e8f78f22e243d68bd0e0dbad1415
           persist-credentials: false
-      - name: Build the unmodified Windows test candidate
-        run: cargo build --release --locked -p victory
-      - name: Inspect both exported constants in the release executable
+      - name: Verify capped and uncapped BC1 data with padded host row pitches
+        env:
+          VICTORY_D3D12_WARP: '1'
         shell: pwsh
         run: |
           @'
-          import struct
-          import sys
-          from pathlib import Path
-          
-          exe = Path(sys.argv[1]).read_bytes()
-          u16 = lambda off: struct.unpack_from('<H', exe, off)[0]
-          u32 = lambda off: struct.unpack_from('<I', exe, off)[0]
-          u64 = lambda off: struct.unpack_from('<Q', exe, off)[0]
-          pe = u32(0x3c)
-          assert exe[pe:pe + 4] == b'PE\0\0' and u16(pe + 4) == 0x8664
-          opt = pe + 24
-          assert u16(opt) == 0x20b
-          image_base = u64(opt + 24)
-          first_section = opt + u16(pe + 20)
-          sections = [first_section + i * 40 for i in range(u16(pe + 6))]
-          
-          def locate(rva):
-              for s in sections:
-                  virtual = u32(s + 12)
-                  if virtual <= rva < virtual + u32(s + 16):
-                      return u32(s + 20) + rva - virtual
-              raise ValueError(f'RVA {rva:x} is outside the image sections')
-          
-          def string_at(rva):
-              start = locate(rva)
-              return exe[start:exe.index(0, start)].decode('ascii')
-          
-          locations = {}
-          if u32(opt + 112):
-              exports = locate(u32(opt + 112))
-              addresses = locate(u32(exports + 28))
-              names = locate(u32(exports + 32))
-              ordinals = locate(u32(exports + 36))
-              for i in range(u32(exports + 24)):
-                  name = string_at(u32(names + i * 4))
-                  rva = u32(addresses + u16(ordinals + i * 2) * 4)
-                  locations[name] = rva
-          import os
-          if os.environ['EXPECTED_CORE'] == 'system':
-              for symbol in ['D3D12SDKVersion', 'D3D12SDKPath']:
-                  assert symbol not in locations, f'unexpected export {symbol}'
-              print('Neither Agility SDK export is present')
-              sys.exit(0)
-          version = u32(locate(locations['D3D12SDKVersion']))
-          path = string_at(u64(locate(locations['D3D12SDKPath'])) - image_base)
-          print(f'Win64 victory.exe exports SDK version {version} and path {path!r}', flush=True)
-          assert version == 614 and path == '.\\D3D12\\'
-          '@ | python - target/release/victory.exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage Microsoft's package as in issue 11
-        shell: pwsh
-        run: |
-          Invoke-WebRequest https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1 -OutFile d3d12.zip
-          $hash = (Get-FileHash d3d12.zip -Algorithm SHA512).Hash
-          if ($hash -ne '05baa55231684ab10a3e905c9b85ce78f04ade9360f7de84a06bbae3bfc3123bcccaa563647a25e151cc759106bc19e37740ef78563592d28e3a723fd744b42f') { throw 'Unexpected SDK archive hash' }
-          Expand-Archive d3d12.zip d3d12pkg -Force
-          New-Item -ItemType Directory -Force target/release/D3D12 | Out-Null
-          Copy-Item d3d12pkg/build/native/bin/x64/D3D12Core.dll target/release/D3D12/
-          $dll = Get-Item target/release/D3D12/D3D12Core.dll
-          $dll.VersionInfo | Format-List FileVersion,ProductVersion
-          Get-FileHash $dll.FullName
-          Get-AuthenticodeSignature $dll.FullName | Select-Object Status, @{ Name='Signer'; Expression={$_.SignerCertificate.Subject} } | Format-List
-      - name: Observe the real CLI creating a WARP device and record the loaded runtime
-        shell: pwsh
-        env:
-          VICTORY_WARP: '1'
-        run: |
-          $root = Join-Path $env:RUNNER_TEMP 'agility-empty-shader-inputs'
-          New-Item -ItemType Directory -Path $root -Force | Out-Null
-          $bytes = [byte[]]::new(4096)
-          for ($i=0; $i -lt 1600; $i++) { [IO.File]::WriteAllBytes((Join-Path $root "$i.bin"), $bytes) }
-          $info = [Diagnostics.ProcessStartInfo]::new((Resolve-Path target/release/victory.exe))
-          foreach ($arg in @('translate','--pipelines','--jobs','1',$root)) { $info.ArgumentList.Add($arg) }
-          $info.UseShellExecute = $false
-          $info.RedirectStandardError = $true
-          $p = [Diagnostics.Process]::Start($info)
-          $stderr = $p.StandardError.ReadToEndAsync()
-          $seen = @{}
-          while (!$p.HasExited) {
-            try {
-              $p.Refresh()
-              foreach ($m in $p.Modules) {
-                if ($m.ModuleName -ieq 'D3D12Core.dll') { $seen[$m.FileName] = $m.FileVersionInfo.FileVersion }
+
+          #[cfg(test)]
+          mod mip_cap_review {
+              use super::*;
+
+              #[test]
+              fn every_retained_bc_row_matches_its_title_mip() {
+                  use crate::resource::{first_host_mip, host_resource, placed_bytes, texture_at};
+
+                  let mut desc = [0u32; 14];
+                  desc[0] = 3;
+                  desc[4] = 768;
+                  desc[6] = 512;
+                  desc[7] = (4 << 16) | 1;
+                  desc[8] = 71; // BC1, 8 bytes per 4x4 block
+                  desc[9] = 1;
+                  desc[11] = 1;
+                  let data = Box::leak(vec![0xee; placed_bytes(&desc).unwrap() as usize].into_boxed_slice());
+                  let resource = texture_at(data.as_ptr() as u64, &desc).unwrap();
+                  let texture = host_resource(resource).expect("WARP texture");
+                  let first_mip = match std::env::var("VICTORY_TEXTURE_MAX_DIM").unwrap().as_str() {
+                      "256" => 2,
+                      "0" => 0,
+                      _ => unreachable!(),
+                  };
+                  let expected = (first_mip > 0).then_some((first_mip, 4 - first_mip));
+                  assert_eq!(first_host_mip(resource, texture), expected);
+                  let staging = staging(resource, texture).unwrap();
+                  let mut images = Vec::new();
+                  for mip in 0..4 {
+                      let row_bytes = (768usize >> mip) / 4 * 8;
+                      let rows = (512usize >> mip) / 4;
+                      let bytes: Vec<_> = (0..row_bytes*rows).map(|i| ((i%row_bytes*19 + i/row_bytes*37 + mip*61)%251) as u8).collect();
+                      staging.layout.tile(data, mip as u32, 0, &bytes, row_bytes, bytes.len()).unwrap();
+                      images.push((bytes, row_bytes, rows));
+                  }
+                  staging.detile(data);
+                  assert_eq!(staging.footprints.len(), 4 - first_mip as usize);
+                  let mut checked = 0usize;
+                  for (idx, f) in staging.footprints.iter().enumerate() {
+                      let (image, row_bytes, rows) = &images[first_mip as usize + idx];
+                      assert_eq!(staging.rows[idx] as usize,*rows);
+                      for y in 0..*rows {
+                          let offset = f.Offset as usize + y * f.Footprint.RowPitch as usize;
+                          assert!(offset + row_bytes <= staging.bytes as usize);
+                          // SAFETY: the live staging allocation contains this initialized BC row.
+                          let row = unsafe { std::slice::from_raw_parts(staging.data.add(offset), *row_bytes) };
+                          assert_eq!(row, &image[y*row_bytes..(y+1)*row_bytes], "host mip {idx}, row {y}");
+                          checked += row_bytes;
+                      }
+                  }
+                  eprintln!("first title mip={first_mip}, checked {checked} active bytes across {} host levels", staging.footprints.len());
+                  unstage(resource);
               }
-            } catch [System.InvalidOperationException] { break } catch [System.ComponentModel.Win32Exception] {}
-            Start-Sleep -Milliseconds 5
           }
-          $p.WaitForExit()
-          Write-Host "Host OS $([Environment]::OSVersion.Version) / victory exit $($p.ExitCode)"
-          foreach ($path in $seen.Keys) { Write-Host "Loaded D3D12Core: $path ($($seen[$path]))" }
-          $diagnostic = $stderr.GetAwaiter().GetResult()
-          Write-Host $diagnostic
-          if ($p.ExitCode -ne 0 -and ($p.ExitCode -ne 1 -or $diagnostic -notmatch 'the device supports SM 0x62 only')) {
-            throw "Unexpected CLI failure: $($p.ExitCode)"
+          '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/texture.rs
+          foreach ($cap in '0','256') {
+              $env:VICTORY_TEXTURE_MAX_DIM = $cap
+              cargo test --locked -p victory-gpu --features diagnostics --lib every_retained_bc_row_matches_its_title_mip -- --nocapture
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          if (!$seen.Count) { throw 'Process ended before a module path was observed' }
-          $expected = if ($env:EXPECTED_CORE -eq 'system') {
-            Join-Path ([Environment]::SystemDirectory) 'D3D12Core.dll'
-          } else { (Resolve-Path target/release/D3D12/D3D12Core.dll).Path }
-          if ($seen.Keys -notcontains $expected) { throw "Missing expected core: $expected" }
