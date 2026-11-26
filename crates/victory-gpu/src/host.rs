@@ -1061,6 +1061,19 @@ fn create() -> windows::core::Result<Host> {
         let adapter = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
             .ok();
+        if let Some(desc) = adapter.as_ref().and_then(|a| a.GetDesc1().ok()) {
+            let name = String::from_utf16_lossy(&desc.Description);
+            tracing::info!(
+                adapter = name.trim_end_matches('\0'),
+                vendor = format_args!("{:#06x}", desc.VendorId),
+                device = format_args!("{:#06x}", desc.DeviceId),
+                vram_mb = desc.DedicatedVideoMemory >> 20,
+                "host D3D12 adapter"
+            );
+        }
+        if let Some(adapter) = adapter.as_ref() {
+            segments::log(adapter);
+        }
         tracing::info!("host D3D12 device ready");
         Ok(Host {
             device,
@@ -4111,6 +4124,7 @@ pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
 mod place;
+mod segments;
 mod send;
 pub(crate) use send::{goes_as_words, words_under};
 #[cfg(feature = "diagnostics")]
@@ -5683,10 +5697,15 @@ impl Host {
         };
         LATE_STATS[0].fetch_add(1, Ordering::Relaxed);
         RELAY_MOVED.notify_one();
+        // An aperture segment near its limit with no idle host list: the
+        // flights land and give their lists back before more are made.
+        let tight = !crate::list::has_idle() && self.adapter.as_ref().is_some_and(segments::tight);
         if told && !late_writes() {
             self.settle(&mut submitted, WHY_WRITES);
         } else if sizes {
             self.settle(&mut submitted, WHY_READ);
+        } else if tight {
+            self.settle(&mut submitted, WHY_MOST);
         } else if most && relay_exact() {
             // Until there are fewer, not until there are none.
             relay_wait(WHY_MOST, |line| line.lists < late_most());
