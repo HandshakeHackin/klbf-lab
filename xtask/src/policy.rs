@@ -11,6 +11,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 const MAX_FILE_SIZE: usize = 512 * 1024;
+const MAX_RUST_SOURCE_SIZE: usize = 1024 * 1024;
 const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
@@ -154,9 +155,10 @@ pub fn check(path: &str, content: &[u8]) -> Vec<String> {
     if !allowed {
         problems.push("file type not on the allowlist".to_owned());
     }
-    if content.len() > MAX_FILE_SIZE {
+    let limit = if ext.as_deref() == Some("rs") { MAX_RUST_SOURCE_SIZE } else { MAX_FILE_SIZE };
+    if content.len() > limit {
         problems.push(format!(
-            "{} bytes exceeds the {MAX_FILE_SIZE}-byte limit",
+            "{} bytes exceeds the {limit}-byte limit",
             content.len()
         ));
     }
@@ -209,10 +211,16 @@ mod tests {
             !check("data.bin", b"hello").is_empty(),
             "extension not allowed"
         );
-        assert!(
-            !check("a.rs", &vec![b'a'; 600 * 1024]).is_empty(),
-            "too big"
-        );
+    }
+
+    #[test]
+    fn file_size_limits_depend_on_the_source_type() {
+        let rust = vec![b' '; super::MAX_RUST_SOURCE_SIZE + 1];
+        let other = super::MAX_FILE_SIZE;
+        assert!(check("module.rs", &rust[..rust.len() - 1]).is_empty());
+        assert_eq!(check("module.rs", &rust).len(), 1);
+        assert!(check("notes.txt", &rust[..other]).is_empty());
+        assert_eq!(check("notes.txt", &rust[..other + 1]).len(), 1);
     }
 
     #[test]
