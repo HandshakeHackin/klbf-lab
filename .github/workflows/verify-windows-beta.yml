@@ -13,5 +13,21 @@ jobs:
         with:
           ref: d34906c1d64a31dfe85f64d9ca2e9bc5f0e25faa
           persist-credentials: false
+      - name: Isolate the probe from three unrelated beta-2 test bodies that do not compile
+        shell: python
+        run: |
+          from pathlib import Path
+          root = Path("crates/victory-gpu/src")
+          cases = {
+              "port.rs": "warp_a_stretch_of_a_reserved_section_is_used_in_place_through_a_view_of_ours",
+              "descriptor/host.rs": "spans_say_the_next_start_and_the_lowest_level_viewed",
+              "shadow.rs": "a_title_byte_sent_after_a_flight_survives_its_slot",
+          }
+          for path, case in cases.items():
+              p = root / path
+              s = p.read_text()
+              key = f"    #[test]\n    fn {case}("
+              assert s.count(key) == 1
+              p.write_text(s.replace(key, "    #[cfg(any())]\n" + key))
       - name: Dispatch from the actual beta-2 clamp and read back both tile masks
         run: cargo test --locked -p victory-gpu --lib ordered_argument_snapshot_drives_the_current_tile_mask -- --nocapture
