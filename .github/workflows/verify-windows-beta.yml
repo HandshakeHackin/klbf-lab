@@ -1,62 +1,85 @@
-name: Verify native Windows profiler for PR 53
+name: Check exact SIMD copy-back ranges across vector boundaries
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  native:
+  spans:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: d006c10fe0159727c1fbd76455ce6ad9ecf4293b
+          ref: ea3f336f39160801f10330aa6d38ed8008796b6f
           persist-credentials: false
-      - name: Fetch the comparison revisions
-        run: |
-          git fetch --no-tags origin refs/pull/53/head
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          if ((git rev-parse FETCH_HEAD) -ne 'd973b9d2143ccaf4e4012f5268982c2a321f7024') { throw 'Review head changed' }
-          git restore --source=FETCH_HEAD -- crates/victory-gpu/src/profile/tests.rs
-      - name: Build an integration target for the two unchanged profiler tests
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Exercise vector boundaries with independently computed results
         shell: python
         run: |
           from pathlib import Path
-          crate = Path("crates/victory-gpu")
-          with (crate / "Cargo.toml").open("a", encoding="utf-8") as manifest:
-              manifest.write('\n[[test]]\nname = "profile_handoff"\npath = "src/profile_handoff.rs"\n')
-          (crate / "src/profile_handoff.rs").write_text("#![allow(dead_code)]\nmod profile;\n", encoding="utf-8")
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Verify Windows supplies the native cycle counter
-        shell: python
-        run: |
-          from ctypes import WinDLL, POINTER, byref, c_int, c_ulonglong, c_void_p
-          api = WinDLL("kernel32", use_last_error=True)
-          api.GetCurrentThread.restype = c_void_p
-          api.QueryThreadCycleTime.argtypes = [c_void_p, POINTER(c_ulonglong)]
-          api.QueryThreadCycleTime.restype = c_int
-          value = c_ulonglong()
-          assert api.QueryThreadCycleTime(api.GetCurrentThread(), byref(value)) and value.value
-          print(f"Native cycle counter available ({value.value} cycles)")
-      - name: Exercise the same tests before and after PR 53
-        shell: python
-        run: |
           import subprocess
-          gpu = "crates/victory-gpu/src/profile.rs"
-          # This integration target uses the unmodified profiler and skips unrelated descriptor unit tests.
-          # Both revisions run the same profile tests from PR 53.
-          for revision in ("baseline", "candidate"):
-              if revision == "candidate":
-                  subprocess.run(["git", "restore", "--source=d973b9d2143ccaf4e4012f5268982c2a321f7024", "--", gpu], check=True)
-              for case in ("a_blocked_thread_is_sampled_in_a_kernel_wait", "time_goes_to_the_function_that_spent_it"):
-                  name = "profile::tests::" + case
-                  print(f"Testing {revision} {name}", flush=True)
-                  command = ["cargo", "test", "--locked", "-p", "victory-gpu", "--features", "diagnostics", "--test", "profile_handoff", name, "--", "--exact", "--test-threads=1"]
-                  result = subprocess.run(command, stdout=subprocess.PIPE, text=True)
-                  print(result.stdout, flush=True)
-                  result.check_returncode()
-                  if "1 passed; 0 failed" not in result.stdout:
-                      raise RuntimeError(f"Expected one executed test for {name}")
+          shadow = Path("crates/victory-gpu/src/shadow.rs")
+          with shadow.open("a", encoding="utf-8") as f:
+              f.write('\n#[cfg(test)]\nmod handoff_span_tests;\n')
+          folder = shadow.with_suffix("")
+          folder.mkdir(exist_ok=True)
+          test = r"""
+          #[test]
+          fn every_contiguous_run_survives_vector_boundaries_and_scalar_tails() {
+              use super::{changed_runs, first_difference, has_avx2, last_difference, merge_back_piece};
+          
+              assert!(has_avx2(), "this runner must exercise AVX2");
+              let mut cases = 0u32;
+              for len in [31, 32, 33, 63, 64, 65, 95, 96, 97] {
+                  let old = vec![0u8; len];
+                  for start in 0..=len {
+                      for end in start..=len {
+                          let mut gpu = old.clone();
+                          gpu[start..end].fill(1);
+                          let expected_runs = if start == end { vec![] } else { vec![(start, end - start)] };
+                          assert_eq!(changed_runs(&gpu, &old), expected_runs);
+                          assert_eq!(first_difference(&gpu, &old), (start < end).then_some(start));
+                          assert_eq!(last_difference(&gpu, &old), (start < end).then(|| end - 1));
+          
+                          // CPU writes cut holes on each side of a 32-byte boundary.
+                          let mut title = old.clone();
+                          for position in [30, 31, 32, 63, 64] {
+                              if position < len { title[position] = 2; }
+                          }
+                          let mut expected = title.clone();
+                          let mut wanted = Vec::new();
+                          let mut at = start;
+                          while at < end {
+                              if expected[at] != 0 {
+                                  at += 1;
+                                  continue;
+                              }
+                              let first = at;
+                              while at < end && expected[at] == 0 {
+                                  expected[at] = 1;
+                                  at += 1;
+                              }
+                              wanted.push((first, at - first));
+                          }
+                          let mut runs = vec![(0, len)];
+                          assert_eq!(merge_back_piece(&mut title, &mut gpu, &old, &mut runs), !wanted.is_empty());
+                          assert_eq!(title, expected);
+                          assert_eq!(gpu, expected);
+                          assert_eq!(runs, wanted, "length {len}, run {start}..{end}");
+                          cases += 1;
+                      }
+                  }
+              }
+              println!("{cases} span placements passed on an AVX2 CPU");
+          }
+          """
+          (folder / "handoff_span_tests.rs").write_text(test, encoding="utf-8")
+          name = "shadow::handoff_span_tests::every_contiguous_run_survives_vector_boundaries_and_scalar_tails"
+          cmd = ["cargo", "test", "--locked", "-p", "victory-gpu", "--lib", name, "--", "--exact", "--nocapture"]
+          proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+          print(proc.stdout)
+          proc.check_returncode()
+          assert "span placements passed on an AVX2 CPU" in proc.stdout
