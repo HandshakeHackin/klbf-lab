@@ -1,55 +1,39 @@
-name: Compare PR 28's texture hashes across Rayon pool sizes
+name: Verify ten beta PRs with upstream main's WARP-only test fix
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  hashes:
+  windows:
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
           repository: PastiiJay/klbf-lab
-          ref: 39ad8490478fa205f8f88a74acd237a1e517f97a
+          ref: 78ad5711ecaa7c8cbe5996f74c9d47d16167c061
+          fetch-depth: 0
           persist-credentials: false
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Record CPU model and visible logical processors
-        run: Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
-      - name: Compare the unmodified release benchmark in interleaved rounds
+      - name: Assemble the same ten PR heads reviewed locally
         shell: python
         run: |
-          import os, re, statistics, subprocess
-          from collections import defaultdict
-          results = defaultdict(list)
-          base = ["cargo", "test", "--release", "--locked", "-p", "victory-gpu", "--lib"]
-          prefix = "texture::content_hash_tests::"
-          def execute(case, workers, args):
-              env = dict(os.environ)
-              env.pop("RAYON_NUM_THREADS", None)
-              if workers != "default":
-                  env["RAYON_NUM_THREADS"] = workers
-              cmd = base + [prefix + case, "--", "--exact", *args]
-              result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-              if result.returncode or "1 passed; 0 failed" not in result.stdout:
-                  raise RuntimeError(result.stdout + result.stderr)
-              return result.stdout + result.stderr
-          pools = ["1", "2", "default"]
-          for pool in pools:
-              execute("the_wide_hash_is_the_hash", pool, [])
-          print("All three pool configurations passed all eleven byte-equality fixtures", flush=True)
-          for round_no in range(6):
-              for i in range(len(pools)):
-                  pool = pools[(round_no + i) % len(pools)]
-                  log = execute("content_hash_speed", pool, ["--ignored", "--nocapture"])
-                  rows = re.findall(r"(\d+) MB: one thread [\d.]+ GB/s \(([\d.]+) ms\), content_hash [\d.]+ GB/s \(([\d.]+) ms\)", log)
-                  assert len(rows) == 3, log
-                  for size,serial,wide in rows:
-                      print(f"round={round_no} pool={pool} MiB={size} serial_ms={serial} candidate_ms={wide}", flush=True)
-                      results[(pool, int(size))].append((float(serial),float(wide)))
-          for pool in pools:
-              for size in (1,4,16):
-                  serial,wide=zip(*results[(pool,size)])
-                  print(f"MEDIAN pool={pool} MiB={size} serial_ms={statistics.median(serial):.3f} candidate_ms={statistics.median(wide):.3f}", flush=True)
+          import subprocess
+          prs = [13, 14, 17, 18, 20, 21, 25, 27, 49, 60]
+          refs = [f"refs/pull/{n}/head:refs/verify/{n}" for n in prs]
+          subprocess.run(["git", "fetch", "--no-tags", "origin", *refs], check=True)
+          merge = ["git", "-c", "user.name=Verification", "-c", "user.email=ci@localhost", "merge", "--no-edit"]
+          subprocess.run(merge + [f"refs/verify/{n}" for n in prs], check=True)
+          tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+          print("Combined tree", tree)
+          assert tree == "89cdda44d4f1235e6cae576273b7d792fc0acd64"
+          subprocess.run(["git", "diff", "--check", "78ad571", "HEAD"], check=True)
+      - name: Apply the maintainer's software-only test condition from main
+        run: git cherry-pick --no-commit 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo xtask policy
+      - run: cargo test --workspace --locked -- --test-threads=1
+      - run: cargo test --locked -p victory-gpu --features diagnostics --lib pipeline::make::tests -- --test-threads=1
