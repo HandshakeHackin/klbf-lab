@@ -1,128 +1,129 @@
-name: Verify shader skip parsing and interrupted pre-builds
+name: Check PR 24 Windows console selection and bilinear output
 on:
   push:
     branches: [verify-windows-beta-20261125]
 permissions:
   contents: read
 jobs:
-  resume:
+  fallback:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: 827b9badb3f7bb53b668c2ba26fa4df2665ce5a9
-          fetch-depth: 2
+          repository: PastiiJay/klbf-lab
+          ref: 71b9d9716f5066d11df93dd7dbcede81fb06c91c
           persist-credentials: false
-      - name: Prepare two synthetic no-op compute pipelines
+      - name: Build CLI and the repository's synthetic title fixture
+        shell: pwsh
+        run: |
+          cargo build -p victory --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked --manifest-path tests/fixtures/hle-probe/Cargo.toml --target-dir target/probe
+      - name: Check automatic selection against OS-visible physical memory and both overrides
+        shell: pwsh
+        run: |
+          $osBytes = [uint64](Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize * 1024
+          $auto = if ($osBytes -lt 24GB) { 'series-s' } else { 'series-x' }
+          Write-Host "OS-visible physical memory: $osBytes bytes; expected automatic selection: $auto"
+          $env:VICTORY_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'fixture-cache'
+          $env:VICTORY_DATA_DIR = Join-Path $env:RUNNER_TEMP 'fixture-data'
+          Remove-Item Env:VICTORY_FFX_DIR,Env:VICTORY_FFX_SIMPLE -ErrorAction SilentlyContinue
+          foreach ($choice in @('auto','series-x','series-s')) {
+            $expect = if ($choice -eq 'auto') { $auto } else { $choice }
+            $cliArgs = @('run','target/probe/debug/hle_probe.dll')
+            if ($choice -ne 'auto') { $cliArgs += @('--console',$choice) }
+            $lines = & target/debug/victory.exe @cliArgs
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            $lines | Where-Object { $_ -match '^(console|upscaler|not executing)' } | Write-Host
+            $model = if ($expect -eq 'series-s') { 'S' } else { 'X' }
+            if (!($lines -match "^console\s+$expect ") -or !($lines -match "^console\s+Xbox Series $model$")) { throw "profile mismatch: $choice" }
+            if ([bool]($lines -match '^upscaler\s+bilinear stand-in') -ne ($model -eq 'S')) { throw "fallback mismatch: $choice" }
+            if (!($lines -match '^not executing')) { throw 'fixture binding incomplete' }
+          }
+      - name: Verify fallback pixels on WARP with an oversized input and padded output
+        env:
+          VICTORY_D3D12_WARP: '1'
         shell: pwsh
         run: |
           @'
-          """Exercise Windows pre-build resume with two synthetic no-op compute pipelines."""
-          from pathlib import Path
-          import os
-          import re
-          import struct
-          import subprocess
-          import sys
-          import tempfile
-          import zlib
           
+          #[cfg(test)]
+          mod fallback_readback {
+              use super::*;
+              use windows::Win32::Foundation::RECT;
+              use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
           
-          def words(*values):
-              return struct.pack('<' + 'I' * len(values), *values)
-          
-          
-          def make_shader(tag):
-              # Two tagged v_nops followed by s_endpgm. The pack matches the first 24 bytes.
-              code = words(0xD5800000 | tag, 0x03ff0000, tag, 0xD5800000, 0x03ff0000, 0, 0xBF810000)
-              slots = bytearray(0x68)
-              struct.pack_into('<Q', slots, 0, 6)
-              for offset in (8, 16, 24, 32, 40, 48, 72):
-                  struct.pack_into('<Q', slots, offset, 0xDEADBEEFDEADBEEF)
-              struct.pack_into('<Q', slots, 0x60, len(slots))
-              record = bytearray(0x54)
-              stage = bytearray(0x34)
-              struct.pack_into('<III', stage, 0x28, 1, 1, 1)
-              struct.pack_into('<QQ', record, 0, len(slots) + len(record) + len(stage), len(code))
-              struct.pack_into('<I', record, 0x50, 4)
-              payload = slots + record + stage + code
-              fssm = b'FSSM' + struct.pack('<IQ', 0x101, len(payload)) + payload
-              packed = zlib.compress(fssm)
-              blob = b'XBCH' + struct.pack('<IQQ', 3, len(packed), len(fssm)) + packed
-              part = bytes(24) + b'XDAT' + words(1, 0x24, 0x0d, 48, len(blob)) + blob
-              dxbc = b'DXBC' + bytes(16) + words(1, 44 + len(part), 1, 36) + b'DXIL' + words(len(part)) + part
-              return code, dxbc
-          
-          
-          def fixture(directory):
-              header = bytearray(0x80)
-              header[:4] = b'PS\0\x09'
-              records, table, programs = bytearray(), bytearray(), bytearray()
-              for idx in range(2):
-                  code, dxbc = make_shader(idx + 1)
-                  (directory / f'{idx}.dxbc').write_bytes(dxbc)
-                  records.extend(struct.pack('<QIIII', idx + 1, 0, 0, idx, 0xffffffff))
-                  table.extend(words(len(programs), len(code)))
-                  programs.extend(code)
-              struct.pack_into('<IIIIII', header, 0x50, 0, 2, 1, 2, 1, len(programs))
-              (directory / 'pack.bin').write_bytes(header + records + words(0, 1) + table + b'\0' + programs)
-          
-          
-          def run(exe, inputs, cache, skip):
-              env = dict(os.environ, VICTORY_CACHE_DIR=str(cache), VICTORY_DATA_DIR=str(cache.parent / 'data'),
-                         VICTORY_SKIP_PIPELINES=skip, VICTORY_D3D12_WARP='1')
-              cmd = [str(exe), 'translate', '--cache', '--pipelines', '--jobs', '1', str(inputs)]
-              result = subprocess.run(cmd, cwd=cache.parent, env=env, capture_output=True, text=True, timeout=90)
-              print(result.stdout, flush=True)
-              if result.returncode:
-                  raise RuntimeError(result.stderr[-2500:])
-              return result.stdout
-          
-          
-          def attempted(output):
-              return re.findall(r'^> ([0-9a-f]{32}) \[compute ([0-9a-f]{16})\]', output, re.MULTILINE)
-          
-          
-          exe = Path(sys.argv[1]).resolve()
-          mode = sys.argv[2]
-          with tempfile.TemporaryDirectory() as tmp:
-              root = Path(tmp)
-              inputs = root / 'inputs'
-              inputs.mkdir()
-              fixture(inputs)
-              known = attempted(run(exe, inputs, root / 'discover', ''))
-              assert len(known) == len(set(known)) == 2, known
-              blocked, allowed = known
-              cache = root / 'resume'
-              journal = cache / 'pipelines' / 'prebuild-inflight.txt'
-              journal.parent.mkdir(parents=True)
-              journal.write_text(''.join(key + '\n' for key, _ in known))
-              result = run(exe, inputs, cache, blocked[1])
-              sent = attempted(result)
-              if mode == 'before':
-                  assert set(sent) == set(known) and len(sent) == 2, sent
-              else:
-                  assert mode == 'after' and sent == [allowed], sent
-                  assert re.search(rf'1\s+skipped: VICTORY_SKIP_PIPELINES \({blocked[1]}\)', result), result
-              print(f'{mode}: {len(sent)} of 2 interrupted jobs reached make; manually skipped hash retried={blocked in sent}')
-          '@ | Set-Content "$env:RUNNER_TEMP/skip_resume.py" -Encoding utf8
-      - name: Verify the original resume path attempts both jobs despite the manual skip
-        shell: pwsh
-        run: |
-          git restore --source=HEAD^ -- apps/victory/src/prebuild.rs
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo build --locked -p victory
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python "$env:RUNNER_TEMP/skip_resume.py" target/debug/victory.exe before
-      - name: Verify the manual skip wins while the other interrupted job still runs
-        shell: pwsh
-        run: |
-          git restore -- apps/victory/src/prebuild.rs
-          cargo build --locked -p victory
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python "$env:RUNNER_TEMP/skip_resume.py" target/debug/victory.exe after
-      - name: Verify default Windows parser tests on the final head
-        shell: pwsh
-        run: |
-          cargo test --locked -p victory-gpu --lib pipeline::tests::skip_hashes_
+              #[test]
+              fn bilinear_uses_only_the_render_rectangle_and_preserves_output_padding() {
+                  let h = host().expect("WARP device required");
+                  let format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                  let samples = DXGI_SAMPLE_DESC { Count: 1, Quality: 0 };
+                  let allocate = |kind, desc, initial| -> ID3D12Resource {
+                      let props = D3D12_HEAP_PROPERTIES { Type: kind, ..Default::default() };
+                      let mut resource = None;
+                      // SAFETY: the descriptions and output pointer remain valid for creation.
+                      unsafe { h.device.CreateCommittedResource(&props, D3D12_HEAP_FLAG_NONE, &desc, initial, None, &mut resource) }.unwrap();
+                      resource.unwrap()
+                  };
+                  let texture = |width, height, flags| allocate(D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DESC {
+                      Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D, Width: width, Height: height,
+                      DepthOrArraySize: 1, MipLevels: 1, Format: format, Flags: flags,
+                      SampleDesc: samples, ..Default::default()
+                  }, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                  let input = texture(4, 3, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+                  let output = texture(6, 4, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                  let readback = allocate(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_DESC {
+                      Dimension: D3D12_RESOURCE_DIMENSION_BUFFER, Width: 4 * 256, Height: 1, DepthOrArraySize: 1,
+                      MipLevels: 1, Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR, SampleDesc: samples, ..Default::default()
+                  }, D3D12_RESOURCE_STATE_COPY_DEST);
+                  let list = h.new_list().unwrap();
+                  let iv = h.rtv(Some(&input), None);
+                  let ov = h.rtv(Some(&output), None);
+                  // SAFETY: both cleared resources have live RT views and are in render-target state.
+                  unsafe {
+                      list.list.ClearRenderTargetView(iv, &[1., 0., 1., 1.], None);
+                      list.list.ClearRenderTargetView(ov, &[0., 1., 1., 1.], None);
+                      for y in 0..2 {
+                          for x in 0..2 {
+                              let rect = RECT { left: x, top: y, right: x+1, bottom: y+1 };
+                              list.list.ClearRenderTargetView(iv, &[x as f32, y as f32, 0., 1.], Some(&[rect]));
+                          }
+                      }
+                      list.list.ResourceBarrier(&[
+                          crate::host::transition(&input, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+                          crate::host::transition(&output, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+                      ]);
+                  }
+                  assert!(record(&list, &input, &output, [2, 2], [5, 3]));
+                  // SAFETY: the readback buffer holds four 256-byte rows and all resources live through the transfer.
+                  unsafe {
+                      list.list.ResourceBarrier(&[crate::host::transition(&output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                      let src = D3D12_TEXTURE_COPY_LOCATION { pResource: std::mem::transmute_copy(&output), Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 } };
+                      let dst = D3D12_TEXTURE_COPY_LOCATION { pResource: std::mem::transmute_copy(&readback), Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT { Offset: 0, Footprint: D3D12_SUBRESOURCE_FOOTPRINT { Format: format, Width: 6, Height: 4, Depth: 1, RowPitch: 256 } } } };
+                      list.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+                  }
+                  list.close();
+                  h.execute(&[&list]);
+                  let mut data = std::ptr::null_mut();
+                  // SAFETY: execute completes this list and the mapped range covers every checked pixel.
+                  unsafe { readback.Map(0, None, Some(&mut data)) }.unwrap();
+                  let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), 4 * 256) };
+                  for y in 0..4usize {
+                      for x in 0..6usize {
+                          let got = &bytes[y*256+x*4..y*256+x*4+4];
+                          if x < 5 && y < 3 {
+                              let want = [[0u8, 26, 128, 230, 255][x], [0, 128, 255][y], 0, 255];
+                              assert!(got.iter().zip(want).all(|(a,b)| a.abs_diff(b) <= 1), "({x},{y}) {got:?} vs {want:?}");
+                          } else {
+                              assert_eq!(got, [0, 255, 255, 255], "padding at ({x},{y})");
+                          }
+                      }
+                  }
+                  unsafe { readback.Unmap(0, None) };
+                  eprintln!("15 bilinear output pixels matched within 1 UNORM step; all 9 guard pixels unchanged");
+              }
+          }
+          '@ | Add-Content crates/victory-gpu/src/ffx/simple.rs -Encoding utf8
+          cargo test --locked -p victory-gpu --lib fallback_readback -- --nocapture 2>&1 | Tee-Object "$env:RUNNER_TEMP/pixels.log"
+          if ($LASTEXITCODE -ne 0 -or !(Select-String -SimpleMatch -Quiet '15 bilinear output pixels matched' "$env:RUNNER_TEMP/pixels.log")) { throw 'missing verified readback' }
