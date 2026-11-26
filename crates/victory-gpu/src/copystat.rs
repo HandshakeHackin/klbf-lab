@@ -701,6 +701,19 @@ fn log_memory() {
     if let Some(h) = crate::host::host() {
         h.log_video_memory("with the memory line");
     }
+    let [capped_textures, mip_saved_live_bytes, mip_saved_total_bytes] =
+        crate::resource::MIP_SAVINGS.each_ref().map(|v| v.load(Relaxed));
+    let [local_budget_bytes, local_used_bytes, nonlocal_budget_bytes, nonlocal_used_bytes] = card;
+    tracing::info!(
+        local_used_bytes,
+        local_budget_bytes,
+        nonlocal_used_bytes,
+        nonlocal_budget_bytes,
+        capped_textures,
+        mip_saved_live_bytes,
+        mip_saved_total_bytes,
+        "VRAM usage and texture cap"
+    );
     // What else holds memory: the map, on a thread of its own, with every
     // sixth line; and what the shader table and the pipeline library keep.
     static LINES: AtomicU64 = AtomicU64::new(0);

@@ -415,7 +415,7 @@ static DROPS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 #[cfg(windows)]
 fn parse_skip_hashes(value: &str) -> Vec<String> {
     value
-        .split(',')
+        .split([',', '\r', '\n'])
         .map(str::trim)
         .filter(|hash| !hash.is_empty())
         .filter_map(|hash| {
@@ -854,13 +854,23 @@ pub fn wanted_early(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(windows, feature = "diagnostics"))]
+    #[cfg(windows)]
     #[test]
     fn skip_hashes_accepts_full_hashes_only() {
         assert!(super::parse_skip_hashes(" , ").is_empty());
         assert_eq!(
             super::parse_skip_hashes(" 0123456789ABCDEF, 0123456789abcde, xyz, 0011223344556677,"),
             ["0123456789abcdef", "0011223344556677"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn skip_hashes_accepts_multiline_files() {
+        let value = "0123456789ABCDEF\r\n\r\ninvalid\n 0011223344556677,ffeeddccbbaa9988\r\n";
+        assert_eq!(
+            super::parse_skip_hashes(value),
+            ["0123456789abcdef", "0011223344556677", "ffeeddccbbaa9988"]
         );
     }
 

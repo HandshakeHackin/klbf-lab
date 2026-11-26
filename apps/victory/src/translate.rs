@@ -179,10 +179,20 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
     let paths = crate::default_paths(paths)?;
     let threads = jobs.unwrap_or(4).max(1);
     let began = std::time::Instant::now();
+    let expired = || limit.is_some_and(|n| began.elapsed().as_secs() >= n);
     let done = Mutex::new(HashSet::new());
     let counts = [const { AtomicUsize::new(0) }; 5];
-    for root in &paths {
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+    'inputs: for root in &paths {
+        if expired() {
+            counts[3].fetch_add(1, Ordering::Relaxed);
+            break;
+        }
+        for entry in walkdir::WalkDir::new(root) {
+            if expired() {
+                counts[3].fetch_add(1, Ordering::Relaxed);
+                break 'inputs;
+            }
+            let Ok(entry) = entry else { continue };
             if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
                 continue;
             }
@@ -199,7 +209,7 @@ pub fn warm(paths: Vec<PathBuf>, file: &Path, jobs: Option<usize>) -> Result<()>
                                 continue;
                             };
                             let hash = blake3::hash(&bytes).to_hex()[..16].to_owned();
-                            if limit.is_some_and(|n| began.elapsed().as_secs() >= n) {
+                            if expired() {
                                 counts[3].fetch_add(1, Ordering::Relaxed);
                                 break;
                             }

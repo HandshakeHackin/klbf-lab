@@ -2028,6 +2028,32 @@ fn srv_desc(words: &[u32; 10]) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
     }
 }
 
+/// Translate the title's mip range to the smaller host resource. A view
+/// wholly above the cap sees the most detailed mip still available.
+fn capped_srv(desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, dropped: u32, levels: u32) {
+    let shift = |most: &mut u32, mips: &mut u32, min_lod: &mut f32| {
+        let skipped = dropped.saturating_sub(*most);
+        *most = most.saturating_sub(dropped).min(levels - 1);
+        if *mips != u32::MAX {
+            *mips = mips.saturating_sub(skipped).clamp(1, levels - *most);
+        }
+        *min_lod = (*min_lod - dropped as f32).max(0.0);
+    };
+    match desc.ViewDimension {
+        D3D12_SRV_DIMENSION_TEXTURE2D => {
+            // SAFETY: the dimension selects Texture2D.
+            let view = unsafe { &mut desc.Anonymous.Texture2D };
+            shift(&mut view.MostDetailedMip, &mut view.MipLevels, &mut view.ResourceMinLODClamp);
+        }
+        D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+            // SAFETY: the dimension selects Texture2DArray.
+            let view = unsafe { &mut desc.Anonymous.Texture2DArray };
+            shift(&mut view.MostDetailedMip, &mut view.MipLevels, &mut view.ResourceMinLODClamp);
+        }
+        _ => {}
+    }
+}
+
 fn uav_desc(words: &[u32; 10]) -> D3D12_UNORDERED_ACCESS_VIEW_DESC {
     let mut words = *words;
     words[0] = crate::resource::pc_format(words[0]);
@@ -2704,6 +2730,11 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                 if !fits(texture, desc.as_mut().map(|d| &mut d.Format), false) {
                     return None;
                 }
+                if let Some(view) = desc.as_mut()
+                    && let Some((dropped, levels)) = crate::resource::first_host_mip(resource, texture)
+                {
+                    capped_srv(view, dropped, levels);
+                }
                 // Levels on demand (`crate::tiles`): a texture made level by
                 // level is shown from the first level that is the title's
                 // and has memory, if the title's view starts before it (a
@@ -3059,6 +3090,32 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capped_shader_views_keep_the_overlap_with_retained_mips() {
+        let view = |most, mips, lod| {
+            let mut desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Texture2D: D3D12_TEX2D_SRV {
+                        MostDetailedMip: most,
+                        MipLevels: mips,
+                        ResourceMinLODClamp: lod,
+                        PlaneSlice: 0,
+                    },
+                },
+                ..Default::default()
+            };
+            capped_srv(&mut desc, 2, 9);
+            // SAFETY: the view stays Texture2D.
+            let v = unsafe { desc.Anonymous.Texture2D };
+            (v.MostDetailedMip, v.MipLevels, v.ResourceMinLODClamp)
+        };
+        assert_eq!(view(0, 1, 0.0), (0, 1, 0.0));
+        assert_eq!(view(1, 5, 3.5), (0, 4, 1.5));
+        assert_eq!(view(3, 2, 0.0), (1, 2, 0.0));
+        assert_eq!(view(3, u32::MAX, 0.0), (1, u32::MAX, 0.0));
+    }
 
     /// A null texture UAV keeps the title's dimension (3D for the world's
     /// wind field), and is 2D when the title names none.

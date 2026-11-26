@@ -2,7 +2,7 @@
 
 Every step below is a command to copy and paste, in order. You only need your own copy of the game's Xbox Series files in a folder. KLBF Lab includes no game files.
 
-In this guide the game files are in **`C:\Games\GTA6`** (the folder that holds `game_scarlett_master.exe` and `shaders.rpf`). If yours are elsewhere, replace that path everywhere.
+In this guide the game files are in **`C:\Games\Title`** (the folder that holds `game_scarlett_master.exe` and `shaders.rpf`). If yours are elsewhere, replace that path everywhere.
 
 Open **PowerShell** (Start menu → type `PowerShell` → Enter) and paste each block. Wait for one block to finish before the next.
 
@@ -11,6 +11,7 @@ Open **PowerShell** (Start menu → type `PowerShell` → Enter) and paste each 
 ## 1. Check your PC (1 minute)
 
 - A recent graphics card with DirectX 12 (tested on AMD Radeon RX 9070 XT; other AMD and NVIDIA cards are being tested).
+- **More than 8 GB of video memory is recommended.** Some 8 GB setups have [crashed during startup](https://github.com/PastiiJay/klbf-lab/issues/11). One RTX 2080 8 GB reached the 3D world and ran at about 2–3 FPS in gameplay during a 22-minute diagnostic session. [RTX 2080 report](https://github.com/PastiiJay/klbf-lab/issues/65)
 - **32 GB of RAM**, or 16 GB plus a large page file (step 2). A run uses about 20 GB of memory.
 - About 15 GB of free disk space for the tools and the shader cache.
 
@@ -78,7 +79,7 @@ If your graphics card stops responding about a minute after the game world start
 This compiles all of the game's shaders for your graphics card ahead of time, so the game doesn't stutter or crash on them later:
 
 ```powershell
-target\release\victory.exe translate --cache --pipelines --jobs 8 C:\Games\GTA6\shaders.rpf
+target\release\victory.exe translate --cache --pipelines --jobs 8 C:\Games\Title\shaders.rpf
 ```
 
 If it crashes (the graphics driver sometimes does), **run the same line again**: it resumes where it stopped and remembers what crashed. It's done when it ends without a crash. Do it again after each KLBF Lab update.
@@ -86,11 +87,11 @@ If it crashes (the graphics driver sometimes does), **run the same line again**:
 ## 8. Play
 
 ```powershell
-target\release\victory.exe run --console series-s C:\Games\GTA6\game_scarlett_master.exe --execute
+target\release\victory.exe run --console series-s C:\Games\Title\game_scarlett_master.exe --execute
 ```
 
 - **Plug in the controller before starting.**
-- On the stable build the start screen and menus can stay **black**: press **A** (or Enter) to get past them.
+- On the stable build the start screen and menus can stay **black**. Press **A** on the controller to advance. Enter also works on the start screen. The [account picker only responds to the controller](https://github.com/PastiiJay/klbf-lab/issues/69).
 - The first minutes in a new area are slow while shaders finish loading.
 - Saves work (autosave and manual).
 
@@ -113,6 +114,7 @@ Then step 6, step 7 again, and step 8.
 | `X3506` or `vs_5_1` in the log, black window | Old Windows shader compiler: copy the x64 `d3dcompiler_47.dll` from a recent Windows SDK (`Redist\D3D\x64`) next to `victory.exe` |
 | `error: unexpected argument '--cache'` | You built an old copy: redo step 4 |
 | Graphics card stops responding after ~1 min | `$env:VICTORY_LATE_WAIT = '0'` |
+| Crash while loading: the log shows `dstorage: request failed: zlib … hr=0x8007000d`, then `0x80000003` at `victory-image…+0x19b5024` | Some game files are incomplete or damaged: copy the game folder again from your source (thanks @Emaxoso) |
 
 Still stuck? From the same checkout where you built the executable, run:
 

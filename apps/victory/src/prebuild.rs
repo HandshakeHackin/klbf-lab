@@ -207,8 +207,8 @@ pub fn run(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
         with(job, &mut |p| match p {
             Ok(p) if done.contains(&p.key()) => drop(already.fetch_add(1, Ordering::Relaxed)),
             Ok(p) if crashed.contains(&p.key()) => skip("the host driver died on it in an earlier pre-build".into()),
-            Ok(p) if suspects.contains(&p.key()) => lock(&first).push(job),
             Ok(p) if p.skipped().is_some() => skip(format!("VICTORY_SKIP_PIPELINES ({})", p.skipped().unwrap_or_default())),
+            Ok(p) if suspects.contains(&p.key()) => lock(&first).push(job),
             Ok(p) => lock(&todo).push((!pipeline::wanted_early(&p.key()), job)),
             Err(why) => skip(why),
         })

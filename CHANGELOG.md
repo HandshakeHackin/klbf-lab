@@ -12,12 +12,12 @@ Product and controller names (Xbox, DualSense…) are only used to say what a bu
 - Base: latest fxceless/victory-fork + our AMD fixes (Lab 35/37).
 
 ## AMD test branch `klbf-amd` — 24 Nov 2026
-- **Base:** fxceless/victory-gta6 `578d459` + VIctory #1599.
+- **Base:** fxceless's earlier fork `578d459` + VIctory #1599.
 - **AMD fixes:** memory leak (shader `39f0e9aeb156a61c` stuck in the AMD compiler, skipped by default); 32-lane pixel shaders run per half wave on 64-lane hardware (purple blocks); NaN/Inf filter on colour outputs; larger, configurable texture upload queue (late/missing textures).
 - **Result on RX 9070 XT:** room fully lit, ~4.4 fps stable; 6–9 fps with experimental settings (device removed after ~3 min). Ambient light still purple; triangle edges, dark faces remain.
 
 ## Lab 23 (current) — 24 Nov 2026
-- **Base:** the [fxceless/victory-gta6](https://github.com/fxceless/victory-gta6) fork at `578d459`, unchanged. All credit to its author.
+- **Base:** fxceless's earlier fork at `578d459`, unchanged. All credit to its author.
 - **What it does on our card:** the first gameplay scene is drawn (characters, buildings, the yard); ~2 fps after warm-up; no device removal.
 - **Known problem:** committed memory keeps growing; our run stopped at 514 s when Windows ran out of virtual memory.
 
