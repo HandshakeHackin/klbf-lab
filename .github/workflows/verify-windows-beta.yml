@@ -10,7 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: d7c27e3e788870f33c531608767bf2a7a18c7e91
+          ref: b08f25e206d063a1a61a1c84ea2745fd021dae34
+          fetch-depth: 3
           persist-credentials: false
       - name: Require the SDK validator and disassembler, save shader entry points
         shell: python
@@ -28,7 +29,7 @@ jobs:
           case = case.replace(a, '''{ let dump = super::tests::dump_dxil(&shader.dxil).expect("SDK dxc required");
                       let ir = dump.split("define void @main()").nth(1).expect("entry point").split("\\n}").next().unwrap();
                       assert!(!ir.contains("dx.op.wave"), "fixture must be independent of wave intrinsics");
-                      std::fs::write(format!("entry-{}-{passes}.txt", std::env::var("CASE").unwrap()), ir).unwrap();''')
+                      std::fs::write(format!("entry-{}-{label}-{passes}.txt", std::env::var("CASE").unwrap()), ir).unwrap();''')
           p.write_text(prefix + marker + case)
       - name: Validate and inspect the exact Wave32 shaders
         shell: bash
@@ -55,8 +56,24 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-          for mask in (0,128):
-              a = Path(f'entry-wave32-{mask}.txt').read_text()
-              b = Path(f'entry-warp-{mask}.txt').read_text()
-              assert a == b, f'entry instructions differ for mask {mask}'
-              print(f'Mask {mask}: {len(a.splitlines())} identical entry-point lines')
+          from itertools import product
+          crate = Path('crates/victory-shader')
+          for label, mask in product(('adjacent','separated'), (0,128)):
+              a = (crate/f'entry-wave32-{label}-{mask}.txt').read_text()
+              b = (crate/f'entry-warp-{label}-{mask}.txt').read_text()
+              assert a == b, f'entry instructions differ for {label} mask {mask}'
+              print(f'{label} mask {mask}: {len(a.splitlines())} identical entry-point lines')
+      - name: Compare both masks on the unmodified PR 41 lowering
+        shell: bash
+        env:
+          CASE: original
+        run: |
+          git checkout ba88ab0607c7cc1b7fa83b3c6f3a4a9beb1093be -- crates/victory-shader/src/emit/lower.rs
+          sed -i 's/("adjacent", words.as_slice(), "BWBRRBWBR")/("adjacent", words.as_slice(), "BWBRBRBWBR")/' crates/victory-shader/src/emit/wave64_tests.rs
+          cargo test --locked -p victory-shader --lib split_lds_adjacent_reads_share_only_the_middle_meeting -- --nocapture
+      - name: Test and lint the published shader source
+        shell: bash
+        run: |
+          git restore --source=HEAD --staged --worktree -- crates/victory-shader/src/emit/lower.rs crates/victory-shader/src/emit/wave64_tests.rs
+          cargo clippy --locked -p victory-shader --all-targets -- -D warnings
+          cargo test --locked -p victory-shader --lib
