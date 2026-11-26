@@ -12,15 +12,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - version: base
-            revision: c71c7d6bc627758ad858a736233cc2a4b14bd717
-          - version: candidate
-            revision: 6b4569bd4df9bfe6d965d43a2d4faa79bd944b13
+          - version: fixed
+            revision: 7786134055dd4a98ff641fdd4dd642d63b3c362d
     name: Adapter selection (${{ matrix.version }})
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: PastiiJay/klbf-lab
+          repository: HandshakeHackin/klbf-lab
           ref: ${{ matrix.revision }}
           persist-credentials: false
       - name: Check actual WARP LUIDs for runtime and shader devices
@@ -60,7 +58,7 @@ jobs:
               }
           }
           '@ | Add-Content -Encoding utf8 crates/victory-gpu/src/host.rs
-          if ('${{ matrix.version }}' -eq 'candidate') {
+          if ('${{ matrix.version }}' -eq 'fixed') {
               @'
 
           #[cfg(test)]
@@ -72,7 +70,7 @@ jobs:
                   match high_performance_adapter() {
                       Some((adapter, name)) => {
                           let desc = unsafe { adapter.GetDesc1() }.unwrap();
-                          eprintln!("preferred selector returned {name}, vendor={:04x} device={:04x} flags={:#x}",
+                          panic!("preferred selector returned {name}, vendor={:04x} device={:04x} flags={:#x}",
                                     desc.VendorId, desc.DeviceId, desc.Flags);
                       }
                       None => eprintln!("preferred selector returned None; default fallback will be used"),
