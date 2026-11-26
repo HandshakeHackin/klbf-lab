@@ -31,6 +31,9 @@ int main() {
     check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "create DXGI factory");
     ComPtr<IDXGIAdapter> warp;
     check(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "find WARP");
+    DXGI_ADAPTER_DESC adapter{};
+    check(warp->GetDesc(&adapter), "describe WARP");
+    std::printf("WARP adapter: vendor=0x%04X device=0x%04X\n", adapter.VendorId, adapter.DeviceId);
     ComPtr<ID3D12Device> device;
     check(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)), "create WARP device");
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support{DXGI_FORMAT_R8_UINT};
