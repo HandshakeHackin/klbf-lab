@@ -107,7 +107,9 @@ jobs:
           $info = [Diagnostics.ProcessStartInfo]::new((Resolve-Path target/release/victory.exe))
           foreach ($arg in @('translate','--pipelines','--jobs','1',$root)) { $info.ArgumentList.Add($arg) }
           $info.UseShellExecute = $false
+          $info.RedirectStandardError = $true
           $p = [Diagnostics.Process]::Start($info)
+          $stderr = $p.StandardError.ReadToEndAsync()
           $seen = @{}
           while (!$p.HasExited) {
             try {
@@ -121,7 +123,11 @@ jobs:
           $p.WaitForExit()
           Write-Host "Host OS $([Environment]::OSVersion.Version) / victory exit $($p.ExitCode)"
           foreach ($path in $seen.Keys) { Write-Host "Loaded D3D12Core: $path ($($seen[$path]))" }
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          $diagnostic = $stderr.GetAwaiter().GetResult()
+          Write-Host $diagnostic
+          if ($p.ExitCode -ne 0 -and ($p.ExitCode -ne 1 -or $diagnostic -notmatch 'the device supports SM 0x62 only')) {
+            throw "Unexpected CLI failure: $($p.ExitCode)"
+          }
           if (!$seen.Count) { throw 'Process ended before a module path was observed' }
           $expected = if ($env:EXPECTED_CORE -eq 'system') {
             Join-Path ([Environment]::SystemDirectory) 'D3D12Core.dll'
