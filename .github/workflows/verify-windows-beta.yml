@@ -25,6 +25,10 @@ jobs:
             git merge --no-edit --no-ff $head
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
           }
+          git fetch --no-tags https://github.com/PastiiJay/klbf-lab.git 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git cherry-pick 448b737fa8f4e669c3a9cede26c08a04d4cacd96
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git rev-parse 'HEAD^{tree}'
       - name: Strict workspace Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
