@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 3
+          fetch-depth: 5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Reproduce three fixture failures on PR head with switch disabled
@@ -37,4 +37,5 @@ jobs:
           if ($LASTEXITCODE) { throw 'checkout failed' }
           cargo test -p victory-shader --lib --locked
       - name: Check the same fixtures again with launcher default
-        run: cargo test -p victory-shader --lib --locked emit::valu_tests::
+        run: |
+          cargo test -p victory-shader --lib --locked emit::valu_tests::
