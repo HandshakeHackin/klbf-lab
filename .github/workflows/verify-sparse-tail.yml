@@ -1,0 +1,33 @@
+name: Check sparse graphics merge and its untouched tail
+on:
+  push:
+    branches: [verify/pr57-sparse-merge-tail]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Confirm AVX2 is available
+        shell: pwsh
+        run: |
+          if (-not [System.Runtime.Intrinsics.X86.Avx2]::IsSupported) { throw 'This run requires AVX2' }
+          Write-Host 'AVX2 is available'
+      - name: Run sparse merge and existing scalar comparisons
+        run: cargo test -p victory-gpu --locked --lib copied_and_simd_tests
+      - name: Check that dropping the scalar remainder fails the new test
+        shell: pwsh
+        run: |
+          $path = 'crates/victory-gpu/src/shadow.rs'
+          $before = 'merge_piece_scalar(&now[i..], &mut held[i..], &mut title[i..]) || differs'
+          $source = [IO.File]::ReadAllText($path)
+          if (-not $source.Contains($before)) { throw 'Missing expected merge remainder' }
+          [IO.File]::WriteAllText($path, $source.Replace($before, 'differs'))
+          $log = cargo test -p victory-gpu --locked --lib sparse_page_merges_preserve_the_gap_and_unselected_tail 2>&1 | Out-String
+          $status = $LASTEXITCODE
+          $log -split '`n' | Select-String 'test result:|\.\.\. FAILED'
+          if ($status -ne 101 -or $log -notmatch '0 passed; 1 failed') { exit 1 }
+          exit 0
