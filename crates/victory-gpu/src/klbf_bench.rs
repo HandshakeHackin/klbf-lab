@@ -2433,7 +2433,8 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     let fg = c.set.fg_fps(c.s.avg);
     pen.text(IMPACT, 64.0, &format!("{:.1}", if fg > 0.0 { fg } else { c.s.avg }), 535.0, 380.0, false, 135.0, ink);
     if fg > 0.0 {
-        pen.text(ARIAL_BOLD, 16.0, &format!("(base {:.1})", c.s.avg), 748.0, 372.0, false, 200.0, ink);
+        // (27/11, the owner) On the template's "average" baseline (at 377.3), at its size.
+        pen.text(ARIAL, 15.0, &format!("(base {:.1})", c.s.avg), 748.0, 377.3, false, 200.0, ink);
     }
     // (27/11, the owner) With frame generation the tiles are the frames shown too, the real ones small under
     // them ("base 8.6"); the time at 12 fps or more stays real frames.
@@ -2860,7 +2861,7 @@ mod tests {
     fn card_preview() {
         let mut card = sample_card();
         card.serial = "3b8db536".into();
-        card.share = "[KLBF Lab Bench BM-v1] PastiiJay/klbf-lab@abc1234 | RX 9070 XT | Ryzen 7 7800X3D | avg 60.0 fps, 1% low 58.5 | CERTIFIED | 3b8db536".into();
+        card.share = format!("[KLBF Lab Bench BM-v1] PastiiJay/klbf-lab@abc1234 | RX 9070 XT | Ryzen 7 7800X3D | {} | CERTIFIED | 3b8db536", share_fps(&card.set, &card.s));
         card.png_name = "bench-results/KLBF-Bench-BM-v1-20261126-2104-3b8db536.png".into();
         card.from = "PastiiJay/klbf-lab @ abc1234".into();
         card.date = "26 Nov 2026 21:04".into();
