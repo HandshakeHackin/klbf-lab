@@ -1,0 +1,51 @@
+# Changelog
+
+What each KLBF Lab release adds, in one place, so anyone (or any tool) can see at a glance what a build has
+and what it lacks. Every switch below is an environment variable; "off" means it changes nothing unless set.
+
+Base: [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (Series X profile, sea fixed),
+itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
+
+## v0.27 (27 Nov 2026)
+
+### Launcher (KLBF Lab Settings)
+- Settings window on first start: profile X / S, AMD FSR 4 (RDNA 4) or FSR 3.1 (other cards) or the built-in
+  upscaler, presets Quality / Balanced / Performance / Ultra Performance, output size, frame generation (FG x2),
+  display (which monitor), window or borderless fullscreen, saved profiles.
+- Default for every PC: Profile X, FSR Ultra Performance, 3840x2160 output, no frame generation.
+  If FSR cannot start, the built-in upscaler is used.
+- "Your PC" panel: GPU generation, VRAM, RAM, screen, with a verdict per line.
+- Shaders prepared before the first start, with one progress bar from 0 to 100 %; the game never starts
+  without them. Cancel stops everything.
+- First start downloads the official Microsoft Agility SDK and AMD FidelityFX DLLs, checked by SHA-256.
+- Saves tab (slots, names hidden by default), backups before every launch and bench, copy / restore.
+- Data in `Saved Games\KLBF Lab` (saves, shader cache, settings); a one-time copy from older folders.
+- Quick tab: last bench card (copy image / copy text), shortcuts, desktop shortcut.
+- Paths, user and PC names are never shown unless "Show" is pressed.
+
+### In game
+- F8 screenshot (game image only, small KLBF Lab mark with the stats), F10 settings, F11 restart,
+  Alt+Enter borderless fullscreen (16:9 kept, black bars on wider screens).
+- Caption: `KLBF Lab | 34 FPS (base 17) | 1% | ms | draws | profile, upscaler (render -> output) | VRAM | RAM (resident + shared)`.
+
+### Bench (KLBF Lab Bench BM-v1)
+- The card shows every launcher setting, the real FSR version, frames shown with frame generation
+  and the real ones ("base"), installed RAM, the save slot number.
+- A fade to black after lit frames is left out of the black-frame count (#124, reported by ParaNyx).
+
+### Fixes
+- RX 6000 (RDNA 2): the 2 GB aperture segment no longer fills (device loss at world load), #127 by
+  MalarkZA, kyokyotosh and HandshakeHackin.
+- RX 9070 XT: AMD compiler crash at amdxc64.dll+0x861b9f fixed (diagnosed with BrokeAsh, KingKaom).
+- High-performance GPU chosen on laptops with two GPUs (#47).
+
+### Other launchers (victory.exe started directly)
+- Our universal defaults apply; F10 / F11 are left to the game; F8 and Alt+Enter stay.
+
+### Experimental switches (off), rewritten from eikkapine/victory-amd's ideas
+`KLBF_NIGHT_LIGHTS`, `KLBF_PORT_ALL`, `KLBF_BUFFER_NO_WAIT`, `KLBF_PRIORITY`, `KLBF_FPS_CAP=<fps>`,
+`KLBF_TEX_FIFO`, `KLBF_TEX_CAP`.
+
+### Credits
+Op-lite, cool_fox, eikkapine, MalarkZA, kyokyotosh, HandshakeHackin, ParaNyx, BrokeAsh, KingKaom,
+avatarmanz, Ryuki, and every tester who posted a bench.
