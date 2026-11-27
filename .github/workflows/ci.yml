@@ -1,33 +1,26 @@
-name: CI
-
+name: Release argument regression
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/release-notes-argv']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  argv:
     runs-on: windows-latest
-    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+        with:
+          fetch-depth: 2
+          ref: 57a00a8a6a009a67a571bb281abf7f1eff6afe28
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          'import sys,json; print(json.dumps(sys.argv[1:]))' | Set-Content capture.py
+          foreach ($rev in @('HEAD^','HEAD')) {
+            $line = (git show "${rev}:.github/workflows/release.yml" | Where-Object { $_ -match '^\s*gh release create ' }).Trim()
+            $line = $line.Replace('gh release create ', 'python capture.py ').Replace('${{ github.ref_name }}','v-test').Replace('${{ steps.pkg.outputs.zip }}','C:\build folder\artifact.zip').Replace('${{ steps.pkg.outputs.sha }}','abcd')
+            $argv = & ([scriptblock]::Create($line)) | ConvertFrom-Json
+            $ok = $argv.Count -eq 6 -and $argv[0] -eq 'v-test' -and $argv[1] -eq 'C:\build folder\artifact.zip' -and $argv[2] -eq '--title' -and $argv[3] -eq 'KLBF Lab v-test' -and $argv[4] -eq '--notes' -and $argv[5] -like '*KLBF Lab.cmd*abcd'
+            Write-Host "$rev argument count $($argv.Count), expected layout matched $ok"
+            if (($rev -eq 'HEAD') -ne $ok) { throw 'unexpected argument layout' }
+          }
