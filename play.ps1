@@ -296,7 +296,9 @@ if ($menuAction -and -not $NoPrecompile -and ($menuAction -eq 'prepare' -or $hav
     if (-not (Test-Path -LiteralPath $rpf -PathType Leaf)) {
         Write-Warning "No shaders.rpf in ${Game}: the shaders will be translated while playing."
     } elseif ($menuAction -eq 'prepare' -or (Confirm-KlbfPrepare (Get-KlbfPrepareReason $have $stamp))) {
-        if (Show-KlbfPrepare $Victory $rpf) { Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8 }
+        # (27/11) Translation and the pipelines of earlier runs, in the one window
+        if (Show-KlbfPrepare $Victory $rpf (Join-Path $Cache 'pipelines\known-pipelines.bin')) { Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8 }
+        $warmed = $true
     }
     if ($menuAction -eq 'prepare') { & $PSCommandPath -Setup @passOn; exit $LASTEXITCODE }
     $have = $stamp
@@ -318,7 +320,10 @@ if (-not $NoPrecompile -and $have -ne $stamp) {
 # (written down by VICTORY_PIPELINE_BOOK) is made ahead by `victory warm` into the driver's cache, before the game
 # starts. Only new ones are made; it goes on where it stopped. -NoPrecompile skips it.
 $book = Join-Path $Cache 'pipelines\known-pipelines.bin'
-if (-not $NoPrecompile -and (Test-Path -LiteralPath $book)) {
+if (-not $NoPrecompile -and (Test-Path -LiteralPath $book) -and $menuAction -and -not $warmed) {
+    # (27/11) From the settings window: the pipelines in a progress window, never a hidden wait
+    $null = Show-KlbfPrepare $Victory $rpf $book -NoTranslate
+} elseif (-not $NoPrecompile -and (Test-Path -LiteralPath $book) -and -not $warmed) {
     Write-Host 'Making the effects of earlier runs ahead, so they do not compile while playing (only new ones; resumes where it stopped)...'
     & $Victory warm
     if ($LASTEXITCODE -ne 0) { Write-Warning 'Making effects ahead stopped early; the rest are made while playing.' }
