@@ -21,6 +21,15 @@ use super::xasync::{E_INVALIDARG, E_NOTIMPL};
 use super::xgameruntime::{HRESULT, S_OK};
 use crate::{HleExport, HleModule};
 
+mod kbm;
+
+/// (KLBF Lab) Keyboard and mouse: the title window's messages (mouse capture, F9, raw motion);
+/// `Some(result)` when the message was ours.
+#[cfg(windows)]
+pub fn kbm_message(hwnd: *mut c_void, message: u32, wparam: usize, lparam: isize) -> Option<isize> {
+    kbm::host::on_message(hwnd, message, wparam, lparam)
+}
+
 /// The documented errors.
 pub const DEVICE_DISCONNECTED: HRESULT = 0x838A_0001_u32 as i32;
 pub const DEVICE_NOT_FOUND: HRESULT = 0x838A_0002_u32 as i32;
@@ -115,6 +124,11 @@ trait Source: Send {
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
     /// The foreground window is one of ours.
     fn focused(&mut self) -> bool;
+    /// (KLBF Lab) The stand-in pad from the keyboard and mouse keymap; `None`: the old table
+    /// (`fallback`).
+    fn kbm(&mut self) -> Option<PadState> {
+        None
+    }
 }
 
 fn fallback(keys: &[KeyState]) -> PadState {
@@ -899,13 +913,13 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, keys) = {
+        let (pads, keys, stand_in) = {
             let mut source = lock(&self.source);
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
             self.run_motors(&mut **source);
-            (pads, source.keys())
+            (pads, source.keys(), source.kbm())
         };
-        let events = self.state().poll(&self.devices, self.one_pad, pads, keys);
+        let events = self.state().poll(&self.devices, self.one_pad, pads, keys, stand_in);
         self.deliver(events);
     }
 
@@ -951,11 +965,13 @@ impl State {
         one_pad: bool,
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
+        stand_in: Option<PadState>,
     ) -> Vec<Event> {
         let now = now();
         let mut events = std::mem::take(&mut self.pending);
+        let stand_in = stand_in.unwrap_or_else(|| fallback(&keys));
         if one_pad {
-            let pad = pads.into_iter().flatten().fold(fallback(&keys), merged);
+            let pad = pads.into_iter().flatten().fold(stand_in, merged);
             self.update(devices, FALLBACK, Some(Value::Pad(pad)), now, &mut events);
             self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
             return events;
@@ -964,7 +980,7 @@ impl State {
         for (slot, pad) in pads.into_iter().enumerate() {
             self.update(devices, slot, pad.map(Value::Pad), now, &mut events);
         }
-        let fallback = (!any_pad).then(|| Value::Pad(fallback(&keys)));
+        let fallback = (!any_pad).then_some(Value::Pad(stand_in));
         self.update(devices, FALLBACK, fallback, now, &mut events);
         self.update(devices, KEYBOARD, Some(Value::Keys(keys)), now, &mut events);
         events
@@ -1656,6 +1672,9 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        /// (KLBF Lab) The keys really held at the last `keys` (none without focus), for `kbm`.
+        held: Vec<KeyState>,
+        mouse: super::kbm::host::Mouse,
     }
 
     impl Source for Host {
@@ -1701,6 +1720,7 @@ mod host {
                 return Vec::new();
             }
             let mut down = scripted();
+            self.held.clear();
             if focused() {
                 // Left/right modifier keys only, as devices report them; no
                 // mouse buttons (below 0x08).
@@ -1709,6 +1729,7 @@ mod host {
                     // SAFETY: plain queries.
                     .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
                     .collect();
+                self.held = held.iter().map(|&vk| KeyState { virtual_key: vk, ..Default::default() }).collect();
                 down.extend(held);
             }
             // Outside the focus check: the keys feed the keyboard device and,
@@ -1731,6 +1752,24 @@ mod host {
                     ..Default::default()
                 })
                 .collect()
+        }
+
+        /// (KLBF Lab) The keymap over the keys really held and the mouse, merged with the old table
+        /// over the scripted and auto keys only (`VICTORY_KEYS`, the auto inputs: their key names
+        /// are the old table's).
+        fn kbm(&mut self) -> Option<PadState> {
+            if !super::kbm::host::KEYMAP.enabled {
+                return None;
+            }
+            if victory_gpu::klbf_bench::input_locked() {
+                return Some(PadState::default());
+            }
+            let mut injected = scripted();
+            let auto = super::auto_buttons();
+            injected.extend(super::FALLBACK_BUTTONS.iter().filter(|(_, b)| auto & b != 0).map(|(vk, _)| *vk));
+            let injected: Vec<KeyState> =
+                injected.into_iter().map(|vk| KeyState { virtual_key: vk, ..Default::default() }).collect();
+            Some(merged(fallback(&injected), self.mouse.pad(&self.held, focused())))
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
