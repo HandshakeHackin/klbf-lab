@@ -11,6 +11,11 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
 Thanks to the testers whose reports led to this release: Neffffffff, Domi, INGLIP, deydey103, Solar, pacoravan,
 Dominic, MalarkZA and Aphantasiac.
 
+### Download
+- Download KLBF-Lab.zip: everything is inside a "KLBF Lab" folder when you extract it.
+  KLBF-Lab-win64.zip (the same files, flat) stays for the automatic update.
+- Prefer to build it yourself? See [BUILD.md](BUILD.md).
+
 ### Controls
 - Keyboard and mouse: a click in the game takes the mouse for the camera (F9 or leaving the window lets it go);
   keys by position, usual PC defaults, works beside a controller. New Controls tab in Settings: on/off,
