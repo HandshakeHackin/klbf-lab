@@ -50,6 +50,20 @@ try {
     Check 'pipelines alone' ((@(Get-KlbfPreparePhases 'x.rpf' $book -NoTranslate) | ForEach-Object { $_.what }) -join ',' -eq 'Preparing pipelines')
     Check 'nothing to do' (@(Get-KlbfPreparePhases 'x.rpf' '' -NoTranslate).Count -eq 0)
 
+    # Prepared once for Play: the bench (same cache, same stamp) prepares nothing again; new pipelines written
+    # down by a run are made at the next start
+    $cache = Join-Path $t 'cache'
+    $bookC = Join-Path $cache 'pipelines\known-pipelines.bin'
+    Check 'no book: nothing to make' (-not (Test-KlbfWarmNeeded $bookC (Get-KlbfWarmMark $cache)))
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bookC) | Out-Null; Set-Content -LiteralPath $bookC -Value 'book'
+    Check 'book never prepared: make it' (Test-KlbfWarmNeeded $bookC (Get-KlbfWarmMark $cache))
+    Set-KlbfWarmed $cache
+    Check 'prepared for Play: the bench does not prepare again' (-not (Test-KlbfWarmNeeded $bookC (Get-KlbfWarmMark $cache)))
+    (Get-Item -LiteralPath $bookC).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddMinutes(1)
+    Check 'new pipelines written down: made at the next start' (Test-KlbfWarmNeeded $bookC (Get-KlbfWarmMark $cache))
+    $play = Get-KlbfSwitches (Get-KlbfDefaults); $bench = Get-KlbfBenchSwitches (Get-KlbfDefaults) 'someone'
+    Check 'the bench translates as Play does (same settings but -Bench)' ((@($bench.Keys | Where-Object { $_ -notin 'Bench', 'BenchPlayer' }) -join ',') -eq (@($play.Keys) -join ','))
+
     # The first-run shortcut offer: a yes makes it and says so; a failure is said and asked again; a no is remembered
     $env:KLBF_LAUNCHER_DIR = Join-Path $t 'launcher'
     $mark = Join-Path $env:KLBF_LAUNCHER_DIR 'shortcut-asked.txt'

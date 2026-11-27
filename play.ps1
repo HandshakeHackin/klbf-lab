@@ -326,7 +326,7 @@ $have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -Tota
 if ($menuAction -and -not $NoPrecompile -and ($menuAction -eq 'prepare' -or $have -ne $stamp) -and (Test-Path -LiteralPath $rpf -PathType Leaf)) {
     # Translation and the pipelines of earlier runs, in the one window
     $prepared = Show-KlbfPrepare $Victory $rpf (Join-Path $Cache 'pipelines\known-pipelines.bin')
-    if ($prepared) { Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8; $have = $stamp }
+    if ($prepared) { Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8; $have = $stamp; Set-KlbfWarmed $Cache }
     $warmed = $true
     if (-not $prepared) { & $PSCommandPath -Setup -Cancelled @passOn; exit $LASTEXITCODE }
     if ($menuAction -eq 'prepare') { & $PSCommandPath -Setup @passOn; exit $LASTEXITCODE }
@@ -348,13 +348,16 @@ if (-not $NoPrecompile -and $have -ne $stamp) {
 # (written down by VICTORY_PIPELINE_BOOK) is made ahead by `victory warm` into the driver's cache, before the game
 # starts. Only new ones are made; it goes on where it stopped. -NoPrecompile skips it.
 $book = Join-Path $Cache 'pipelines\known-pipelines.bin'
-if (-not $NoPrecompile -and (Test-Path -LiteralPath $book) -and $menuAction -and -not $warmed) {
+# (27/11) Only when runs wrote down pipelines since the last pipelines step (Test-KlbfWarmNeeded)
+$warmNeeded = -not $NoPrecompile -and -not $warmed -and (Test-KlbfWarmNeeded $book (Get-KlbfWarmMark $Cache))
+if ($warmNeeded -and $menuAction) {
     # (27/11) From the settings window: the pipelines in a progress window, never a hidden wait; Cancel goes back
     if (-not (Show-KlbfPrepare $Victory $rpf $book -NoTranslate)) { & $PSCommandPath -Setup -Cancelled @passOn; exit $LASTEXITCODE }
-} elseif (-not $NoPrecompile -and (Test-Path -LiteralPath $book) -and -not $warmed) {
+    Set-KlbfWarmed $Cache
+} elseif ($warmNeeded) {
     Write-Host 'Making the effects of earlier runs ahead, so they do not compile while playing (only new ones; resumes where it stopped)...'
     & $Victory warm
-    if ($LASTEXITCODE -ne 0) { Write-Warning 'Making effects ahead stopped early; the rest are made while playing.' }
+    if ($LASTEXITCODE -ne 0) { Write-Warning 'Making effects ahead stopped early; the rest are made while playing.' } else { Set-KlbfWarmed $Cache }
 }
 if ($OnlyPrecompile) { exit 0 }
 # (27/11, owner) Never a game on shaders not prepared for this build (-SkipShaderCheck, a developer switch the

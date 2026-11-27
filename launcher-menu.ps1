@@ -1789,6 +1789,23 @@ function Stop-KlbfTree([int]$Id) {
 # shaders (`victory shaders <rpf>`, unless -NoTranslate), 2. making the pipelines of earlier runs
 # (`victory warm` and its workers, when $Book exists). One bar (translation 30 %, pipelines 70 %), the step
 # and its count under it; Cancel ends every worker. $true when the translation finished (or was not asked).
+# (27/11) Whether the pipelines step has anything to make: the book ($Book, what runs wrote down) changed
+# since the last finished pipelines step ($Mark, written then). Without it the step ran at every start from
+# the window, Play and the bench alike ("prepared again"); the bench and Play share one cache and one stamp.
+function Test-KlbfWarmNeeded([string]$Book, [string]$Mark) {
+    if (-not (Test-Path -LiteralPath $Book)) { return $false }
+    if (-not (Test-Path -LiteralPath $Mark)) { return $true }
+    (Get-Item -LiteralPath $Book).LastWriteTimeUtc -gt (Get-Item -LiteralPath $Mark).LastWriteTimeUtc
+}
+
+# The mark of the last finished pipelines step, in the cache.
+function Get-KlbfWarmMark([string]$Cache) { Join-Path $Cache 'pipelines\warmed.txt' }
+function Set-KlbfWarmed([string]$Cache) {
+    $m = Get-KlbfWarmMark $Cache
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $m) | Out-Null
+    Set-Content -LiteralPath $m -Value (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding ascii
+}
+
 # (27/11) The preparation's steps: translating (unless $NoTranslate), then the pipelines whenever earlier runs
 # wrote some down ($Book). Nothing else (display mode, bench) changes them. A first start has no book yet: its
 # pipelines are written down while it plays and made here from the next start.
