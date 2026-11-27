@@ -4893,17 +4893,20 @@ mod copied_and_simd_tests {
         // 31, 32, or 33 bytes into it. Give GPU-only writes to the gap and
         // suffix as well, so a merge outside the planned ranges is visible.
         let size = PAGE * 4 + 19;
-        let old = vec![0x11; size];
-        let mut title = old.clone();
-        let mut gpu = old.clone();
-        for i in (0..size).step_by(3) {
-            gpu[i] = 0xcc;
-        }
-        for i in (0..size).step_by(5) {
-            title[i] = 0x55;
-        }
         for tail_len in [31, 32, 33] {
             let end = PAGE * 3 + tail_len;
+            let mut old = vec![0x11; size];
+            let mut title = old.clone();
+            let mut gpu = old.clone();
+            for i in (0..size).step_by(3) {
+                gpu[i] = 0xcc;
+            }
+            for i in (0..size).step_by(5) {
+                title[i] = 0x55;
+            }
+            old[end..].fill(0x19);
+            title[end..].fill(0x5a);
+            gpu[end..].fill(0xc7);
             let mut copied = CopiedPages::new(4);
             for page in 0..4 {
                 copied.set(page, 1);
