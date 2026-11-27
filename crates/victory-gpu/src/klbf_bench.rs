@@ -28,7 +28,7 @@ use windows::Win32::Graphics::Dxgi::{DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMOR
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetPhysicallyInstalledSystemMemory, GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows_sys::Win32::UI::Input::XboxController::{XINPUT_STATE, XInputGetState};
@@ -884,6 +884,61 @@ struct Settings {
     /// Frames shown per real one with frame generation since the start (`framegen::shown_ratio`, 0: not
     /// known): the card's shown figure. Not in the result's JSON (its serial and checker stay as they are).
     fg_ratio: f64,
+    /// (27/11) How the launcher started the run; `display` empty: not read (results from before it).
+    launch: Launch,
+}
+
+/// (27/11, the owner) Every launcher setting not shown otherwise, so a card says how it was run.
+#[derive(Clone, Default, Debug)]
+struct Launch {
+    /// "window" or "borderless fullscreen" (`KLBF_BORDERLESS`); empty: not read.
+    display: &'static str,
+    /// Advanced: the memory hooks (`VICTORY_GPU_ONLY` and `VICTORY_KNOWN_WRITES`) and texture trim (`KLBF_TEX_TRIM`).
+    hooks: bool,
+    tex_trim: bool,
+    /// Every other `KLBF_*` switch that is on, sorted: "night-lights", "fps-cap=30".
+    exp: Vec<String>,
+}
+
+impl Launch {
+    fn read() -> Launch {
+        let on = |k: &str| std::env::var(k).is_ok_and(|v| v.trim() == "1");
+        let mut exp: Vec<String> = std::env::vars().filter_map(|(k, v)| exp_switch(&k, &v)).collect();
+        exp.sort();
+        Launch {
+            display: if on("KLBF_BORDERLESS") { "borderless fullscreen" } else { "window" },
+            hooks: on("VICTORY_GPU_ONLY") && on("VICTORY_KNOWN_WRITES"),
+            tex_trim: on("KLBF_TEX_TRIM"),
+            exp,
+        }
+    }
+
+    fn known(&self) -> bool {
+        !self.display.is_empty()
+    }
+
+    fn advanced(&self) -> String {
+        let w = |b: bool| if b { "on" } else { "off" };
+        format!("memory hooks {} \u{b7} texture trim {}", w(self.hooks), w(self.tex_trim))
+    }
+}
+
+/// An experimental `KLBF_*` switch that is on, as the card names it ("night-lights", "fps-cap=30"); None for
+/// the launcher's settings shown elsewhere, the bench's and the build's own, folders, and switches off. A
+/// value that is not a short plain word or number (a path...) is never written: the card is public.
+fn exp_switch(key: &str, value: &str) -> Option<String> {
+    const SHOWN: [&str; 18] = [
+        "BORDERLESS", "FRAMEGEN", "TEX_TRIM", "X_FSR", "X_FSR_QUALITY", "X_OUTPUT", "X_RENDER_SCALE", "WINDOW_MONITOR", "WINDOW_COLORS",
+        "PROJECT", "PROJECT_NAME", "PROJECT_SOURCE", "SHA", "GIT_SHA", "GIT_REMOTE", "FIXTURE_WRITE", "CARD_PREVIEW", "OLD_HOMES",
+    ];
+    let name = key.strip_prefix("KLBF_")?;
+    let v = value.trim().to_ascii_lowercase();
+    if SHOWN.contains(&name) || name == "BENCH" || name.starts_with("BENCH_") || name.ends_with("_DIR") || name.ends_with("HOME") || matches!(v.as_str(), "" | "0" | "off" | "false" | "no") {
+        return None;
+    }
+    let n = name.to_ascii_lowercase().replace('_', "-");
+    let plain = v.len() <= 12 && v.chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c));
+    Some(if matches!(v.as_str(), "1" | "on" | "true" | "yes") || !plain { n } else { format!("{n}={v}") })
 }
 
 impl Settings {
@@ -900,6 +955,7 @@ impl Settings {
             dropped_pct: if asked > 0 { asked.saturating_sub(drawn) as f64 * 100.0 / asked as f64 } else { 0.0 },
             shown: shown(),
             fg_ratio: crate::framegen::shown_ratio(),
+            launch: Launch::read(),
         }
     }
 
@@ -915,26 +971,50 @@ impl Settings {
         format!("{series} \u{b7} {}", if label.is_empty() { self.upscaler } else { &label })
     }
 
-    /// The card's short block.
-    fn lines(&self) -> [String; 4] {
-        let textures = if self.texture_max_dim > 0 { format!("textures \u{2264} {} px", self.texture_max_dim) } else { "textures uncapped".into() };
-        if !TREE_COUNTS {
-            return [
-                self.display(),
-                self.shown.extras(),
-                format!("{:.0} draws/frame \u{b7} dropped: not measured", self.draws_per_frame),
-                "texture cap, pipelines skipped / denied: not measured".into(),
-            ];
+    /// (27/11) The launcher's settings, one line each: "FSR 4.1.2 · frame generation x2", "borderless
+    /// fullscreen · screen 2560x1440", "memory hooks on · texture trim off", "exp: night-lights, fps-cap=30".
+    fn launch_lines(&self) -> Vec<String> {
+        let l = &self.launch;
+        let fg = format!("frame generation {}", if self.shown.fg { "x2" } else { "off" });
+        let fsr = if self.shown.upscaler == Upscaler::Fsr && !self.shown.fsr.is_empty() { format!("FSR {} \u{b7} ", self.shown.fsr) } else { String::new() };
+        let screen = if self.shown.screen[1] == 0 { String::new() } else { format!(" \u{b7} screen {}", wxh(self.shown.screen)) };
+        let mut v = vec![format!("{fsr}{fg}"), format!("{}{screen}", l.display), l.advanced()];
+        if !l.exp.is_empty() {
+            v.push(format!("exp: {}", l.exp.join(", ")));
         }
-        [
-            self.display(),
-            format!("{textures} \u{b7} {}", self.shown.extras()),
-            format!("{:.0} draws/frame \u{b7} {:.1} % dropped", self.draws_per_frame, self.dropped_pct),
-            format!("pipelines: {} skipped \u{b7} {} denied", self.skipped, self.denied),
-        ]
+        v
+    }
+
+    /// The card's short block (the experimental switches' line wrapped when drawn).
+    fn lines(&self) -> Vec<String> {
+        let textures = if self.texture_max_dim > 0 { format!("textures \u{2264} {} px", self.texture_max_dim) } else { "textures uncapped".into() };
+        let known = self.launch.known();
+        let mut v = vec![self.display()];
+        if known {
+            v.extend(self.launch_lines());
+        }
+        if !TREE_COUNTS {
+            if !known {
+                v.push(self.shown.extras());
+            }
+            v.push(format!("{:.0} draws/frame \u{b7} dropped: not measured", self.draws_per_frame));
+            if !known {
+                v.push("texture cap, pipelines skipped / denied: not measured".into());
+            }
+            return v;
+        }
+        v.push(if known { textures } else { format!("{textures} \u{b7} {}", self.shown.extras()) });
+        v.push(format!("{:.0} draws/frame \u{b7} {:.1} % dropped", self.draws_per_frame, self.dropped_pct));
+        v.push(format!("pipelines: {} skipped \u{b7} {} denied", self.skipped, self.denied));
+        v
     }
 
     fn line(&self) -> String {
+        let launch = if self.launch.known() { format!(" \u{b7} {}", self.launch_lines().join(" \u{b7} ")) } else { String::new() };
+        self.line_base() + &launch
+    }
+
+    fn line_base(&self) -> String {
         let textures = if self.texture_max_dim > 0 { format!("textures \u{2264} {} px", self.texture_max_dim) } else { "textures uncapped".into() };
         if !TREE_COUNTS {
             return format!(
@@ -980,6 +1060,16 @@ struct Card {
     /// "KLBF-Bench-BM-v1-YYYYMMDD-HHMM-<serial>": the PNG, JSON and text files' name.
     file_stem: String,
     png_name: String,
+}
+
+/// "avg 16.0 fps, 1% low 5.4"; with frame generation the frames shown, as the card's big figure:
+/// "avg 30.2 FPS (base 16.0), 1% low 10.8 (base 5.4)".
+fn share_fps(set: &Settings, s: &Summary) -> String {
+    if set.fg_fps(s.avg) > 0.0 {
+        format!("avg {:.1} FPS (base {:.1}), 1% low {:.1} (base {:.1})", set.fg_fps(s.avg), s.avg, set.fg_fps(s.low1), s.low1)
+    } else {
+        format!("avg {:.1} fps, 1% low {:.1}", s.avg, s.low1)
+    }
 }
 
 /// `KLBF_BENCH_SAVE`: the save the launcher isolated for the run, by number only.
@@ -1071,12 +1161,11 @@ fn finish(early: Option<&'static str>) {
     let mut doc = result_json(&card, &extra, &window_fps(&ms));
     card.serial = serial(&doc);
     card.share = format!(
-        "[KLBF Lab Bench {}] {PROJECT}@{SHA} | {} | {} | avg {:.1} fps, 1% low {:.1} | {} | {}",
+        "[KLBF Lab Bench {}] {PROJECT}@{SHA} | {} | {} | {} | {} | {}",
         id(),
         short_gpu(&card.sys.gpu),
         short_cpu(&card.sys.cpu),
-        s.avg,
-        s.low1,
+        share_fps(&card.set, &s),
         stamp.word(),
         card.serial
     );
@@ -1333,6 +1422,23 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
             ]),
         ),
     ]);
+    // (27/11) The launcher's settings and, with frame generation, the frames shown: only in results that read
+    // them, so older results (and the checker's fixture) keep their bytes and serial.
+    if let (J::O(m), true) = (&mut doc, t.launch.known()) {
+        if let Some(J::O(st)) = m.get_mut("settings") {
+            st.insert("display_mode", J::S(t.launch.display.into()));
+            st.insert("memory_hooks", J::B(t.launch.hooks));
+            st.insert("texture_trim", J::B(t.launch.tex_trim));
+            st.insert("experimental", J::A(t.launch.exp.iter().map(|e| J::S(e.clone())).collect()));
+        }
+        if t.fg_fps(s.avg) > 0.0 {
+            let f = |v: f64| J::F(t.fg_fps(v));
+            m.insert(
+                "fps_shown",
+                J::obj([("avg", f(s.avg)), ("median", f(s.median)), ("low_1pct", f(s.low1)), ("low_5pct", f(s.low5)), ("min", f(s.min)), ("max", f(s.max))]),
+            );
+        }
+    }
     if let (J::O(m), true) = (&mut doc, x.fade > 0) {
         m.insert("fade_frames", J::I(x.fade));
     }
@@ -1360,10 +1466,17 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         format!("Settings:   {}", c.set.line()),
         format!("Duration:   {} / {} ({})", mmss(c.elapsed), target(), x.why),
         format!(
-            "FPS:        avg {:.1} \u{b7} median {:.1} \u{b7} 1% low {:.1} \u{b7} 5% low {:.1} \u{b7} min {:.1} \u{b7} max {:.1} (1 s windows){}",
+            "FPS:        {}avg {:.1} \u{b7} median {:.1} \u{b7} 1% low {:.1} \u{b7} 5% low {:.1} \u{b7} min {:.1} \u{b7} max {:.1} (1 s windows){}",
+            if c.set.fg_fps(s.avg) > 0.0 { "base (real frames): " } else { "" },
             s.avg, s.median, s.low1, s.low5, s.min, s.max,
             match c.set.fg_fps(s.avg) {
-                fg if fg > 0.0 => format!(" \u{b7} shown with frame generation: avg {fg:.1}"),
+                fg if fg > 0.0 => {
+                    let f = |v: f64| c.set.fg_fps(v);
+                    format!(
+                        "\r\nFPS shown:  avg {fg:.1} \u{b7} median {:.1} \u{b7} 1% low {:.1} \u{b7} 5% low {:.1} \u{b7} min {:.1} \u{b7} max {:.1} (frame generation, as on the card)",
+                        f(s.median), f(s.low1), f(s.low5), f(s.min), f(s.max)
+                    )
+                }
                 _ => String::new(),
             }
         ),
@@ -1531,7 +1644,9 @@ fn read_sys(adapter: Option<&IDXGIAdapter3>) -> Sys {
         let mut ms = std::mem::zeroed::<MEMORYSTATUSEX>();
         ms.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
         GlobalMemoryStatusEx(&mut ms);
-        ms.ullTotalPhys as f64 / (1024.0 * MB)
+        // (27/11, the owner) The memory installed ("32 GB"), not what Windows leaves usable (31.4).
+        let mut kb = 0u64;
+        if GetPhysicallyInstalledSystemMemory(&mut kb) != 0 && kb > 0 { kb as f64 * 1024.0 / (1024.0 * MB) } else { ms.ullTotalPhys as f64 / (1024.0 * MB) }
     };
     let nt = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
     let build: u32 = reg(nt, "CurrentBuild").and_then(|b| b.parse().ok()).unwrap_or(0);
@@ -2300,10 +2415,18 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     let save = if c.save.is_empty() { String::new() } else { format!(" \u{b7} save {}", c.save) };
     pen.text(ARIAL, 15.0, &format!("player: {}{save}", c.player), 600.0, 300.0, false, 360.0, ink);
     // The settings: a small block in the left panel, right of the stamp.
-    for (i, line) in c.set.lines().iter().enumerate() {
-        pen.text(ARIAL, 13.0, line, 180.0, 490.0 + 18.0 * i as f32, false, 290.0, ink);
+    // (27/11) Bottom-anchored (the peaks' line at 572), up to 2 lines for the experimental switches.
+    let mut block: Vec<(String, f32)> = Vec::new();
+    for line in c.set.lines() {
+        let (parts, size) = if line.starts_with("exp: ") { fit(&pen, ARIAL, 13.0, &line, ", ", 290.0, 2) } else { (vec![line], 13.0) };
+        let n = parts.len();
+        block.extend(parts.into_iter().enumerate().map(|(i, p)| (if i + 1 < n { p + "," } else { p }, size)));
     }
-    pen.text(ARIAL, 13.0, &c.used, 180.0, 490.0 + 18.0 * 4.0, false, 290.0, ink);
+    let top = 572.0 - 17.0 * block.len() as f32;
+    for (i, (line, size)) in block.iter().enumerate() {
+        pen.text(ARIAL, *size, line, 180.0, top + 17.0 * i as f32, false, 290.0, ink);
+    }
+    pen.text(ARIAL, 13.0, &c.used, 180.0, 572.0, false, 290.0, ink);
     // The average, big, and the four tiles.
     // (27/11) With frame generation the big figure is the frames shown, the real ones after "FPS
     // average": "34 FPS (base 17)". The tiles and the JSON stay the real ones.
@@ -2312,9 +2435,24 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     if fg > 0.0 {
         pen.text(ARIAL_BOLD, 16.0, &format!("(base {:.1})", c.s.avg), 748.0, 372.0, false, 200.0, ink);
     }
-    let tiles = [format!("{:.1}", c.s.median), format!("{:.1}", c.s.low1), format!("{:.1}", c.s.max), format!("{:.0} %", c.s.pct12)];
-    for (i, value) in tiles.iter().enumerate() {
-        pen.text(IMPACT, 28.0, value, 535.0 + 108.0 * i as f32 + 50.0, 434.0, true, 92.0, ink);
+    // (27/11, the owner) With frame generation the tiles are the frames shown too, the real ones small under
+    // them ("base 8.6"); the time at 12 fps or more stays real frames.
+    let tiles = [c.s.median, c.s.low1, c.s.max];
+    for (i, &real) in tiles.iter().enumerate() {
+        let cx = 535.0 + 108.0 * i as f32 + 50.0;
+        if fg > 0.0 {
+            pen.text(IMPACT, 24.0, &format!("{:.1}", c.set.fg_fps(real)), cx, 425.0, true, 92.0, ink);
+            pen.text(ARIAL, 11.0, &format!("base {real:.1}"), cx, 439.0, true, 92.0, hex(SOFT));
+        } else {
+            pen.text(IMPACT, 28.0, &format!("{real:.1}"), cx, 434.0, true, 92.0, ink);
+        }
+    }
+    let cx = 535.0 + 108.0 * 3.0 + 50.0;
+    if fg > 0.0 {
+        pen.text(IMPACT, 24.0, &format!("{:.0} %", c.s.pct12), cx, 425.0, true, 92.0, ink);
+        pen.text(ARIAL, 11.0, "real frames", cx, 439.0, true, 92.0, hex(SOFT));
+    } else {
+        pen.text(IMPACT, 28.0, &format!("{:.0} %", c.s.pct12), cx, 434.0, true, 92.0, ink);
     }
     // Freezes and duration; the machine in bold (wrapped, then shrunk, to fit); the share line.
     let blocked = if c.blocked > 0 { format!(" \u{b7} {} inputs blocked", c.blocked) } else { String::new() };
@@ -2657,6 +2795,7 @@ mod tests {
                 dropped_pct: 0.25,
                 shown: sample_shown(),
                 fg_ratio: 0.0,
+                launch: Launch::default(),
             },
             from: String::new(),
             player: "anonymous".into(),
@@ -2689,8 +2828,16 @@ mod tests {
         card.png_name = "bench-results\\KLBF-Bench-BM-v1-20261126-2104-3b8db536.png".into();
         card.set.draws_per_frame = 123_456.0;
         card.set.skipped = 12_345;
-        for gpu in ["NVIDIA GeForce RTX 5080 Laptop GPU", "AVeryLongGpuNameWithoutAnySpacesAtAllThatCannotBeWrappedWordByWordAnywhere"] {
+        let full = sample_launch();
+        for (gpu, launch) in [
+            ("NVIDIA GeForce RTX 5080 Laptop GPU", Launch::default()),
+            ("AVeryLongGpuNameWithoutAnySpacesAtAllThatCannotBeWrappedWordByWordAnywhere", Launch::default()),
+            ("NVIDIA GeForce RTX 5080 Laptop GPU", full.clone()),
+            ("AVeryLongGpuNameWithoutAnySpacesAtAllThatCannotBeWrappedWordByWordAnywhere", full.clone()),
+        ] {
             card.sys.gpu = gpu.into();
+            card.set.launch = launch;
+            card.set.fg_ratio = 1.97;
             let (w, h) = (1280, 820);
             let (_, boxes) = render_card_boxes(&card, w, h, false);
             let k = (w as f32 / 1000.0).min(h as f32 / 640.0);
@@ -2707,9 +2854,9 @@ mod tests {
         }
     }
 
-    /// Writes the card of the sample run to `KLBF_CARD_PREVIEW` (a .png path), to look at it.
+    /// Writes the card of the sample run, with every launcher setting, to `KLBF_CARD_PREVIEW` (a .png path),
+    /// else `klbf-bench-card-sample.png` in the temp folder, to look at it.
     #[test]
-    #[ignore = "writes a file; run with KLBF_CARD_PREVIEW=<file.png>"]
     fn card_preview() {
         let mut card = sample_card();
         card.serial = "3b8db536".into();
@@ -2720,7 +2867,11 @@ mod tests {
         card.used = "peak RAM 18.5 GB · peak VRAM 12.2 / 13.4 GB · card busy 66 %".into();
         card.date_short = "26.11.26".into();
         card.set.draws_per_frame = 8731.0;
-        let out = std::env::var("KLBF_CARD_PREVIEW").expect("KLBF_CARD_PREVIEW=<file.png>");
+        card.set.launch = sample_launch();
+        card.set.launch.exp.truncate(4);
+        card.save = "#1".into();
+        let out = std::env::var("KLBF_CARD_PREVIEW")
+            .unwrap_or_else(|_| std::env::temp_dir().join("klbf-bench-card-sample.png").to_string_lossy().into_owned());
         std::fs::write(&out, render_png(&card)).unwrap();
         // And with long names, next to it.
         card.sys.gpu = "NVIDIA GeForce RTX 5080 Laptop GPU".into();
@@ -2819,6 +2970,63 @@ mod tests {
         r.frame(false, at(54), Vec::new);
         assert_eq!((r.black_frames(), r.fade), (54, 0));
         assert_eq!(verdict(false, full, &s, r.black_frames(), false).0, Stamp::Invalid);
+    }
+
+    fn sample_launch() -> Launch {
+        let exp = ["buffer-no-wait", "fps-cap=30", "night-lights", "port-all", "priority", "tex-cap", "tex-fifo", "low-memory", "foliage-fix", "ambient-est"];
+        Launch { display: "borderless fullscreen", hooks: true, tex_trim: true, exp: exp.map(String::from).into() }
+    }
+
+    #[test]
+    fn experimental_switches() {
+        assert_eq!(exp_switch("KLBF_NIGHT_LIGHTS", "1").as_deref(), Some("night-lights"));
+        assert_eq!(exp_switch("KLBF_FPS_CAP", " 30 ").as_deref(), Some("fps-cap=30"));
+        assert_eq!(exp_switch("KLBF_PORT_ALL", "0"), None, "off");
+        assert_eq!(exp_switch("KLBF_TEX_FIFO", ""), None);
+        assert_eq!(exp_switch("KLBF_SHOTS_DIR", r"C:\Users\someone\Pictures"), None, "a folder");
+        assert_eq!(exp_switch("KLBF_TEX_CAP", r"C:\Users\someone"), Some("tex-cap".into()), "never a path on the card");
+        for shown in ["KLBF_BORDERLESS", "KLBF_FRAMEGEN", "KLBF_TEX_TRIM", "KLBF_X_FSR", "KLBF_BENCH", "KLBF_BENCH_SAVE", "KLBF_WINDOW_MONITOR"] {
+            assert_eq!(exp_switch(shown, "1"), None, "{shown} is shown elsewhere");
+        }
+        assert_eq!(exp_switch("VICTORY_GPU_ONLY", "1"), None);
+    }
+
+    #[test]
+    fn the_card_says_how_it_was_run() {
+        let mut card = sample_card();
+        card.set.launch = sample_launch();
+        card.set.launch.exp.truncate(2);
+        assert_eq!(
+            card.set.lines(),
+            [
+                "Profile S \u{b7} FSR 4 Quality 960p \u{2192} 1440p",
+                "FSR 4.1.2 \u{b7} frame generation x2",
+                "borderless fullscreen \u{b7} screen 2560x1440",
+                "memory hooks on \u{b7} texture trim on",
+                "exp: buffer-no-wait, fps-cap=30",
+                "4322 draws/frame \u{b7} dropped: not measured",
+            ]
+        );
+        assert!(card.set.line().ends_with(" \u{b7} borderless fullscreen \u{b7} screen 2560x1440 \u{b7} memory hooks on \u{b7} texture trim on \u{b7} exp: buffer-no-wait, fps-cap=30"));
+        card.set.launch = Launch { display: "window", ..Launch::default() };
+        card.set.shown.fg = false;
+        assert_eq!(card.set.lines()[1..4], ["FSR 4.1.2 \u{b7} frame generation off", "window \u{b7} screen 2560x1440", "memory hooks off \u{b7} texture trim off"]);
+        // The result: the settings, and with frame generation the frames shown, as new fields only.
+        let extra = Extra { black: 0, fade: 0, removed: false, compiled: [3, 7], vram: (9000 << 20, 15000 << 20), ram: 12345 << 20, peaks: (13000 << 20, 9500 << 20), why: "5:00 reached" };
+        let J::O(old) = result_json(&sample_card(), &extra, &[60.0]) else { unreachable!() };
+        card.set.launch = sample_launch();
+        card.set.shown.fg = true;
+        card.set.fg_ratio = 1.9;
+        let J::O(new) = result_json(&card, &extra, &[60.0]) else { unreachable!() };
+        assert_eq!(new.len(), old.len() + 1, "fps_shown");
+        assert_eq!(new.get("fps_shown").map(J::canonical).as_deref(), Some(r#"{"avg":114.0,"low_1pct":111.15,"low_5pct":112.48,"max":116.28,"median":114.0,"min":108.87}"#));
+        let (Some(J::O(st)), Some(J::O(st_old))) = (new.get("settings"), old.get("settings")) else { unreachable!() };
+        assert_eq!(st.len(), st_old.len() + 4);
+        assert_eq!(st.get("display_mode").map(J::canonical).as_deref(), Some("\"borderless fullscreen\""));
+        assert_eq!(st.get("experimental").map(J::canonical).unwrap_or_default().matches(',').count(), 9);
+        assert_eq!(share_fps(&card.set, &card.s), "avg 114.0 FPS (base 60.0), 1% low 111.1 (base 58.5)");
+        card.set.shown.fg = false;
+        assert_eq!(share_fps(&card.set, &card.s), "avg 60.0 fps, 1% low 58.5");
     }
 
     #[test]
