@@ -91,6 +91,12 @@ static TIGHT_PERCENT: LazyLock<u64> =
 /// How often the segments are looked at, at most.
 const LOOK_MS: u64 = 100;
 
+fn fullest_aperture(segments: Vec<Segment>) -> Option<Segment> {
+    segments.into_iter().filter(|s| s.aperture && s.limit > 0).max_by(|a, b| {
+        (u128::from(a.resident) * u128::from(b.limit)).cmp(&(u128::from(b.resident) * u128::from(a.limit)))
+    })
+}
+
 /// Whether an aperture segment holds more than [`TIGHT_PERCENT`] of its
 /// limit, as of the last look (one every [`LOOK_MS`], by whichever thread
 /// asks first). Said in the log when it starts and stops.
@@ -107,12 +113,9 @@ pub(crate) fn tight(adapter: &IDXGIAdapter3) -> bool {
         && let Ok(_looking) = LOOKING.try_lock()
     {
         LOOKED.store(now, Ordering::Relaxed);
-        let fullest = segments(adapter)
-            .into_iter()
-            .filter(|s| s.aperture && s.limit > 0)
-            .max_by_key(|s| s.resident * 1000 / s.limit);
+        let fullest = fullest_aperture(segments(adapter));
         let percent = if TIGHT.load(Ordering::Relaxed) { percent.saturating_sub(10) } else { percent };
-        let tight = fullest.is_some_and(|s| s.resident * 100 > s.limit * percent);
+        let tight = fullest.is_some_and(|s| u128::from(s.resident) * 100 > u128::from(s.limit) * u128::from(percent));
         if TIGHT.swap(tight, Ordering::Relaxed) != tight
             && let Some(s) = fullest
         {
@@ -128,4 +131,27 @@ pub(crate) fn tight(adapter: &IDXGIAdapter3) -> bool {
         }
     }
     TIGHT.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fullest_aperture_preserves_threshold_crossings_in_either_order() {
+        for percent in [70, 80] {
+            let above = Segment { id: 1, aperture: true, limit: 100_000, resident: percent * 1_000 + 1 };
+            let edge = Segment { id: 2, aperture: true, limit: 200_000, resident: percent * 2_000 };
+            for pair in [[above, edge], [edge, above]] {
+                assert_eq!(fullest_aperture(pair.to_vec()).unwrap().id, above.id);
+            }
+        }
+    }
+
+    #[test]
+    fn fullest_aperture_ignores_local_and_unreported_limits() {
+        let local = Segment { id: 1, aperture: false, limit: 1, resident: 1 };
+        let unknown = Segment { id: 2, aperture: true, limit: 0, resident: 1 };
+        assert!(fullest_aperture(vec![local, unknown]).is_none());
+    }
 }
