@@ -32,7 +32,15 @@ const MOST: u64 = 512 << 20;
 /// section stretches in-place through a dedicated host view.
 pub(crate) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("VICTORY_PORT_CONSTANTS").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| std::env::var("VICTORY_PORT_CONSTANTS").is_ok_and(|v| v.trim() == "1") || everywhere())
+}
+
+/// `KLBF_PORT_ALL=1` (off): the port for any of the title's memory that is one stretch of a
+/// section, above 4 GiB too, not only its 32-bit graphics heap (turns the port on). After
+/// eikkapine/victory-amd (GPL-3.0), rewritten.
+fn everywhere() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_PORT_ALL").is_some_and(|v| v == "1"))
 }
 
 struct Region {
@@ -60,7 +68,7 @@ static STATS: [AtomicU64; 13] = [const { AtomicU64::new(0) }; 13];
 
 /// Whether `[at, at + len)` is eligible (below 4 GiB and switch enabled).
 pub(crate) fn wanted(at: u64, len: u64) -> bool {
-    on() && in_low_32bit(at, len)
+    on() && (in_low_32bit(at, len) || (everywhere() && len > 0 && at.checked_add(len).is_some()))
 }
 
 #[inline]
@@ -137,7 +145,7 @@ fn open_region(device: &ID3D12Device, at: u64, end: u64) -> Result<Region, (usiz
         return Err((3, format!("not one stretch of a section: {:?}", cover(at as usize, (end - at) as usize))));
     };
     let (mut first, mut bytes, mut offset) = (first as u64, bytes as u64, offset);
-    if first < LOW && first + bytes > LOW {
+    if !everywhere() && first < LOW && first + bytes > LOW {
         bytes = LOW.saturating_sub(first);
     }
     if bytes > MOST {
