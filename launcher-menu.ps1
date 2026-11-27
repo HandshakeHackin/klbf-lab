@@ -283,8 +283,8 @@ function Get-KlbfUpdate([string]$Current, [string]$Url) {
     if ($r.state -eq 'update') { $r.update } else { $null }
 }
 
-# (27/11) The bottom-left line: "v26.11.1 · Up to date", "v26.11.1 · Couldn't check for updates", or
-# "v26.11.1 ·" followed by the update link (Set-KlbfUpdateLine); the version alone before the answer.
+# (27/11) The bottom-left line: "v26.11.1 - Up to date", "v26.11.1 - Couldn't check for updates", or
+# "v26.11.1 -" followed by the update link (Set-KlbfUpdateLine); the version alone before the answer.
 function Get-KlbfVersionLine([string]$Version, $Check) {
     $v = if ($Version) { $Version } else { 'dev' }
     $dot = [char]0xB7
@@ -389,7 +389,7 @@ function Set-KlbfUpdateLine($c, $Update) {
     $c.update.Links.Clear()
     [void]$c.update.Links.Add($t.Length, 6, 'update')
     [void]$c.update.Links.Add($t.Length + 9, 10, 'notes')
-    # Right after "v26.11.1 ·"
+    # Right after "v26.11.1 -"
     if ($c.versionLabel) { $c.update.Left = $c.versionLabel.Right }
     $c.update.Visible = $true
 }
@@ -555,10 +555,13 @@ function Get-KlbfSwitches($Choice) {
 # (27/11) The monitors in the order Windows lists them (KLBF_WINDOW_MONITOR's numbers): @{ primary; device;
 # mode (the real mode, DPI-independent); bounds; work = x, y, width, height of the work area }.
 function Get-KlbfScreens {
-        try {
-            Add-Type -AssemblyName System.Windows.Forms
-            if (-not ('KlbfDisplay' -as [type])) {
-                Add-Type -TypeDefinition @'
+    # (27/11, hotfix) Each step degrades on its own: the C# helper (compiled by Add-Type, which an antivirus or
+    # a restricted PC can block) only adds each monitor's real mode; without it the bounds stand in, without
+    # WinForms' list the primary screen alone. An empty list crashed the settings window on some PCs.
+    try { Add-Type -AssemblyName System.Windows.Forms } catch {}
+    try {
+        if (-not ('KlbfDisplay' -as [type])) {
+            Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
 public static class KlbfDisplay {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -578,12 +581,13 @@ public static class KlbfDisplay {
     }
 }
 '@
-            }
-            @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
-                $w = $_.WorkingArea
-                @{ primary = $_.Primary; device = $_.DeviceName; mode = [KlbfDisplay]::Mode($_.DeviceName); bounds = '{0}x{1}' -f $_.Bounds.Width, $_.Bounds.Height; work = @($w.X, $w.Y, $w.Width, $w.Height) }
-            })
-        } catch { @() }
+        }
+    } catch {}
+    $mode = { param($d) try { if ('KlbfDisplay' -as [type]) { [KlbfDisplay]::Mode($d) } else { '' } } catch { '' } }
+    $one = { param($m) $w = $m.WorkingArea; @{ primary = $m.Primary; device = $m.DeviceName; mode = (& $mode $m.DeviceName); bounds = '{0}x{1}' -f $m.Bounds.Width, $m.Bounds.Height; work = @($w.X, $w.Y, $w.Width, $w.Height) } }
+    $all = try { @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { & $one $_ }) } catch { @() }
+    if (-not $all.Count) { $all = try { @(& $one ([System.Windows.Forms.Screen]::PrimaryScreen)) } catch { @() } }
+    $all
 }
 
 # The PRIMARY monitor's real mode, where the game window opens by default; the first video controller's
@@ -612,7 +616,12 @@ function Get-KlbfDisplayIndex($Choice, $Screens) {
 
 # The top-left corner that centres a $Size (width, height) window on a work area (x, y, width, height),
 # kept inside it when larger. Negative coordinates (a monitor left of the main one) are fine.
+# (27/11, hotfix) No work area ($null or short): the primary screen's, else $null (the window is not moved).
 function Get-KlbfCentre($Work, $Size) {
+    if (@($Work).Count -lt 4) {
+        $Work = try { $w = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; @($w.X, $w.Y, $w.Width, $w.Height) } catch { $null }
+        if (@($Work).Count -lt 4) { return $null }
+    }
     $x = $Work[0] + [math]::Max(0, [math]::Floor(($Work[2] - $Size[0]) / 2))
     $y = $Work[1] + [math]::Max(0, [math]::Floor(($Work[3] - $Size[1]) / 2))
     @([int]$x, [int]$y)
@@ -804,7 +813,8 @@ function Set-KlbfTheme($Form) {
                     $scr = @(Get-KlbfScreens)
                     if ($scr.Count) {
                         $i = Get-KlbfDisplayIndex (Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')) $scr
-                        $sender.Location = New-Object System.Drawing.Point(@(Get-KlbfCentre $scr[$i].work @($sender.Width, $sender.Height)))
+                        $xy = Get-KlbfCentre $scr[$i].work @($sender.Width, $sender.Height)
+                        if ($xy) { $sender.Location = New-Object System.Drawing.Point($xy[0], $xy[1]) }
                     }
                 } catch {}
             }
@@ -822,7 +832,7 @@ function Set-KlbfTheme($Form) {
             [void][KlbfShow2]::SetWindowPos($h, [IntPtr](-2), 0, 0, 0, 0, 0x43) # HWND_NOTOPMOST
             [void][KlbfShow2]::SetForegroundWindow($h)
             $sender.Activate()
-        } catch {}
+        } catch { try { $sender.Activate() } catch {} } # (hotfix) no P/Invoke helper: still brought forward
     })
     $Form.add_HandleCreated({
         param($sender)
@@ -1277,7 +1287,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $g = & $group $page 'Output resolution, display, mode' 426 90
     $c.output = & $combo $g 12 22 112
     foreach ($m in $script:KlbfModes) { [void]$c.output.Items.Add($m) }
-    $c.screens = if ($null -ne $Info.screens) { @($Info.screens) } else { @(Get-KlbfScreens) }
+    $c.screens = @(if ($null -ne $Info.screens) { $Info.screens } else { Get-KlbfScreens })
     $c.display = & $combo $g 130 22 192
     # (27/11) Window or borderless fullscreen on the chosen display (Alt+Enter switches in the game)
     $c.mode = & $combo $g 328 22 146
@@ -1420,7 +1430,11 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.output.add_SelectedIndexChanged($markIt)
     $c.output.add_SelectedIndexChanged($update)
     $fCentre = ${function:Get-KlbfCentre}
-    $c.place = { if ($c.display.SelectedIndex -ge 0) { $c.form.Location = New-Object System.Drawing.Point(@(& $fCentre $c.screens[$c.display.SelectedIndex].work @($c.form.Width, $c.form.Height))) } }.GetNewClosure()
+    $c.place = {
+        if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -ge @($c.screens).Count) { return }
+        $xy = & $fCentre $c.screens[$c.display.SelectedIndex].work @($c.form.Width, $c.form.Height)
+        if ($xy) { $c.form.Location = New-Object System.Drawing.Point($xy[0], $xy[1]) }
+    }.GetNewClosure()
     $c.display.add_SelectedIndexChanged({ & $c.place; & $markIt; & $fUpdate $c }.GetNewClosure())
     $c.saved.add_SelectedIndexChanged({ $c.save.Enabled = $null -ne $c.saved.SelectedItem }.GetNewClosure())
     $c.load.add_Click({
@@ -1645,7 +1659,7 @@ function Update-KlbfForm($c) {
     $c.upFsr.Enabled = -not $s; $c.upTitle.Enabled = -not $s
     foreach ($k in $c.presets.Keys) { $c.presets[$k].Enabled = -not $s -and $fsr }
     $c.output.Enabled = -not $s
-    $c.outputNote.Text = Get-KlbfOutputNote $s ([string]$c.output.SelectedItem) $(if ($c.display.SelectedIndex -ge 0) { $m = $c.screens[$c.display.SelectedIndex]; if ($m.mode) { $m.mode } else { $m.bounds } } else { '' })
+    $c.outputNote.Text = Get-KlbfOutputNote $s ([string]$c.output.SelectedItem) $(if ($c.display.SelectedIndex -ge 0) { $m = @($c.screens)[$c.display.SelectedIndex]; if (-not $m) { '' } elseif ($m.mode) { $m.mode } else { $m.bounds } } else { '' })
     $c.fg.Enabled = $fsr
     # (27/11) A control greyed by a rule says why, beside it and in a tooltip (a greyed control shows no
     # tooltip of its own: its group's says it too).

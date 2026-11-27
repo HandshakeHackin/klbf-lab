@@ -10,6 +10,23 @@ $fails = 0
 function Check([string]$What, [bool]$Ok) { if ($Ok) { "ok    $What" } else { "FAIL  $What"; $script:fails++ } }
 
 try {
+    # (27/11, hotfix) A PC where Add-Type cannot compile (antivirus, restricted PC): the screens, the centre and
+    # the settings window still work (an empty screen list crashed the window on Load)
+    function Add-Type([string[]]$AssemblyName, [string]$TypeDefinition, [string]$MemberDefinition, [string]$Name, [string]$Namespace) {
+        if (-not $AssemblyName) { throw 'compiler blocked (test)' }
+        foreach ($n in $AssemblyName) { $null = [Reflection.Assembly]::LoadWithPartialName($n) }
+    }
+    $scr = @(Get-KlbfScreens)
+    Check 'no compiler: screens still listed' ($scr.Count -ge 1 -and @($scr[0].work).Count -eq 4 -and $scr[0].bounds -match '^\d+x\d+$')
+    $xy = Get-KlbfCentre $null @(400, 300)
+    Check 'no work area: the primary screen, or the window left where it is' ($null -eq $xy -or @($xy).Count -eq 2)
+    $hwFake = @{ gpu = 'AMD Radeon RX 6900 XT'; vramGB = 16; ramGB = 32; screen = '2560x1440' }
+    $built = try { $m = New-KlbfMenuForm (Get-KlbfDefaults) $hwFake '' @{ data = $t; windows = 'Windows 11' }; & $m.c.place; $m.form.Dispose(); 'ok' } catch { "$_" }
+    Check "no compiler: the settings window builds and places itself ($built)" ($built -eq 'ok')
+    $built = try { $m = New-KlbfMenuForm (Get-KlbfDefaults) $hwFake '' @{ data = $t; windows = 'Windows 11'; screens = @() }; & $m.c.place; $m.form.Dispose(); 'ok' } catch { "$_" }
+    Check "no screen at all: the window still builds ($built)" ($built -eq 'ok')
+    Remove-Item function:Add-Type
+
     $logs = Get-KlbfLogDir
     Check 'logs in the home' ($logs -eq (Join-Path $env:KLBF_HOME 'logs'))
 
@@ -66,7 +83,8 @@ try {
 
     # (27/11) A failed start is never silent: play.ps1 stopped early (no game folder) writes launcher-error.txt
     # with what helps, says it, exits 3, and has left the mark the .vbs reads
-    $empty = Join-Path $t 'empty-build'; New-Item -ItemType Directory -Path $empty | Out-Null
+    # In a folder with spaces and accented letters, as testers have
+    $empty = Join-Path $t "Jeux $([char]0xE4)$([char]0xE9) PC\KLBF Lab"; New-Item -ItemType Directory -Path $empty | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'play.ps1'), (Join-Path $repo 'launcher-menu.ps1') -Destination $empty
     $startMark = Join-Path $env:TEMP 'klbf-lab-started.txt'
     Remove-Item -LiteralPath $startMark -ErrorAction SilentlyContinue
@@ -83,6 +101,14 @@ try {
     Check 'started mark for the .vbs' (Test-Path -LiteralPath $startMark)
     Check 'the .vbs waits and has the fallback steps' ((Get-KlbfVbsText) -match ', 0, True\)' -and (Get-KlbfVbsText) -match 'KLBF Lab\.cmd' -and (Get-KlbfVbsText) -match 'rc <> 3')
     $env:KLBF_HOME = Join-Path $t 'home'
+    # The .vbs from that folder starts its play.ps1 (a stand-in that writes what it was given), hidden
+    $vbsDir = Join-Path $t "Spi$([char]0xE8)le $([char]0xE4) test\KLBF Lab"; New-Item -ItemType Directory -Path $vbsDir | Out-Null
+    Set-Content -LiteralPath (Join-Path $vbsDir 'KLBF Lab.vbs') -Value (Get-KlbfVbsText) -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $vbsDir 'play.ps1') -Encoding utf8 -Value "Set-Content -LiteralPath (Join-Path `$env:TEMP 'klbf-lab-started.txt') -Value 1; Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'ran.txt') -Value (`$args -join '|') -Encoding utf8"
+    $p = Start-Process cscript.exe -ArgumentList '//nologo', "`"$vbsDir\KLBF Lab.vbs`"" -NoNewWindow -Wait -PassThru
+    $ran = Join-Path $vbsDir 'ran.txt'
+    Check 'accented folder with spaces: the .vbs starts play.ps1 with the right exe' ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $ran) -and (Get-Content -LiteralPath $ran -Raw).Trim() -eq "-Victory|$vbsDir\victory.exe|-Setup")
+    Check 'the .cmd quotes its folder' ((Get-KlbfCmdText) -match '-File "%~dp0play\.ps1" -Victory "%~dp0victory\.exe"')
 
     # The first-run shortcut offer: a yes makes it and says so; a failure is said and asked again; a no is remembered
     $env:KLBF_LAUNCHER_DIR = Join-Path $t 'launcher'
