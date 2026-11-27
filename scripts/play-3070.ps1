@@ -39,7 +39,6 @@ $set = [ordered]@{
 
     # RTX 3070 8GB VRAM budget + Scarlett page pool (-1.2 GB texture VRAM)
     VICTORY_DYNAMIC_SLOTS        = '524288'
-    VICTORY_MAX_PRELUDES         = '32'
     VICTORY_CARD_BUFFERS_MB      = "$CardBuffersMB"
     VICTORY_CARD_WINDOWS_MB      = "$CardWindowsMB"
     VICTORY_TEXTURE_MIP_DROP     = "$MipDrop"
