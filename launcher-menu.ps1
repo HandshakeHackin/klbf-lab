@@ -154,7 +154,14 @@ function Get-KlbfGpuKind([string]$Name) {
             '5' { return @{ gen = 'RDNA 1'; level = 'bad'; text = 'not supported (no mesh shaders, which the title needs)' } }
         }
     }
-    if ($Name -match 'NVIDIA|GeForce|Intel|Arc') { return @{ gen = ''; level = 'warn'; text = 'not tested' } }
+    # (27/11, nuit/etude-nvidia.md) Other cards by what they can run: the title draws with mesh shaders
+    $nomesh = 'not supported (no mesh shaders, which the title needs)'
+    if ($Name -match 'RTX\s*(20|30|40|50)\d\d') { return @{ gen = 'NVIDIA RTX'; level = 'warn'; text = 'supported, Profile S recommended' } }
+    if ($Name -match 'GTX\s*16\d\d') { return @{ gen = 'NVIDIA GTX 16'; level = 'warn'; text = 'not tested' } }
+    if ($Name -match 'GTX|GeForce\s*\d{3}') { return @{ gen = ''; level = 'bad'; text = $nomesh } }
+    if ($Name -match '\bArc\b') { return @{ gen = 'Intel Arc'; level = 'warn'; text = 'not tested' } }
+    if ($Name -match 'Intel.*(UHD|Iris|HD Graphics)') { return @{ gen = ''; level = 'bad'; text = $nomesh } }
+    if ($Name -match 'Radeon.*(RX\s*[45]\d0\b|Vega|R[579]\s)') { return @{ gen = ''; level = 'bad'; text = $nomesh } }
     @{ gen = ''; level = 'warn'; text = 'not known' }
 }
 
@@ -174,14 +181,26 @@ function Get-KlbfVerdicts($Hw) {
     )
 }
 
+# The upscaler's name on this card: what ran last time if the game said (klbf-upscaler.txt in the cache,
+# written from the DLL's provider version), else AMD FSR 4 on RDNA 4 and AMD FSR 3.1 elsewhere (the DLL
+# falls back to FSR 3.1 without RDNA 4).
+function Get-KlbfUpscalerName($Hw, [string]$Cache) {
+    if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
+    $ran = Join-Path $Cache 'klbf-upscaler.txt'
+    if (Test-Path -LiteralPath $ran) { $t = (Get-Content -LiteralPath $ran -TotalCount 1).Trim(); if ($t -match '^AMD FSR [\d.]+$') { return $t } }
+    if ((Get-KlbfGpuKind $Hw.gpu).gen -eq 'RDNA 4') { 'AMD FSR 4' } else { 'AMD FSR 3.1' }
+}
+
 # The settings for this PC (27/11): Profile X only for RDNA 3 and 4 with 16 GB or more (RDNA 4: the owner's
 # default; RDNA 3: output = the screen if it is one of the title's modes, else 2560x1440). Everything else,
 # RDNA 2 and any card under 16 GB included, Profile S (a 12 GB RX 6750 XT ran 25 min stable on it).
 function Get-KlbfRecommended($Hw) {
     $c = Get-KlbfDefaults
     $gen = (Get-KlbfGpuKind $Hw.gpu).gen
-    if ($gen -notin 'RDNA 3', 'RDNA 4' -or $Hw.vramGB -lt 16) { $c.profile = 'S'; return $c }
+    # Frame generation only on RDNA 4 (elsewhere FSR 3.1 frame generation on a base far under AMD's 60 fps)
+    if ($gen -notin 'RDNA 3', 'RDNA 4' -or $Hw.vramGB -lt 16) { $c.profile = 'S'; $c.frameGen = $gen -eq 'RDNA 4'; return $c }
     if ($gen -eq 'RDNA 4') { return $c }
+    $c.frameGen = $false
     $c.output = if ($Hw.screen -in $script:KlbfModes) { $Hw.screen } else { '2560x1440' }
     $c
 }
@@ -361,7 +380,7 @@ function Get-KlbfBugReport($Choice, $Hw, [string]$Victory, [string]$Log, [string
     } else { 'unknown' }
     $git = Join-Path $PSScriptRoot '.git'
     if (Test-Path -LiteralPath $git) { try { $build += ', commit ' + (git -C $PSScriptRoot rev-parse --short HEAD 2>$null) } catch {} }
-    $up = if ($Choice.profile -eq 'S') { "the title's FSR (Profile S)" } elseif ($Choice.upscaler -eq 'fsr') { 'FSR 4 ' + $script:KlbfPresets[$Choice.preset] } else { "the title's own" }
+    $up = if ($Choice.profile -eq 'S') { "the title's FSR (Profile S)" } elseif ($Choice.upscaler -eq 'fsr') { (Get-KlbfUpscalerName $Hw) + ' ' + $script:KlbfPresets[$Choice.preset] } else { "the title's own" }
     @(
         '### System (KLBF Lab Settings)'
         "- KLBF Lab: $build"
@@ -534,9 +553,9 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.profS = & $white (& $radio $g (& $mark 'Profile S' ($rec.profile -eq 'S')) 286 20 190)
 
     $g = & $group $page 'Upscaler' 304 96
-    $c.upFsr = & $white (& $radio $g (& $mark 'AMD FSR 4' ($rec.upscaler -eq 'fsr')) 12 20 270)
+    $c.upFsr = & $white (& $radio $g (& $mark (Get-KlbfUpscalerName $Hardware $Info.cache) ($rec.upscaler -eq 'fsr')) 12 20 270)
     $c.upTitle = & $white (& $radio $g "The title's own upscaler" 286 20 190)
-    [void](& $white (& $label $g 'FSR preset:' 12 46 120))
+    [void](& $white (& $label $g 'Preset:' 12 46 120))
     $p = New-Object System.Windows.Forms.Panel
     [void](& $add $g $p 8 64 466 26)
     $c.presets = @{}
