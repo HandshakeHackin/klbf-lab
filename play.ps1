@@ -105,12 +105,14 @@ if (-not $explicit) {
             $ready = (Test-Path -LiteralPath $m) -and ((Get-Content -LiteralPath $m -TotalCount 1) -eq (Get-KlbfShaderStamp $v $Build '1' ''))
             $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared for this build yet (a few minutes; Play offers it).' }
         } catch {}
-        $picked = Show-KlbfMenu $choice $status
+        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\data' })
         if (-not $picked) { exit 0 }
         $choice = $picked.choice; $menuAction = $picked.action
         Save-KlbfSettings $choice $settingsFile
     }
-    foreach ($kv in (Get-KlbfSwitches $choice).GetEnumerator()) { Set-Variable -Name $kv.Key -Value $kv.Value }
+    # "Run benchmark": the player's settings and -Bench (-BenchPlayer from the bench window)
+    $switches = if ($menuAction -eq 'bench') { Get-KlbfBenchSwitches $choice $picked.benchPlayer } else { Get-KlbfSwitches $choice }
+    foreach ($kv in $switches.GetEnumerator()) { Set-Variable -Name $kv.Key -Value $kv.Value }
 }
 if ($Tout) { $FsrX = [switch]$true; $FrameGen = [switch]$true; $Hooks = [switch]$true; $TexTrim = [switch]$true }
 $root = $PSScriptRoot
@@ -302,6 +304,11 @@ if ($Bench) {
     Write-Host "KLBF Lab Bench: cache ready ($made effects built, shaders translated)."
 }
 
+# (27/11) Every save backed up before the game starts (KLBF-Lab\save-backups, the last 10 kept)
+try {
+    $savedZip = Backup-KlbfSaves (Get-KlbfSavesRoot $Data)
+    if ($savedZip) { Write-Host "Saves backed up: $savedZip" }
+} catch { Write-Warning "Saves not backed up: $_" }
 Write-Host ("KLBF Lab, Profile {0}, {1} build, ray tracing {2}, memory hooks {3}" -f $(if ($Fsr) { 'S' } else { 'X' }), $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
 if ($FsrX) { Write-Host "AMD FSR (Profile X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
 if ($FrameGen) { Write-Host 'AMD frame generation: on (two frames shown per real one; more latency at a low base frame rate)' }
