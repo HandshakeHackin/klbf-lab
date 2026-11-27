@@ -1,0 +1,17 @@
+name: Repeat launcher calls in one PowerShell session
+on:
+  push:
+    branches: [verify/bm-launcher-session-fixed]
+permissions:
+  contents: read
+jobs:
+  sequence:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise the benchmark preflight and the ordinary launch that follows
+        shell: pwsh
+        run: '& ${{ matrix.shell }} -NoProfile -ExecutionPolicy Bypass -File .github/workflows/verify-session.ps1'
