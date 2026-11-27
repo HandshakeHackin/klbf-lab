@@ -1298,53 +1298,6 @@ mod tests {
 /// ([`HostList::batch_place`]).
 const BATCHES: u32 = 8;
 
-/// A host command list and its allocator, always used together.
-static PRELUDE_IDLE: std::sync::Mutex<Vec<Prelude>> = std::sync::Mutex::new(Vec::new());
-
-const PRELUDE_IDLE_MOST: usize = 64;
-
-fn max_preludes() -> usize {
-    static ON: OnceLock<usize> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var_os("VICTORY_MAX_PRELUDES")
-            .and_then(|v| v.to_string_lossy().parse().ok())
-            .unwrap_or(PRELUDE_IDLE_MOST)
-    })
-}
-
-struct PreludeSlot {
-    inner: OnceLock<Option<Prelude>>,
-}
-
-impl PreludeSlot {
-    fn new() -> Self {
-        Self { inner: OnceLock::new() }
-    }
-
-    fn set(&self, prelude: Option<Prelude>) -> Result<(), Option<Prelude>> {
-        self.inner.set(prelude)
-    }
-
-    fn get_or_init<F>(&self, f: F) -> Option<&Prelude>
-    where
-        F: FnOnce() -> Option<Prelude>,
-    {
-        self.inner.get_or_init(f).as_ref()
-    }
-}
-
-impl Drop for PreludeSlot {
-    fn drop(&mut self) {
-        let old = std::mem::replace(&mut self.inner, OnceLock::new());
-        if let Some(prelude) = old.into_inner().flatten() {
-            let mut idle = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner());
-            if idle.len() < max_preludes() {
-                idle.push(prelude);
-            }
-        }
-    }
-}
-
 pub(crate) struct HostList {
     allocator: ID3D12CommandAllocator,
     pub(crate) list: ID3D12GraphicsCommandList,
@@ -4522,9 +4475,6 @@ impl Host {
 
     /// An allocator and a closed list for a prelude.
     fn make_prelude(&self) -> Option<Prelude> {
-        if let Some(prelude) = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner()).pop() {
-            return Some(prelude);
-        }
         // SAFETY: plain object creation.
         let made: windows::core::Result<Prelude> = unsafe {
             (|| {
