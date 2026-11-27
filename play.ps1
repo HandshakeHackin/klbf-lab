@@ -181,6 +181,20 @@ if (-not $NoPrecompile -and $have -ne $stamp) {
     }
 }
 if ($OnlyPrecompile) { exit 0 }
+# (27/11) The bench starts only on a ready cache: the shaders translated for this build, and the effects made by
+# about ten minutes of play (otherwise they compile during the run and the figures are not comparable).
+if ($Bench) {
+    $have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -TotalCount 1 } else { '' }
+    if ($have -ne $stamp) {
+        throw 'KLBF Lab Bench: the game''s shaders are not translated for this build yet. Start once without -Bench (the launcher translates them, a few minutes), then run the bench.'
+    }
+    $early = Join-Path $Cache 'pipelines\early-pipelines.txt'
+    $made = if (Test-Path -LiteralPath $early) { @(Get-Content -LiteralPath $early).Count } else { 0 }
+    if ($made -lt 1000) {
+        throw "KLBF Lab Bench: only $made effects are built so far. Play about 10 minutes first (same build, without -Bench) so they are made before the bench; it does not start until then."
+    }
+    Write-Host "KLBF Lab Bench: cache ready ($made effects built, shaders translated)."
+}
 
 Write-Host ("KLBF Lab, Series X mode, {0} build, ray tracing {1}, memory hooks {2}" -f $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
 Write-Host "Cache: $Cache"
