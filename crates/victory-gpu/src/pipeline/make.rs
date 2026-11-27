@@ -899,6 +899,22 @@ fn drained() {
 mod tests {
     use super::*;
 
+    // Fork-only probe. Run each environment configuration in a fresh test process.
+    #[test]
+    fn measure_unresolved_pipeline_wait_across_frames() {
+        let pending = Pending::new(Vec::new(), None);
+        let mut charges = Vec::new();
+        for frame in 0..12 {
+            wait(&pending, frame);
+            charges.push(pending.waited_ms.load(Ordering::Relaxed));
+        }
+        println!("frame budget {:?}, lifetime cap {}, cumulative wait ms {:?}", wait_budget(), wait_cap_ms(), charges);
+        assert!(pending.made.get().is_none());
+        let expected: Vec<u64> = std::env::var("EXPECTED_CHARGES").unwrap()
+            .split(',').map(|n| n.parse().unwrap()).collect();
+        assert_eq!(charges, expected);
+    }
+
     #[test]
     fn worker_count_follows_the_processors_and_the_switch() {
         assert_eq!(worker_count(None, 1), 2);
