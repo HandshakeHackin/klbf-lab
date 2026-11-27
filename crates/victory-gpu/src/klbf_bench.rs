@@ -160,14 +160,26 @@ fn ram_bytes() -> u64 {
     c.WorkingSetSize as u64
 }
 
-/// The process's highest working set so far, bytes.
-fn ram_peak_bytes() -> u64 {
-    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    let mut c = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
-    // SAFETY: our own process and a sized structure.
-    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
-    c.PeakWorkingSetSize as u64
+/// Highest working set and highest card-memory use seen during the measured run (once a second), bytes.
+static PEAK: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// The card's memory in use and its budget now, bytes.
+fn vram_now() -> (u64, u64) {
+    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+    let adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // SAFETY: a plain query filling our struct.
+    match adapter.map(|a| unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }) {
+        Some(Ok(())) => (info.CurrentUsage, info.Budget),
+        _ => (0, 0),
+    }
+}
+
+/// One sample of RAM and card memory for the peaks, while the run is measured.
+fn sample_peaks() {
+    if run().phase == Phase::Running {
+        PEAK[0].fetch_max(ram_bytes(), Ordering::Relaxed);
+        PEAK[1].fetch_max(vram_now().0, Ordering::Relaxed);
+    }
 }
 
 /// The card's busy share at the run's start ([busy, all] microseconds), for the card's "card busy".
@@ -534,28 +546,25 @@ fn finish(early: Option<&'static str>) {
         file_stem: String::new(),
         png_name: String::new(),
     };
-    // Memory at the end only: nothing is sampled during the run.
-    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-    let adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    // SAFETY: a plain query filling our struct.
-    let vram = match adapter.map(|a| unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }) {
-        Some(Ok(())) => (info.CurrentUsage, info.Budget),
-        _ => (0, 0),
-    };
+    // Memory at the end, and the peaks sampled once a second during the measured run.
+    let vram = vram_now();
+    let peak_ram = PEAK[0].load(Ordering::Relaxed).max(ram_bytes());
+    let peak_vram = PEAK[1].load(Ordering::Relaxed).max(vram.0);
     let extra = Extra {
         black,
         removed,
         compiled: [now[0].saturating_sub(base[0]), now[1].saturating_sub(base[1])],
         vram,
         ram: ram_bytes(),
+        peaks: (peak_ram, peak_vram),
         why: early.unwrap_or("the full time reached"),
     };
     let busy = [0, 1].map(|i| crate::host::CARD_BUSY_US[i].load(Ordering::Relaxed).saturating_sub(BUSY_BASE[i].load(Ordering::Relaxed)));
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
     card.used = format!(
-        "RAM peak {:.1} GB \u{b7} VRAM {:.1} / {:.1} GB{}",
-        ram_peak_bytes() as f64 / GB,
-        vram.0 as f64 / GB,
+        "peak RAM {:.1} GB \u{b7} peak VRAM {:.1} / {:.1} GB{}",
+        peak_ram as f64 / GB,
+        peak_vram as f64 / GB,
         vram.1 as f64 / GB,
         if busy[1] > 0 { format!(" \u{b7} card busy {:.0} %", 100.0 * busy[0] as f64 / busy[1] as f64) } else { String::new() }
     );
@@ -588,6 +597,8 @@ struct Extra {
     compiled: [u64; 2],
     vram: (u64, u64),
     ram: u64,
+    /// Highest working set and card memory during the measured run.
+    peaks: (u64, u64),
     why: &'static str,
 }
 
@@ -792,6 +803,8 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
         ("shaders_translated", J::I(x.compiled[0])),
         ("pipelines_compiled", J::I(x.compiled[1])),
         ("vram_end_mb", J::F(x.vram.0 as f64 / MB)),
+        ("ram_peak_mb", J::F(x.peaks.0 as f64 / MB)),
+        ("vram_peak_mb", J::F(x.peaks.1 as f64 / MB)),
         ("vram_budget_mb", J::F(x.vram.1 as f64 / MB)),
         ("ram_end_mb", J::F(x.ram as f64 / MB)),
         (
@@ -831,6 +844,7 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         format!("Inputs blocked: {}", c.blocked),
         format!("Compiled during the run: {} shaders, {} pipelines", x.compiled[0], x.compiled[1]),
         format!("At the end: VRAM {:.0} / {:.0} MB \u{b7} RAM {:.0} MB", x.vram.0 as f64 / MB, x.vram.1 as f64 / MB, x.ram as f64 / MB),
+        format!("Peaks during the run: RAM {:.0} MB \u{b7} VRAM {:.0} MB", x.peaks.0 as f64 / MB, x.peaks.1 as f64 / MB),
         String::new(),
         "Share:".into(),
         c.share.clone(),
@@ -1287,6 +1301,7 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
             let tick = born.elapsed().as_secs();
             if tick != label_tick {
                 label_tick = tick;
+                sample_peaks();
                 let started = START.get().map(Instant::elapsed);
                 // Set every second (a caption thread of the host may have put its own back).
                 if holds_title() && IsWindow(game) != 0 {
@@ -1961,7 +1976,7 @@ mod tests {
     #[test]
     fn result_matches_the_checker_fixture() {
         let card = sample_card();
-        let extra = Extra { black: 0, removed: false, compiled: [3, 7], vram: (9000 << 20, 15000 << 20), ram: 12345 << 20, why: "5:00 reached" };
+        let extra = Extra { black: 0, removed: false, compiled: [3, 7], vram: (9000 << 20, 15000 << 20), ram: 12345 << 20, peaks: (13000 << 20, 9500 << 20), why: "5:00 reached" };
         let mut doc = result_json(&card, &extra, &[60.0, 57.3, 61.2]);
         let J::O(m) = &mut doc else { unreachable!() };
         // The build's own project and commit, replaced by the fixture's.
