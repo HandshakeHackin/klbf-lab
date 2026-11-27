@@ -1,0 +1,28 @@
+name: RDNA2 segment threshold regressions
+on:
+  push:
+    branches: [verify/rdna2-segment-threshold-v2]
+permissions:
+  contents: read
+jobs:
+  threshold:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the two segment selection regressions
+        run: >-
+          cargo test -p victory-gpu --locked --lib host::segments::tests:: -- --nocapture
+      - name: Recheck with the original rounded comparison
+        shell: pwsh
+        run: |
+          $path = 'crates/victory-gpu/src/host/segments.rs'
+          $src = [IO.File]::ReadAllText($path)
+          $src = [regex]::Replace($src, '(?s)\.max_by\(\|a, b\| \{.*?\}\)', '.max_by_key(|s| s.resident * 1000 / s.limit)', 1)
+          [IO.File]::WriteAllText($path, $src)
+          $log = cargo test -p victory-gpu --locked --lib host::segments::tests:: -- --nocapture 2>&1 | Out-String
+          $status = $LASTEXITCODE
+          Write-Host $log
+          if ($status -ne 101 -or $log -notmatch '1 passed; 1 failed' -or $log -notmatch 'fullest_aperture_preserves_threshold_crossings_in_either_order \.\.\. FAILED') { exit 1 }
+          exit 0
