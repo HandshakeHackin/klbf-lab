@@ -49,6 +49,28 @@ try {
     Check 'book: translation then pipelines' ((@(Get-KlbfPreparePhases 'x.rpf' $book) | ForEach-Object { $_.what }) -join ',' -eq 'Translating shaders,Preparing pipelines')
     Check 'pipelines alone' ((@(Get-KlbfPreparePhases 'x.rpf' $book -NoTranslate) | ForEach-Object { $_.what }) -join ',' -eq 'Preparing pipelines')
     Check 'nothing to do' (@(Get-KlbfPreparePhases 'x.rpf' '' -NoTranslate).Count -eq 0)
+
+    # The first-run shortcut offer: a yes makes it and says so; a failure is said and asked again; a no is remembered
+    $env:KLBF_LAUNCHER_DIR = Join-Path $t 'launcher'
+    $mark = Join-Path $env:KLBF_LAUNCHER_DIR 'shortcut-asked.txt'
+    $build = Join-Path $t 'build'; New-Item -ItemType Directory -Path $build | Out-Null
+    $lnk = Join-Path $t 'KLBF Lab.lnk'
+    $yes = { param($q) $script:asked++; $true }
+    $bad = Get-KlbfShortcutSpec (Join-Path $t 'no such folder')
+    $script:asked = 0
+    $r = Invoke-KlbfShortcutOffer $bad $yes $lnk
+    Check 'failure said' ($r -like 'Desktop shortcut not created: *')
+    Check 'failure not remembered as yes' (-not (Test-Path -LiteralPath $mark))
+    $r = Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $build) $yes $lnk
+    Check 'asked again after a failure, then made' ($r -eq 'Desktop shortcut created.' -and $script:asked -eq 2 -and (Test-Path -LiteralPath $lnk) -and (Test-Path -LiteralPath (Join-Path $build 'KLBF Lab.vbs')))
+    Check 'yes remembered once made' ((Get-Content -LiteralPath $mark -TotalCount 1) -eq 'yes')
+    Check 'never asked twice' ((Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $build) $yes $lnk) -eq '' -and $script:asked -eq 2)
+    Remove-Item -LiteralPath $mark, $lnk
+    Check 'no: nothing to say' ((Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $build) { $false } $lnk) -eq '' -and -not (Test-Path -LiteralPath $lnk))
+    Check 'no remembered' ((Get-Content -LiteralPath $mark -TotalCount 1) -eq 'no')
+    $env:KLBF_HOME = Join-Path $t 'home'
+    Add-KlbfLauncherLog 'Desktop shortcut created.'
+    Check 'launcher log line' ((Get-Content -LiteralPath (Join-Path (Get-KlbfLogDir) 'launcher.log') -Raw) -match 'Desktop shortcut created\.')
 } finally {
     Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue
 }

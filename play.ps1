@@ -127,7 +127,12 @@ if (-not $explicit) {
         if ($menuAction -eq 'updated') { & $PSCommandPath -Setup @passOn; exit $LASTEXITCODE }
         # (27/11) Once, after the first setup: a desktop shortcut for this build
         if ($menuAction -eq 'play') {
-            try { $null = Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $PSScriptRoot $Victory) { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } } catch {}
+            # (27/11) What came of it is said and logged (a failure is asked again at the next start)
+            $made = try { Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $PSScriptRoot $Victory) { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } } catch { "Desktop shortcut not created: $_" }
+            if ($made) {
+                Write-Host $made; Add-KlbfLauncherLog $made
+                try { $null = [System.Windows.Forms.MessageBox]::Show($made, 'KLBF Lab', 'OK', $(if ($made -like '*not created*') { 'Warning' } else { 'Information' })) } catch {}
+            }
         }
     }
     # "Run benchmark": the player's settings and -Bench (-BenchPlayer from the bench window)

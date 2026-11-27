@@ -364,16 +364,32 @@ function Set-KlbfShortcut($Spec, $Ask, [string]$Path = (Join-Path ([Environment]
 }
 
 # Once, at the end of the first setup: "Create a desktop shortcut?" (the answer remembered beside the settings).
+# What came of a yes, to say ("Desktop shortcut created." or why not); '' when nothing was asked or the
+# answer was no. (27/11) The answer was remembered before the shortcut was made and play.ps1 swallowed any
+# error: a "yes" with no shortcut, said nowhere. Now a failure is told and asked again at the next start.
 function Invoke-KlbfShortcutOffer($Spec, $Ask, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
     $mark = Join-Path (Get-KlbfLauncherDir) 'shortcut-asked.txt'
     if (Test-Path -LiteralPath $mark) { return '' }
     # (27/11) a shortcut already made (by hand or the Quick tab): no question
     if (Test-Path -LiteralPath $Path) { return '' }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $mark) | Out-Null
-    $yes = & $Ask 'Create a desktop shortcut for KLBF Lab?'
-    Set-Content -LiteralPath $mark -Value $(if ($yes) { 'yes' } else { 'no' }) -Encoding utf8
-    if (-not $yes) { return '' }
-    Set-KlbfShortcut $Spec $Ask $Path
+    if (-not (& $Ask 'Create a desktop shortcut for KLBF Lab?')) {
+        Set-Content -LiteralPath $mark -Value 'no' -Encoding utf8
+        return ''
+    }
+    $why = try { $made = New-KlbfShortcut $Spec $Path; if (Test-Path -LiteralPath $made) { '' } else { 'Windows did not write it' } } catch { $_.Exception.Message }
+    if ($why) { return "Desktop shortcut not created: $why" }
+    Set-Content -LiteralPath $mark -Value 'yes' -Encoding utf8
+    'Desktop shortcut created.'
+}
+
+# (27/11) A line of the launcher's own (what it did outside the game) in <home>\logs\launcher.log.
+function Add-KlbfLauncherLog([string]$Text) {
+    try {
+        $d = Get-KlbfLogDir
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        Add-Content -LiteralPath (Join-Path $d 'launcher.log') -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Text" -Encoding utf8
+    } catch {}
 }
 
 # (27/11) This process groups with the game under one KLBF Lab taskbar button (the game sets the same id),
