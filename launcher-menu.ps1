@@ -394,7 +394,16 @@ function Get-KlbfBugReport($Choice, $Hw, [string]$Victory, [string]$Log, [string
         "- Screen: $($Hw.screen)"
         "- Windows: $Windows"
         "- Log to attach: $(if ($Log) { $Log } else { 'none found: copy the text of the console window' })"
-    ) -join "`r`n"
+    ) -join "`r`n" | Hide-KlbfPaths -Game $Choice.game
+}
+
+# (27/11, privacy) A text with no path of this PC: the game folder as <game folder>, the user's profile as
+# %USERPROFILE%, the computer's and the user's names out.
+function Hide-KlbfPaths([Parameter(ValueFromPipeline)][string]$Text, [string]$Game) {
+    if ($Game) { $Text = $Text.Replace($Game.TrimEnd('\'), '<game folder>') }
+    if ($env:USERPROFILE) { $Text = $Text.Replace($env:USERPROFILE, '%USERPROFILE%') }
+    foreach ($n in $env:COMPUTERNAME, $env:USERNAME) { if ($n -and $n.Length -gt 2) { $Text = [regex]::Replace($Text, '\b' + [regex]::Escape($n) + '\b', '<hidden>') } }
+    $Text
 }
 
 # What the bench window says (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md). No save is shipped: the
@@ -523,15 +532,18 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     # Your PC: what was found, a verdict per line (green: fine, amber: works with less, red: not supported)
     # Game folder: where the player's copy is; checked, and the room the cache needs on its drive
     $g = & $group $page 'Game folder' 4 96
+    # (27/11, privacy) The path is hidden until Show, every time the window opens (screenshots get posted)
     $c.game = New-Object System.Windows.Forms.TextBox; $c.game.ReadOnly = $true
     $c.game.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.game.ForeColor = Get-KlbfColor $script:KlbfTheme.text
-    [void](& $add $g $c.game 12 22 340 24)
-    $c.browse = & $btn $g "Browse$([char]0x2026)" 360 20 108
+    [void](& $add $g $c.game 12 22 266 24)
+    $c.showPath = $false
+    $c.show = & $btn $g 'Show' 284 20 72
+    $c.browse = & $btn $g "Browse$([char]0x2026)" 362 20 106
     $c.gameDot = & $label $g ([string][char]0x25CF) 12 50 18
     $c.gameText = & $white (& $label $g '' 30 50 444)
     $c.spaceDot = & $label $g ([string][char]0x25CF) 12 70 18
     $c.space = Get-KlbfSpace $Info.cache
-    $c.spaceText = & $white (& $label $g ('About {0} GB needed on {1} (cache, logs, backups); {2} GB free' -f $c.space.needGB, $c.space.drive, $c.space.freeGB) 30 70 450)
+    $c.spaceText = & $white (& $label $g ('Needs about {0} GB (cache, logs, backups); {1} GB free on that drive' -f $c.space.needGB, $c.space.freeGB) 30 70 450)
     $c.spaceDot.ForeColor = Get-KlbfColor $(if ($c.space.ok) { 0x22C55E } else { 0xF59E0B })
 
     $g = & $group $page 'Your PC' 104 140
@@ -622,7 +634,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $f.AcceptButton = $c.play
 
     $c.form = $f
-    $c.game.Text = $(if ($Choice.game) { $Choice.game } else { [string]$Info.game })
+    Set-KlbfGamePath $c $(if ($Choice.game) { $Choice.game } else { [string]$Info.game })
     Set-KlbfFormChoice $c $Choice
     Update-KlbfSavesTab $c
     # A closure sees variables, not this file's functions: they go in as variables.
@@ -630,7 +642,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $fPath = ${function:Get-KlbfPresetPath}; $fRead = ${function:Read-KlbfSettings}; $fSave = ${function:Save-KlbfSettings}
     $fSaves = ${function:Update-KlbfSavesTab}; $fBackup = ${function:Backup-KlbfSaves}; $fRestore = ${function:Restore-KlbfSaves}
     $fCopy = ${function:Copy-KlbfSave}; $fReport = ${function:Get-KlbfBugReport}; $fLog = ${function:Get-KlbfLatestLog}
-    $fGuide = ${function:Show-KlbfBenchGuide}; $repo = $script:KlbfRepo; $backupDir = Get-KlbfBackupDir
+    $fGamePath = ${function:Set-KlbfGamePath}; $fGuide = ${function:Show-KlbfBenchGuide}; $repo = $script:KlbfRepo; $backupDir = Get-KlbfBackupDir
     $update = { & $fUpdate $c }.GetNewClosure()
     foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle)) { $r.add_CheckedChanged($update) }
     $c.load.add_Click({
@@ -672,13 +684,14 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.browse.add_Click({
         $d = New-Object System.Windows.Forms.FolderBrowserDialog
         $d.Description = 'The folder of your copy of the game (the one with game_scarlett_master.exe)'
-        if ($c.game.Text) { $d.SelectedPath = $c.game.Text }
+        if ($c.gamePath) { $d.SelectedPath = $c.gamePath }
         $picked = if ($c.pickFolder) { & $c.pickFolder } elseif ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }
-        if ($picked) { $c.game.Text = $picked; & $fUpdate $c }
+        if ($picked) { & $fGamePath $c $picked; & $fUpdate $c }
     }.GetNewClosure())
+    $c.show.add_Click({ $c.showPath = -not $c.showPath; & $fGamePath $c $c.gamePath }.GetNewClosure())
     $c.backup.add_Click({
         $z = & $fBackup $c.savesRoot
-        $c.savesNote.Text = $(if ($z) { "Backed up: $z" } else { 'No saves yet.' })
+        $c.savesNote.Text = $(if ($z) { 'Backed up (KLBF-Lab save-backups folder).' } else { 'No saves yet.' })
     }.GetNewClosure())
     $c.restore.add_Click({
         $d = New-Object System.Windows.Forms.OpenFileDialog
@@ -689,7 +702,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         if ($ok -ne 'Yes') { return }
         $z = & $fRestore $d.FileName $c.savesRoot
         & $fSaves $c
-        $c.savesNote.Text = "Restored. The saves before it: $z"
+        $c.savesNote.Text = 'Restored. The saves before it are backed up too.' 
     }.GetNewClosure())
     $c.copy.add_Click({
         $from = $c.saves | Where-Object slot -eq $c.copyFrom.SelectedItem
@@ -699,7 +712,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         if (-not (& $ask "Copy $($from.slot) ($($from.title)) over $($to.slot) ($($to.title))?`r`nAll saves are backed up first.")) { return }
         $z = & $fCopy $from $to $c.savesRoot
         & $fSaves $c
-        $c.savesNote.Text = "Copied. The saves before it: $z"
+        $c.savesNote.Text = 'Copied. The saves before it are backed up.' 
     }.GetNewClosure())
     $c.play.add_Click({ $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
     $c.prepare.add_Click({ $c.form.Tag = 'prepare'; $c.form.Close() }.GetNewClosure())
@@ -719,8 +732,15 @@ function Update-KlbfSavesTab($c) {
     if (-not $c.saves) { $c.savesNote.Text = $(if ($c.savesRoot) { 'No saves yet.' } else { 'No saves folder yet: it appears after the first save in the game.' }) }
 }
 
+# The game folder kept in $c.gamePath; the box shows it only after Show ("(hidden)" otherwise).
+function Set-KlbfGamePath($c, [string]$Path) {
+    $c.gamePath = $Path
+    $c.game.Text = if (-not $Path) { '' } elseif ($c.showPath) { $Path } else { ([string][char]0x2022) * 8 + ' (hidden)' }
+    $c.show.Text = if ($c.showPath) { 'Hide' } else { 'Show' }
+}
+
 function Set-KlbfFormChoice($c, $Choice) {
-    if ($Choice.game) { $c.game.Text = $Choice.game }
+    if ($Choice.game) { Set-KlbfGamePath $c $Choice.game }
     $c.profX.Checked = $Choice.profile -ne 'S'; $c.profS.Checked = $Choice.profile -eq 'S'
     $c.upFsr.Checked = $Choice.upscaler -ne 'title'; $c.upTitle.Checked = $Choice.upscaler -eq 'title'
     $c.presets[$Choice.preset].Checked = $true
@@ -737,7 +757,7 @@ function Get-KlbfFormChoice($c) {
         output = [string]$c.output.SelectedItem
         frameGen = [bool]$c.fg.Checked
         advanced = [bool]$c.adv.Checked
-        game = [string]$c.game.Text
+        game = [string]$c.gamePath
     })
 }
 
@@ -751,9 +771,9 @@ function Update-KlbfForm($c) {
     $c.outputNote.Text = $(if ($s) { 'Profile S: the title sets its own render size and output.' } else { '' })
     $c.fg.Enabled = $fsr
     # Play, bench and shaders need the game files
-    $ok = Test-KlbfGameFolder $c.game.Text
+    $ok = Test-KlbfGameFolder $c.gamePath
     $c.gameDot.ForeColor = Get-KlbfColor $(if ($ok) { 0x22C55E } else { 0xEF4444 })
-    $c.gameText.Text = if ($ok) { 'Game files found' } elseif ($c.game.Text) { 'This folder does not contain the game files' } else { 'Choose the folder where your copy of the game is installed (Browse...)' }
+    $c.gameText.Text = if ($ok) { 'Game files found' } elseif ($c.gamePath) { 'This folder does not contain the game files' } else { 'Choose the folder where your copy of the game is installed (Browse...)' }
     foreach ($b in $c.play, $c.bench, $c.prepare) { $b.Enabled = $ok }
 }
 
