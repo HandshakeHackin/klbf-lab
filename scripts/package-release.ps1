@@ -51,6 +51,11 @@ upscaler is used; start again online to get it.
 Nothing of the game is included: KLBF Lab only runs your own copy. KLBF Lab itself: see LICENSE.
 Source and help: https://github.com/PastiiJay/klbf-lab
 "@
+# (low-end beta) A beta tag (v26.11.3-lowend-beta1) says so at the top: untested, experimental switches off
+if ($Tag -match '-beta') {
+    $readme = Join-Path $stage 'README.txt'
+    Set-Content -LiteralPath $readme -Encoding ascii -Value ("BETA, UNTESTED: a test build. Its experimental switches (Settings, Experimental tab) are all off by default." + [Environment]::NewLine + [Environment]::NewLine + (Get-Content -LiteralPath $readme -Raw))
+}
 
 # The version the launcher shows and compares with GitHub's latest release (Get-KlbfVersion)
 Set-Content -LiteralPath (Join-Path $stage 'VERSION') -Value $Tag -Encoding ascii
