@@ -485,13 +485,15 @@ fn screen(game: usize) -> [u32; 2] {
     }
 }
 
-/// What the frame is drawn at and shown on now. FSR while an upscale went to the PC DLL in the last
-/// 2 s, else the title's own upscaler at [`title_scale`] (native at 1.0).
+/// What the frame is drawn at and shown on now. FSR once an upscale went to the PC DLL, else the
+/// title's own upscaler at [`title_scale`] (native at 1.0).
 fn shown() -> Shown {
     let output = unpack(OUTPUT.load(Ordering::Relaxed));
     let (fg, screen) = (FRAMEGEN.load(Ordering::Relaxed), screen(GAME.load(Ordering::Relaxed)));
     let at = UPSCALE[2].load(Ordering::Relaxed);
-    if at != 0 && since_epoch_ms().saturating_sub(at) <= 2000 {
+    // (27/11) From FSR's first upscale on: FSR, with its last sizes (a loading screen between two upscales
+    // is not the title's upscaler coming back); before it, the title's.
+    if at != 0 {
         let upscaled = unpack(UPSCALE[1].load(Ordering::Relaxed));
         return Shown {
             output: if upscaled[1] > 0 { upscaled } else { output },
@@ -518,11 +520,12 @@ pub(crate) fn caption(fps: f64, low1: f64, draws: f64, making: u64) -> String {
 }
 
 /// The frames shown per second with frame generation on: `measured` (the swap chain's count, 0: not
-/// known), else twice `fps` (FG x2). 0 with it off.
+/// known), else twice `fps` (FG x2). 0 with it off, and while it makes no frames of its own yet (the swap
+/// chain counts no more than 1.2 x the real ones: "30 FPS", never "30 FPS (base 30)").
 fn fg_fps(fg: bool, fps: f64, measured: f64) -> f64 {
     match (fg, measured > 0.0) {
         (false, _) => 0.0,
-        (true, true) => measured,
+        (true, true) => if measured >= fps * 1.2 { measured } else { 0.0 },
         (true, false) => fps * 2.0,
     }
 }
@@ -2596,6 +2599,9 @@ mod tests {
         let native = Shown { upscaler: Upscaler::Native, fg: false, output: [3840, 2160], ..sample_shown() };
         assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &native, 0.0, [0; 4], 0).ends_with("| Profile X Native 4K"));
         assert_eq!(fg_fps(false, 30.0, 61.0), 0.0);
+        assert_eq!(fg_fps(true, 30.0, 30.0), 0.0, "no generated frames yet: no (base N)");
+        assert_eq!(fg_fps(true, 30.0, 58.0), 58.0);
+        assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &x4, 30.0, mem, 0).starts_with("KLBF Lab | 30 FPS | "));
         let mut set = sample_card().set;
         assert_eq!(set.fg_fps(30.0), 60.0, "no measured ratio: x2");
         set.fg_ratio = 1.9;

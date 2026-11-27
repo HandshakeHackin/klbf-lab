@@ -79,6 +79,43 @@ function Test-KlbfGameFolder([string]$Path) {
 # Room on the drive of the cache. 10 GB measured 27/11: a full shader and pipeline cache 7.2 GB, saves and
 # logs 11 MB, 10 save backups under 0.2 GB, plus margin for the cache to grow.
 $script:KlbfSpaceGB = 10
+# (27/11) The shader cache: about 7.2 GB once full (measured 27/11). Only ray tracing and -NoProbeRays
+# (play.ps1 switches) change the translated shaders, so the cache grows again after one of them changes;
+# none of the window's choices do (profile, upscaler, preset, output, frame generation, hooks).
+$script:KlbfCacheFullGB = 7.2
+
+function Get-KlbfCacheDir([string]$Cache) { if ($Cache) { $Cache } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' } }
+
+# Bytes in the cache folder (0 without one).
+function Get-KlbfCacheBytes([string]$Cache) {
+    $d = Get-KlbfCacheDir $Cache
+    if (-not (Test-Path -LiteralPath $d)) { return 0 }
+    [int64](Get-ChildItem -LiteralPath $d -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+}
+
+# Before Prepare shaders: what the cache still needs (the full size less what it holds) against the free
+# room on its drive. $FreeGB (tests) stands for the drive's.
+function Test-KlbfPrepareSpace([string]$Cache, $FreeGB = $null) {
+    $have = (Get-KlbfCacheBytes $Cache) / 1GB
+    $need = [math]::Round([math]::Max(0.0, $script:KlbfCacheFullGB - $have), 1)
+    if ($null -eq $FreeGB) { $FreeGB = (Get-KlbfSpace $Cache).freeGB }
+    @{ ok = $FreeGB -ge $need; needGB = $need; freeGB = $FreeGB }
+}
+
+# Clear shader cache: the cache folder's contents go, but the list of effects the game created
+# (pipelines\known-pipelines.bin, what is made ahead next time) is kept. Refuses anything but a folder
+# named "cache" (never a drive or a profile folder).
+function Clear-KlbfShaderCache([string]$Cache) {
+    $d = Get-KlbfCacheDir $Cache
+    if (-not (Test-Path -LiteralPath $d -PathType Container) -or (Split-Path -Leaf $d) -ne 'cache') { throw 'Not a KLBF Lab cache folder: nothing deleted.' }
+    $keep = Join-Path $d 'pipelines\known-pipelines.bin'
+    foreach ($i in (Get-ChildItem -LiteralPath $d -Force)) {
+        if ($i.Name -eq 'pipelines' -and (Test-Path -LiteralPath $keep)) {
+            Get-ChildItem -LiteralPath $i.FullName -Force | Where-Object Name -ne 'known-pipelines.bin' | Remove-Item -Recurse -Force
+        } else { Remove-Item -LiteralPath $i.FullName -Recurse -Force }
+    }
+}
+
 function Get-KlbfSpace([string]$Cache) {
     if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
     $root = [IO.Path]::GetPathRoot($Cache)
@@ -831,8 +868,12 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
 
     # Under the tabs: the shaders' line, then a 3-column grid (156 px columns, 10 px apart): grey buttons on
     # the first row (room for more), Play alone in the right column of the second, violet.
-    $c.status = & $label $f $ShaderStatus 16 780 488 22
+    $c.status = & $label $f $ShaderStatus 16 780 318 22
     $c.status.ForeColor = $soft
+    # (27/11) Clear shader cache, with its size (no path)
+    $c.cacheBytes = Get-KlbfCacheBytes $Info.cache; $c.cacheGB = if ($c.cacheBytes -gt 0) { [math]::Max(0.1, [math]::Round($c.cacheBytes / 1GB, 1)) } else { 0 }
+    $c.clearCache = & $btn $f "Clear shader cache ($($c.cacheGB) GB)" 340 776 164 26
+    $c.clearCache.Enabled = $c.cacheGB -gt 0
     $col = { param($i) 16 + 166 * $i }
     $c.prepare = & $btn $f 'Prepare shaders' (& $col 0) 806 156 36
     $c.bench = & $btn $f 'Run benchmark' (& $col 1) 806 156 36
@@ -977,7 +1018,20 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         & $c.openUrl $dir
     }.GetNewClosure())
-    $c.prepare.add_Click({ $c.form.Tag = 'prepare'; $c.form.Close() }.GetNewClosure())
+    $fPrepSpace = ${function:Test-KlbfPrepareSpace}; $fClear = ${function:Clear-KlbfShaderCache}
+    $c.tips.SetToolTip($c.prepare, 'About 7.2 GB once done. It grows again only after a change of ray tracing or probe rays; none of the choices here change the shaders.')
+    $c.prepare.add_Click({
+        $sp = & $fPrepSpace $c.info.cache $c.freeGB
+        $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Warning') -eq 'Yes' } }
+        if (-not $sp.ok -and -not (& $ask "Only $($sp.freeGB) GB free on the cache's drive; the shaders need about $($sp.needGB) GB more.`r`nPrepare anyway?")) { return }
+        $c.form.Tag = 'prepare'; $c.form.Close()
+    }.GetNewClosure())
+    $c.clearCache.add_Click({
+        $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Warning') -eq 'Yes' } }
+        if (-not (& $ask "Delete the shader cache ($($c.cacheGB) GB)?`r`nThe shaders are prepared again before the next start (a few minutes).")) { return }
+        try { & $fClear $c.info.cache; $c.cacheGB = 0; $c.clearCache.Text = 'Clear shader cache (0 GB)'; $c.clearCache.Enabled = $false; $c.status.Text = 'Shaders: not prepared for this build yet (a few minutes; Play offers it).' }
+        catch { $c.status.Text = "$_" }
+    }.GetNewClosure())
     @{ form = $f; c = $c }
 }
 
