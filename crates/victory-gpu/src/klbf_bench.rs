@@ -871,11 +871,11 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
                 ("profile", J::S(t.profile.into())),
                 ("upscaler", J::S(t.upscaler.into())),
                 // A size in px, not MB: the runtime caps textures by their largest side (null: no cap).
-                ("texture_max_dim", if t.texture_max_dim > 0 { J::I(t.texture_max_dim) } else { J::Null }),
-                ("pipelines_skipped", J::I(t.skipped)),
-                ("pipelines_denied", J::I(t.denied)),
+                ("texture_max_dim", if TREE_COUNTS && t.texture_max_dim > 0 { J::I(t.texture_max_dim) } else { J::Null }),
+                ("pipelines_skipped", if TREE_COUNTS { J::I(t.skipped) } else { J::Null }),
+                ("pipelines_denied", if TREE_COUNTS { J::I(t.denied) } else { J::Null }),
                 ("draws_per_frame", J::F(t.draws_per_frame)),
-                ("dropped_draws_pct", J::F(t.dropped_pct)),
+                ("dropped_draws_pct", if TREE_COUNTS { J::F(t.dropped_pct) } else { J::Null }),
             ]),
         ),
     ])
@@ -2034,7 +2034,7 @@ mod tests {
     }
 
     /// A result the game writes, byte for byte the fixture `tools/bench-check.py` accepts
-    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-660c2a95.json`).
+    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-4b072db9.json`).
     #[test]
     fn result_matches_the_checker_fixture() {
         let card = sample_card();
@@ -2046,7 +2046,7 @@ mod tests {
         m.insert("project_source", J::S("git".into()));
         m.insert("sha", J::S("abc1234".into()));
         let id = serial(&doc);
-        assert_eq!(id, "660c2a95");
+        assert_eq!(id, "4b072db9");
         let share = format!("[KLBF Lab Bench BM-v1] PastiiJay/klbf-lab@abc1234 | RX 9070 XT | Ryzen 7 7800X3D | avg 60.0 fps, 1% low 58.5 | CERTIFIED | {id}");
         let J::O(m) = &mut doc else { unreachable!() };
         m.insert("serial", J::S(id));
@@ -2054,7 +2054,7 @@ mod tests {
         if let Ok(out) = std::env::var("KLBF_FIXTURE_WRITE") {
             std::fs::write(out, doc.canonical()).unwrap();
         }
-        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-660c2a95.json"));
+        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-4b072db9.json"));
     }
 
     #[test]
