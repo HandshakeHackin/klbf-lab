@@ -309,6 +309,16 @@ fn fresh_list() -> Option<crate::host::HostList> {
 #[cfg(windows)]
 const IDLE_WHEN_TIGHT: usize = 64;
 
+/// Removes the oldest entries from a LIFO pool until at most `keep` remain.
+/// New entries are pushed at the end and [`fresh_list`] takes from the end,
+/// so retaining that end avoids throwing away the lists most likely to be
+/// reused immediately.
+#[cfg(windows)]
+pub(crate) fn take_oldest<T>(items: &mut Vec<T>, keep: usize) -> Vec<T> {
+    let gone = items.len().saturating_sub(keep);
+    items.drain(..gone).collect()
+}
+
 /// Lets idle host lists past [`IDLE_WHEN_TIGHT`] go, and their allocators'
 /// command memory with them: on an RX 6700 XT that memory lies in a 2 GB
 /// aperture segment (`FINDINGS-6700XT.md`). They have run and been reset.
@@ -319,7 +329,7 @@ pub(crate) fn trim_idle() {
         if idle.0.len() <= IDLE_WHEN_TIGHT {
             return;
         }
-        let gone = idle.0.split_off(IDLE_WHEN_TIGHT);
+        let gone = take_oldest(&mut idle.0, IDLE_WHEN_TIGHT);
         idle.1 -= gone.iter().map(|Idle(_, bytes, _)| bytes).sum::<u64>();
         gone
     };
@@ -2562,6 +2572,15 @@ static NEWER_THIN_FUNCTIONS: Table<160> = Table(thin::table(true));
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    #[test]
+    fn tight_pool_trim_keeps_the_newest_lifo_entries() {
+        let mut idle = vec![1, 2, 3, 4, 5];
+        assert_eq!(take_oldest(&mut idle, 3), [1, 2]);
+        assert_eq!(idle, [3, 4, 5]);
+        assert_eq!(take_oldest(&mut idle, 8), []);
+        assert_eq!(idle, [3, 4, 5]);
+    }
 
     #[test]
     fn every_inline_command_falls_back_to_the_table() {
