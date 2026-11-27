@@ -2034,7 +2034,7 @@ mod tests {
     }
 
     /// A result the game writes, byte for byte the fixture `tools/bench-check.py` accepts
-    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-3b8db536.json`).
+    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-660c2a95.json`).
     #[test]
     fn result_matches_the_checker_fixture() {
         let card = sample_card();
@@ -2046,12 +2046,15 @@ mod tests {
         m.insert("project_source", J::S("git".into()));
         m.insert("sha", J::S("abc1234".into()));
         let id = serial(&doc);
-        assert_eq!(id, "3b8db536");
+        assert_eq!(id, "660c2a95");
         let share = format!("[KLBF Lab Bench BM-v1] PastiiJay/klbf-lab@abc1234 | RX 9070 XT | Ryzen 7 7800X3D | avg 60.0 fps, 1% low 58.5 | CERTIFIED | {id}");
         let J::O(m) = &mut doc else { unreachable!() };
         m.insert("serial", J::S(id));
         m.insert("share", J::S(share));
-        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-3b8db536.json"));
+        if let Ok(out) = std::env::var("KLBF_FIXTURE_WRITE") {
+            std::fs::write(out, doc.canonical()).unwrap();
+        }
+        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-660c2a95.json"));
     }
 
     #[test]
