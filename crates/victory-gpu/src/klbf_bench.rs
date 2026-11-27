@@ -514,7 +514,8 @@ fn shown() -> Shown {
 /// 6.3 shared) [| compiling N shaders]". `low1`: the 1 % low of the last second's frames, fps (0: not known).
 pub(crate) fn caption(fps: f64, low1: f64, draws: f64, making: u64) -> String {
     let (used, budget) = vram_now();
-    let text = caption_text(fps, low1, draws, profile_name(), &shown(), crate::framegen::shown_fps(), [used, budget, ram_bytes(), shared_now()], making);
+    let tail = if crate::klbf_keys::launcher() { "" } else { NOT_OURS };
+    let text = caption_text(fps, low1, draws, profile_name(), &shown(), crate::framegen::shown_fps(), [used, budget, ram_bytes(), shared_now()], making, tail);
     LAST_CAPTION.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&text);
     text
 }
@@ -530,10 +531,13 @@ fn fg_fps(fg: bool, fps: f64, measured: f64) -> f64 {
     }
 }
 
-/// [`caption`]'s text; `shown_fps`: [`fg_fps`]'s measured; `mem`: card memory used and budget, the
+/// (27/11) The caption's end when another launcher started the game (no `KLBF_LAUNCHER`).
+const NOT_OURS: &str = " | Full settings: KLBF Lab launcher (github.com/PastiiJay/klbf-lab)";
+
+/// [`caption`]'s text; `tail`: put at its very end ([`NOT_OURS`] or empty); `shown_fps`: [`fg_fps`]'s measured; `mem`: card memory used and budget, the
 /// process's working set, the card's memory in system RAM (0: not known), bytes. No screen size (on the card).
 #[allow(clippy::too_many_arguments)]
-fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown_fps: f64, mem: [u64; 4], making: u64) -> String {
+fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown_fps: f64, mem: [u64; 4], making: u64, tail: &str) -> String {
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
     let fg = if fps > 0.0 { fg_fps(s.fg, fps, shown_fps) } else { 0.0 };
     let mut parts = vec!["KLBF Lab".to_owned(), if fg > 0.0 { format!("{fg:.0} FPS (base {fps:.0})") } else { format!("{fps:.0} FPS") }];
@@ -563,8 +567,8 @@ fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown
         }
     }
     // The title's window is ANSI: "→" showed as "?" there (27/11), so the caption says "->".
-    let text = |detail: &str| crate::shell::compiling(parts.join(" | ").replace('\u{2192}', "->") + detail, " | ", making);
-    // Over 160 characters (while compiling), the RAM's detail goes.
+    let text = |detail: &str| crate::shell::compiling(parts.join(" | ").replace('\u{2192}', "->") + detail, " | ", making) + tail;
+    // Over 160 characters (while compiling, or with the tail), the RAM's detail goes.
     let full = text(&detail);
     if full.chars().count() > 160 { text("") } else { full }
 }
@@ -2367,7 +2371,7 @@ pub(crate) fn shot_stats() -> String {
 fn watermark_stats(caption: &str) -> String {
     caption
         .split(" | ")
-        .filter(|f| *f != "KLBF Lab" && !f.starts_with("1% ") && !f.ends_with(" ms") && !f.ends_with(" draws") && !f.starts_with("compiling "))
+        .filter(|f| *f != "KLBF Lab" && !f.starts_with("1% ") && !f.ends_with(" ms") && !f.ends_with(" draws") && !f.starts_with("compiling ") && !f.starts_with("Full settings: "))
         .map(|f| if f.starts_with("RAM ") { f.split(" (").next().unwrap_or(f) } else { f })
         .collect::<Vec<_>>()
         .join(" \u{b7} ")
@@ -2581,27 +2585,31 @@ mod tests {
         let x4 = Shown { output: [3840, 2160], render: [1920, 1080], ..sample_shown() };
         // the owner layout; frame generation with no count from the swap chain: twice the real rate.
         let full = "KLBF Lab | 28 FPS (base 14) | 1% 8 | 71 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 + 6.3 shared)";
-        assert_eq!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 0), full);
+        assert_eq!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 0, ""), full);
         // The swap chain's measured count when there is one.
-        assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 26.6, mem, 0).starts_with("KLBF Lab | 27 FPS (base 14) | 1% 8 |"));
-        let compiling = caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 12_345);
+        assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 26.6, mem, 0, "").starts_with("KLBF Lab | 27 FPS (base 14) | 1% 8 |"));
+        let compiling = caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 12_345, "");
         assert_eq!(compiling, full.replace(" (15.2 + 6.3 shared)", "") + " | compiling 12345 shaders", "over 160: the RAM's detail goes");
         assert!(compiling.chars().count() <= 160);
         assert!(!compiling.contains("Series") && !compiling.contains("screen") && !compiling.contains("FG x2"));
         // Nothing known yet but the frame rate.
-        assert_eq!(caption_text(0.0, 0.0, 0.0, "Profile S", &Shown::default(), 0.0, [0; 4], 1), "KLBF Lab | 0 FPS | \u{2013} ms | compiling 1 shader");
+        assert_eq!(caption_text(0.0, 0.0, 0.0, "Profile S", &Shown::default(), 0.0, [0; 4], 1, ""), "KLBF Lab | 0 FPS | \u{2013} ms | compiling 1 shader");
         // No frame generation, the title's upscaler, shared memory not known.
         let title = Shown { upscaler: Upscaler::Title, render: [2560, 1440], output: [3840, 2160], fg: false, ..sample_shown() };
         assert_eq!(
-            caption_text(30.0, 25.0, 812.0, "Profile X", &title, 0.0, [mem[0], mem[1], mem[2], 0], 0),
+            caption_text(30.0, 25.0, 812.0, "Profile X", &title, 0.0, [mem[0], mem[1], mem[2], 0], 0, ""),
             "KLBF Lab | 30 FPS | 1% 25 | 33 ms | 812 draws | Profile X Title upscaler (1440p -> 4K) | VRAM 11.6/14.0 GB | RAM 15.2 GB"
         );
         let native = Shown { upscaler: Upscaler::Native, fg: false, output: [3840, 2160], ..sample_shown() };
-        assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &native, 0.0, [0; 4], 0).ends_with("| Profile X Native 4K"));
+        assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &native, 0.0, [0; 4], 0, "").ends_with("| Profile X Native 4K"));
+        // Started by another launcher: where the full settings are, at the very end (the RAM's detail goes).
+        let theirs = caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 0, NOT_OURS);
+        assert!(theirs.ends_with(" | RAM 21.5 GB | Full settings: KLBF Lab launcher (github.com/PastiiJay/klbf-lab)"), "{theirs}");
+        assert_eq!(watermark_stats(&theirs), watermark_stats(full), "not in a screenshot's watermark");
         assert_eq!(fg_fps(false, 30.0, 61.0), 0.0);
         assert_eq!(fg_fps(true, 30.0, 30.0), 0.0, "no generated frames yet: no (base N)");
         assert_eq!(fg_fps(true, 30.0, 58.0), 58.0);
-        assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &x4, 30.0, mem, 0).starts_with("KLBF Lab | 30 FPS | "));
+        assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &x4, 30.0, mem, 0, "").starts_with("KLBF Lab | 30 FPS | "));
         let mut set = sample_card().set;
         assert_eq!(set.fg_fps(30.0), 60.0, "no measured ratio: x2");
         set.fg_ratio = 1.9;
