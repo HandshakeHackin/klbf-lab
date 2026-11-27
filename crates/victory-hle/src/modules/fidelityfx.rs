@@ -59,6 +59,7 @@ const ERROR_PARAMETER: u32 = 6;
 // Description types (`ffx_api_types.h`, `ffx_api_dx12.h`, `ffx_upscale.h`).
 const DESC_OVERRIDE_VERSION: u64 = 0x1;
 const CREATE_BACKEND_DX12: u64 = 0x2;
+const CREATE_UPSCALE: u64 = 0x1_0000;
 const DISPATCH_UPSCALE: u64 = 0x1_0001;
 const QUERY_JITTER_PHASE_COUNT: u64 = 0x1_0004;
 /// (27/11) 0x1_0006 in `ffx_upscale.h` (SDK 2.4); 0x1_0002, read before, is a query's type, so
@@ -225,6 +226,15 @@ extern "system" fn ffxCreateContext(context: *mut *mut c_void, desc: *mut u8, _a
         if ty == CREATE_BACKEND_DX12 {
             has_backend = true;
             swap_device(&mut patches, node, 16, 24, device);
+        }
+        if ty == CREATE_UPSCALE && victory_gpu::framegen::on() {
+            // (KLBF Lab) Frame generation is made from the upscaler's flags (depth and motion
+            // vector bits) and its largest render size.
+            // SAFETY: `ffxCreateContextDescUpscale`: flags at +16, maxRenderSize at +20.
+            let (flags, max_render) = unsafe {
+                (node.add(16).cast::<u32>().read_unaligned(), [node.add(20).cast::<u32>().read_unaligned(), node.add(24).cast::<u32>().read_unaligned()])
+            };
+            victory_gpu::framegen::upscale_context(flags, max_render);
         }
         if ty == DESC_OVERRIDE_VERSION && !previous.is_null() {
             tracing::info!("FidelityFX: the title's version override is not passed to the host DLL");
@@ -407,6 +417,9 @@ extern "system" fn ffxDispatch(context: *mut *mut c_void, desc: *mut u8) -> u32 
                 }
             }
             code = (api.dispatch)(context, desc);
+            if code == OK && ty == DISPATCH_UPSCALE && victory_gpu::framegen::on() {
+                prepare_framegen(pass.command_list(), desc);
+            }
         }
     });
     drop(patches);
@@ -418,6 +431,37 @@ extern "system" fn ffxDispatch(context: *mut *mut c_void, desc: *mut u8) -> u32 
         tracing::warn!(code, "ffxDispatch on the host DLL");
     }
     code
+}
+
+/// (KLBF Lab, `KLBF_FRAMEGEN=1`) The frame generation prepare, on the upscale's host list right
+/// after it: the depth and motion vectors it read (already the host textures, in the states the
+/// upscale was told and leaves them in), its jitter, motion vector scale, render size, frame time,
+/// reset and camera (`ffxDispatchDescUpscale`'s words from +360). After gleaf-6's.
+///
+/// # Safety
+/// `desc` is the upscale description just dispatched, its resources patched to the host's.
+unsafe fn prepare_framegen(list: *mut c_void, desc: *mut u8) {
+    // SAFETY: as the caller says; `ffx_upscale.h`'s layout.
+    unsafe {
+        let resource = |at: usize| victory_gpu::framegen::Resource {
+            resource: desc.add(at).cast::<*mut c_void>().read_unaligned(),
+            description: desc.add(at + 8).cast::<[u32; 8]>().read_unaligned(),
+            state: desc.add(at + RESOURCE_STATE).cast::<u32>().read_unaligned(),
+        };
+        let word = |i: usize| desc.add(360 + 4 * i).cast::<u32>().read_unaligned();
+        let float = |i: usize| f32::from_bits(word(i));
+        victory_gpu::framegen::prepare(
+            list,
+            resource(UPSCALE[1].0),
+            resource(UPSCALE[2].0),
+            [float(0), float(1)],
+            [float(2), float(3)],
+            [word(4), word(5)],
+            float(10),
+            desc.add(408).read() != 0,
+            [float(13), float(14), float(15), float(16)],
+        );
+    }
 }
 
 pub(crate) fn module() -> HleModule {

@@ -15,6 +15,8 @@
 # -FsrX       Series X mode with AMD FSR 4 (KLBF_X_FSR=1): the title is made to use its FidelityFX path, sent to
 #              the PC's FSR DLL in -FfxDir. -FsrQuality quality (default, 1/1.5 of the output) | balanced (1/1.7)
 #              | performance (1/2). -Output 2560x1440 sets the title's output (one of its modes; 3840x2160 without).
+# -FrameGen    AMD FSR frame generation on top (KLBF_FRAMEGEN=1), with -FsrX or -Fsr only: two frames shown per
+#              real one. AMD recommends a base of 60 fps; at ~16 real fps it adds latency and artifacts.
 # -FfxDir      the folder with AMD's signed FidelityFX DLLs (default D:\KLBF-Lab\ffx-4.1.2: SDK 2.4.0, FSR 4.1.2).
 # -Bench      KLBF Lab Bench BM-v1 (5 min, hands-off; your morning save in slot 1): Continue pressed for you.
 #              -BenchPlayer <GitHub login> names you on the card (else anonymous).
@@ -47,6 +49,7 @@ param(
     [switch]$RayTracing,
     [switch]$Fsr,
     [switch]$FsrX,
+    [switch]$FrameGen,
     [ValidateSet('quality', 'balanced', 'performance')][string]$FsrQuality = 'quality',
     [ValidateSet('', '1280x720', '1664x936', '1920x1080', '2560x1440', '3840x2160')][string]$Output = '',
     [string]$FfxDir = 'D:\KLBF-Lab\ffx-4.1.2',
@@ -160,6 +163,14 @@ if ($FsrX) {
     if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
     $set.VICTORY_FSR_DLL = $fsrDll; $set.KLBF_X_FSR = '1'; $set.KLBF_X_FSR_QUALITY = $FsrQuality
 }
+if ($FrameGen) {
+    # (KLBF Lab, 27/11) AMD's frame generation, fed by the FSR upscale: its DLLs beside the upscaler's
+    if (-not $FsrX -and -not $Fsr) { throw '-FrameGen needs -FsrX (Series X) or -Fsr (Series S): it is fed by the FSR upscale.' }
+    foreach ($dll in 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_framegeneration_dx12.dll') {
+        if (-not (Test-Path -LiteralPath (Join-Path $FfxDir $dll))) { throw "AMD frame generation needs $dll in $FfxDir" }
+    }
+    $set.KLBF_FRAMEGEN = '1'
+}
 if (-not $NoProbeRays -and -not $RayTracing) { $set.VICTORY_PROBE_RAYS = '1' }
 if ($RayTracing) { $set.VICTORY_BVH_BUILDER = '1' }
 if ($AutoStart) {
@@ -225,6 +236,7 @@ if ($Bench) {
 
 Write-Host ("KLBF Lab, Series X mode, {0} build, ray tracing {1}, memory hooks {2}" -f $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
 if ($FsrX) { Write-Host "AMD FSR (Series X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
+if ($FrameGen) { Write-Host 'AMD frame generation: on (two frames shown per real one; more latency at a low base frame rate)' }
 Write-Host "Cache: $Cache"
 Write-Host "Saves: $Data"
 # -Fsr (KLBF Lab): Series S mode, whose title upscales with FSR 4, the calls going to the PC's FSR DLL

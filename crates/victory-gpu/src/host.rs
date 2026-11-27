@@ -9955,6 +9955,9 @@ struct Presenter {
     /// present in the air, and the submission it last flew as (it is used
     /// again once that one has finished).
     ahead: Vec<(HostList, u64)>,
+    /// (KLBF Lab) Presenting through AMD's frame generation swap chain
+    /// (`crate::framegen`, `KLBF_FRAMEGEN=1`).
+    framegen: bool,
     hwnd: HWND,
     meter: Meter,
     composer: Option<crate::compose::Composer>,
@@ -10460,6 +10463,11 @@ impl Host {
                         frame,
                         "the swap chain's buffers were made again for another size or format"
                     );
+                    if p.framegen {
+                        // A frame generation context is made for one size: let go, made again at
+                        // the next prepare.
+                        crate::framegen::display(width, height, format.0);
+                    }
                     self.log_video_memory("right after the swap chain's buffers were made again");
                 }
                 Err(e) => {
@@ -10662,7 +10670,18 @@ impl Host {
             crate::replay::record::present(texture, state);
             let mut showing = crate::timeline::span("the host's Present");
             // (Fox port A) `VICTORY_PRESENT_SKIP`: 0 as before, 1 never, N every Nth without waiting.
-            let _ = crate::shell::present_maybe(DXGI_PRESENT_DO_NOT_WAIT.0, |flags| p.swap_chain.Present(0, DXGI_PRESENT(flags)));
+            // (KLBF Lab) Frame generation: the frame is interpolated from the one before it when an
+            // upscale prepared it; AMD's swap chain is given no do-not-wait flag.
+            if p.framegen {
+                crate::framegen::before_present();
+            }
+            let _ = crate::shell::present_maybe(DXGI_PRESENT_DO_NOT_WAIT.0, |flags| {
+                let flags = if p.framegen { 0 } else { flags };
+                p.swap_chain.Present(0, DXGI_PRESENT(flags))
+            });
+            if p.framegen {
+                crate::framegen::after_present(p.swap_chain.GetLastPresentCount().ok());
+            }
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]
             p.panel.frame(p.meter.line_due());
@@ -10706,9 +10725,23 @@ impl Host {
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
                 ..Default::default()
             };
-            let swap_chain = factory
-                .CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?
-                .cast::<IDXGISwapChain3>()?;
+            // (KLBF Lab) AMD's frame generation swap chain in place of the window's, when asked
+            // for (KLBF_FRAMEGEN=1); the window's own if the SDK makes none.
+            let made = if crate::framegen::on() {
+                crate::framegen::swap_chain(hwnd, &desc, &factory, &self.queue)
+            } else {
+                None
+            };
+            let framegen = made.is_some();
+            let swap_chain = match made {
+                Some(chain) => chain,
+                None => factory
+                    .CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?
+                    .cast::<IDXGISwapChain3>()?,
+            };
+            if framegen {
+                crate::framegen::display(width, height, format.0);
+            }
             let copy = self.new_list()?;
             copy.close();
             tracing::info!(width, height, format = format.0, "presenting to a window");
@@ -10721,6 +10754,7 @@ impl Host {
                 format,
                 copy,
                 ahead: Vec::new(),
+                framegen,
                 hwnd,
                 meter: Meter::new(),
                 composer: None,
