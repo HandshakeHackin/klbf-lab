@@ -174,7 +174,8 @@ function New-KlbfFont([float]$Size = 9, [string]$Style = 'Regular') {
 
 # KLBF Lab's colours, as on the game window's frame (victory-gpu shell.rs set_colors): violet border,
 # near-black caption, white text.
-$script:KlbfTheme = @{ back = 0x15101F; field = 0x251C36; violet = 0x7C3AED; text = 0xFFFFFF; soft = 0xC4B5FD }
+# Violet only for accents (the Play button, the header line); the rest in neutral greys.
+$script:KlbfTheme = @{ back = 0x15101F; field = 0x2A2A30; line = 0x55555E; violet = 0x7C3AED; text = 0xFFFFFF; soft = 0xB8B8C0 }
 
 function Get-KlbfColor([int]$Rgb) {
     [System.Drawing.Color]::FromArgb(($Rgb -shr 16) -band 255, ($Rgb -shr 8) -band 255, $Rgb -band 255)
@@ -214,7 +215,8 @@ function Set-KlbfTheme($Form) {
             if (-not ('KlbfDwm' -as [type])) {
                 Add-Type -Namespace '' -Name KlbfDwm -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr h, int a, ref int v, int n);'
             }
-            # DWMWA_BORDER_COLOR 34, CAPTION_COLOR 35, TEXT_COLOR 36: COLORREF (0x00BBGGRR)
+            # The game window's exact values (victory-gpu shell.rs set_colors): DWMWA_BORDER_COLOR 34 = 0x7C3AED,
+            # CAPTION_COLOR 35 = 0x15101F, TEXT_COLOR 36 = 0xFFFFFF, as COLORREF (0x00BBGGRR)
             foreach ($a in @(@(34, 0xED3A7C), @(35, 0x1F1015), @(36, 0xFFFFFF))) { $v = $a[1]; [void][KlbfDwm]::DwmSetWindowAttribute($sender.Handle, $a[0], [ref]$v, 4) }
         } catch {}
     })
@@ -222,7 +224,7 @@ function Set-KlbfTheme($Form) {
 
 function Set-KlbfButton($Button, [bool]$Main = $false) {
     $Button.FlatStyle = 'Flat'
-    $Button.FlatAppearance.BorderColor = Get-KlbfColor $script:KlbfTheme.violet
+    $Button.FlatAppearance.BorderColor = Get-KlbfColor $(if ($Main) { $script:KlbfTheme.violet } else { $script:KlbfTheme.line })
     $Button.BackColor = Get-KlbfColor $(if ($Main) { $script:KlbfTheme.violet } else { $script:KlbfTheme.field })
     $Button.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $Button.UseVisualStyleBackColor = $false
@@ -424,7 +426,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $label = { param($parent, $text, $x, $y, $w, $h = 20) $l = New-Object System.Windows.Forms.Label; $l.Text = $text; & $add $parent $l $x $y $w $h }
     $radio = { param($parent, $text, $x, $y, $w) $r = New-Object System.Windows.Forms.RadioButton; $r.Text = $text; & $add $parent $r $x $y $w 22 }
     $group = { param($parent, $text, $y, $h) $g = New-Object System.Windows.Forms.GroupBox; $g.Text = $text; $g.ForeColor = $soft; & $add $parent $g 6 $y 480 $h }
-    # Controls inside a group: white text (the group's caption is soft violet)
+    # Controls inside a group: white text (the group's caption is soft grey)
     $white = { param($ctl) $ctl.ForeColor = Get-KlbfColor $script:KlbfTheme.text; $ctl }
     $combo = { param($parent, $x, $y, $w)
         # Windows draws a drop-down list in its own light colours: black text on it
