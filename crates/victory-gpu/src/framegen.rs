@@ -462,8 +462,11 @@ pub fn swap_chain(
     if FAILED.load(Ordering::Relaxed) {
         return None;
     }
-    // SAFETY: the queue's own device.
-    if let Ok(device) = unsafe { queue.GetDevice::<ID3D12Device>() } {
+    let mut device: Option<ID3D12Device> = None;
+    // SAFETY: the queue's own device, into a slot of ours.
+    if unsafe { queue.GetDevice(&mut device) }.is_ok()
+        && let Some(device) = device
+    {
         fsr3_providers(api, device.as_raw());
     }
     let mut out = std::ptr::null_mut();
