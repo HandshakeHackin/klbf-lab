@@ -111,6 +111,8 @@ pub extern "system" fn CreateWindowExW(
     param: *const c_void,
 ) -> HWND {
     let main = main_window(parent, style, menu);
+    // (KLBF Lab) The game window always has its taskbar button.
+    let ex_style = if main { (ex_style | wm::WS_EX_APPWINDOW) & !wm::WS_EX_TOOLWINDOW } else { ex_style };
     let (x, y, width, height) = fit(parent, x, y, width, height);
     // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
@@ -121,6 +123,7 @@ pub extern "system" fn CreateWindowExW(
     hook(hwnd);
     if main {
         borderless_at_start(hwnd);
+        come_forward(hwnd);
     }
     hwnd
 }
@@ -141,6 +144,8 @@ pub extern "system" fn CreateWindowExA(
     param: *const c_void,
 ) -> HWND {
     let main = main_window(parent, style, menu);
+    // (KLBF Lab) The game window always has its taskbar button.
+    let ex_style = if main { (ex_style | wm::WS_EX_APPWINDOW) & !wm::WS_EX_TOOLWINDOW } else { ex_style };
     let (x, y, width, height) = fit(parent, x, y, width, height);
     // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
@@ -151,6 +156,7 @@ pub extern "system" fn CreateWindowExA(
     hook(hwnd);
     if main {
         borderless_at_start(hwnd);
+        come_forward(hwnd);
     }
     hwnd
 }
@@ -289,6 +295,68 @@ fn borderless_at_start(hwnd: HWND) {
     }
 }
 
+/// (KLBF Lab, 27/11) Once the game window shows, it comes in front with the focus: started by a hidden
+/// launcher, Windows lets a new process take the foreground only through the foreground's own input
+/// (attached for the call). Else the desktop kept the focus and Alt+F4 asked to shut Windows down.
+fn come_forward(hwnd: HWND) {
+    let at = hwnd as usize;
+    let _ = std::thread::Builder::new().name("klbf-forward".into()).spawn(move || {
+        let hwnd = at as HWND;
+        // SAFETY: plain window calls on our window (a stale handle fails).
+        unsafe {
+            for _ in 0..600 {
+                if wm::IsWindow(hwnd) == 0 {
+                    return;
+                }
+                if wm::IsWindowVisible(hwnd) != 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            to_front(hwnd);
+        }
+    });
+}
+
+/// `hwnd` in front with the focus, through the foreground window's thread input.
+///
+/// # Safety
+/// `hwnd` is a window handle (a stale one fails).
+unsafe fn to_front(hwnd: HWND) {
+    use windows_sys::Win32::System::Threading::AttachThreadInput;
+    // SAFETY: plain window calls; the threads' input is detached again.
+    unsafe {
+        let front = wm::GetForegroundWindow();
+        if front == hwnd {
+            return;
+        }
+        let theirs = wm::GetWindowThreadProcessId(front, std::ptr::null_mut());
+        let ours = wm::GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+        let attached = theirs != 0 && theirs != ours && AttachThreadInput(theirs, ours, 1) != 0;
+        wm::BringWindowToTop(hwnd);
+        wm::SetForegroundWindow(hwnd);
+        if attached {
+            AttachThreadInput(theirs, ours, 0);
+        }
+    }
+}
+
+/// The game window behind the backdrop: a click on the bars gives it the focus back.
+static BACKDROP_FOR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The backdrop never takes the focus; a click on it puts the game in front.
+extern "system" fn backdrop_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    const MA_NOACTIVATEANDEAT: LRESULT = 4;
+    if message == wm::WM_MOUSEACTIVATE {
+        let game = BACKDROP_FOR.load(Ordering::Relaxed) as HWND;
+        // SAFETY: our game window (a stale handle fails).
+        unsafe { to_front(game) };
+        return MA_NOACTIVATEANDEAT;
+    }
+    // SAFETY: the default handling of our window.
+    unsafe { wm::DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
 /// The largest rect of `aspect` (width, height) centred in `area`.
 fn letterbox(area: &RECT, (aw, ah): (i32, i32)) -> RECT {
     let (w, h) = (area.right - area.left, area.bottom - area.top);
@@ -312,7 +380,7 @@ fn backdrop(game: HWND, area: &RECT) -> HWND {
     unsafe {
         let instance = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
         let class = wm::WNDCLASSW {
-            lpfnWndProc: Some(wm::DefWindowProcW),
+            lpfnWndProc: Some(backdrop_proc),
             hInstance: instance,
             lpszClassName: CLASS,
             hbrBackground: GetStockObject(BLACK_BRUSH) as _,
@@ -323,7 +391,7 @@ fn backdrop(game: HWND, area: &RECT) -> HWND {
             wm::WS_EX_TOOLWINDOW | wm::WS_EX_NOACTIVATE,
             CLASS,
             w!("KLBF Lab"),
-            wm::WS_POPUP | wm::WS_VISIBLE | wm::WS_DISABLED,
+            wm::WS_POPUP | wm::WS_VISIBLE,
             area.left,
             area.top,
             area.right - area.left,
@@ -334,6 +402,7 @@ fn backdrop(game: HWND, area: &RECT) -> HWND {
             std::ptr::null(),
         );
         if !b.is_null() {
+            BACKDROP_FOR.store(game as usize, Ordering::Relaxed);
             wm::SetWindowPos(b, game, 0, 0, 0, 0, wm::SWP_NOMOVE | wm::SWP_NOSIZE | wm::SWP_NOACTIVATE);
         }
         b
@@ -355,6 +424,7 @@ fn toggle_borderless(hwnd: HWND) {
             wm::SetMenu(hwnd, was.menu as HMENU);
             let r = was.rect;
             wm::SetWindowPos(hwnd, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, wm::SWP_FRAMECHANGED | wm::SWP_NOZORDER | wm::SWP_NOOWNERZORDER);
+            to_front(hwnd);
             tracing::info!("KLBF Lab: back to the window");
             return;
         }
@@ -376,6 +446,7 @@ fn toggle_borderless(hwnd: HWND) {
         wm::SetWindowLongPtrW(hwnd, wm::GWL_STYLE, popup as isize);
         wm::SetWindowPos(hwnd, wm::HWND_TOP, fit.left, fit.top, fit.right - fit.left, fit.bottom - fit.top, wm::SWP_FRAMECHANGED | wm::SWP_NOOWNERZORDER);
         let backdrop = if bars { backdrop(hwnd, &screen) as usize } else { 0 };
+        to_front(hwnd);
         *state = Some(Borderless { style, rect, menu: menu as usize, backdrop });
         tracing::info!(left = fit.left, top = fit.top, right = fit.right, bottom = fit.bottom, "KLBF Lab: borderless fullscreen");
     }
@@ -590,6 +661,17 @@ pub(crate) fn module() -> HleModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (KLBF Lab) Only the title's first captioned top-level window is the game's (taskbar button, focus,
+    /// borderless); a child, a popup without caption or a later window is not.
+    #[test]
+    fn the_game_window_is_the_first_captioned_top_level_one() {
+        let null = std::ptr::null_mut();
+        assert!(!main_window(0x1234 as HWND, wm::WS_OVERLAPPEDWINDOW, null), "a child");
+        assert!(!main_window(null, wm::WS_POPUP, null), "no caption");
+        assert!(main_window(null, wm::WS_OVERLAPPEDWINDOW, null));
+        assert!(!main_window(null, wm::WS_OVERLAPPEDWINDOW, null), "once");
+    }
 
     /// (KLBF Lab) Borderless fullscreen keeps the picture's proportions: bars at the sides of a wide
     /// monitor (one left of the main one too), none on a 16:9 one.
