@@ -31,3 +31,18 @@ jobs:
           $log -split '`n' | Select-String 'test result:|\.\.\. FAILED'
           if ($status -ne 101 -or $log -notmatch '0 passed; 1 failed') { exit 1 }
           exit 0
+      - name: Confirm a one-byte extension changes the suffix and fails the test
+        shell: pwsh
+        run: |
+          $path = 'crates/victory-gpu/src/shadow.rs'
+          git restore -- $path
+          $src = [IO.File]::ReadAllText($path)
+          $before = 'for (lo, hi) in plan.iter() {'
+          if (([regex]::Matches($src, [regex]::Escape($before))).Count -ne 1) { throw 'Expected exactly one fixture loop' }
+          $after = $before + [Environment]::NewLine + '                let hi = if hi == end { hi + 1 } else { hi };'
+          [IO.File]::WriteAllText($path, $src.Replace($before, $after))
+          $log = cargo test -p victory-gpu --locked --lib sparse_page_merges_preserve_the_gap_and_unselected_tail 2>&1 | Out-String
+          $status = $LASTEXITCODE
+          $log -split [Environment]::NewLine | Select-String 'test result:|\.\.\. FAILED'
+          if ($status -ne 101 -or $log -notmatch '0 passed; 1 failed') { exit 1 }
+          exit 0
