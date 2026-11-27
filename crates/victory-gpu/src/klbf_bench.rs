@@ -160,6 +160,19 @@ fn ram_bytes() -> u64 {
     c.WorkingSetSize as u64
 }
 
+/// The process's highest working set so far, bytes.
+fn ram_peak_bytes() -> u64 {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut c = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+    // SAFETY: our own process and a sized structure.
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+    c.PeakWorkingSetSize as u64
+}
+
+/// The card's busy share at the run's start ([busy, all] microseconds), for the card's "card busy".
+static BUSY_BASE: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
 fn device_removed() -> bool {
     crate::descriptor::host::device_removed().is_some()
 }
@@ -242,6 +255,9 @@ pub(crate) fn on_present(black: bool, world_frame: u64) {
         Phase::Waiting => {
             if world_frame >= 1 {
                 let _ = START.set(now);
+                for i in 0..2 {
+                    BUSY_BASE[i].store(crate::host::CARD_BUSY_US[i].load(Ordering::Relaxed), Ordering::Relaxed);
+                }
                 r.phase = Phase::Running;
                 r.last = Some(now);
                 r.base = counters();
@@ -464,6 +480,8 @@ struct Card {
     from: String,
     player: String,
     blocked: u64,
+    /// "RAM peak 20.8 GB · VRAM 10.0 / 15.6 GB · card busy 57 %".
+    used: String,
     share: String,
     /// "KLBF-Bench-BM-v1-YYYYMMDD-HHMM-<serial>": the PNG, JSON and text files' name.
     file_stem: String,
@@ -511,6 +529,7 @@ fn finish(early: Option<&'static str>) {
         from: format!("{PROJECT} @ {SHA}{declared}"),
         player: player(),
         blocked: BLOCKED.load(Ordering::Relaxed),
+        used: String::new(),
         share: String::new(),
         file_stem: String::new(),
         png_name: String::new(),
@@ -531,6 +550,15 @@ fn finish(early: Option<&'static str>) {
         ram: ram_bytes(),
         why: early.unwrap_or("the full time reached"),
     };
+    let busy = [0, 1].map(|i| crate::host::CARD_BUSY_US[i].load(Ordering::Relaxed).saturating_sub(BUSY_BASE[i].load(Ordering::Relaxed)));
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    card.used = format!(
+        "RAM peak {:.1} GB \u{b7} VRAM {:.1} / {:.1} GB{}",
+        ram_peak_bytes() as f64 / GB,
+        vram.0 as f64 / GB,
+        vram.1 as f64 / GB,
+        if busy[1] > 0 { format!(" \u{b7} card busy {:.0} %", 100.0 * busy[0] as f64 / busy[1] as f64) } else { String::new() }
+    );
     let mut doc = result_json(&card, &extra, &window_fps(&ms));
     card.serial = serial(&doc);
     card.share = format!(
@@ -1718,6 +1746,7 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     for (i, line) in c.set.lines().iter().enumerate() {
         pen.text(ARIAL, 13.0, line, 180.0, 490.0 + 18.0 * i as f32, false, 290.0, ink);
     }
+    pen.text(ARIAL, 13.0, &c.used, 180.0, 490.0 + 18.0 * 4.0, false, 290.0, ink);
     // The average, big, and the four tiles.
     pen.text(IMPACT, 64.0, &format!("{:.1}", c.s.avg), 535.0, 380.0, false, 135.0, ink);
     let tiles = [format!("{:.1}", c.s.median), format!("{:.1}", c.s.low1), format!("{:.1}", c.s.max), format!("{:.0} %", c.s.pct12)];

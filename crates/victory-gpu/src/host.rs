@@ -659,6 +659,10 @@ static COPY_BACK: [std::sync::atomic::AtomicU64; 2] =
 /// newer sent; the next send ends that idle stretch.
 static CARD_CLOCK_US: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
 
+/// (KLBF Lab bench, 27/11) Microseconds the card was busy and microseconds in all, summed over the frame-rate
+/// lines, for the bench card's "card busy" figure.
+pub(crate) static CARD_BUSY_US: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
 /// Of the thread that holds the submission lock: the microseconds it has
 /// worked so far (preparing, copying back; not its waits for the card), and
 /// since when it works now ([`now_us`] plus one; 0: it does not).
@@ -736,6 +740,10 @@ fn card_clock_watch(clock: &'static CardClock) {
 /// frame's time.
 fn card_clock_line(frames: f64, ms: f64) {
     let [idle, behind, stood] = [0, 1, 2].map(|i| CARD_CLOCK_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
+    if ms > 0.0 {
+        CARD_BUSY_US[0].fetch_add(((ms - idle).max(0.0) * frames * 1000.0) as u64, Ordering::Relaxed);
+        CARD_BUSY_US[1].fetch_add((ms * frames * 1000.0) as u64, Ordering::Relaxed);
+    }
     tracing::info!(
         "the card's clock per frame: nothing of ours queued {idle:.1} ms (the card about {:.0}% busy by this count), \
          {behind:.1} ms of that while the submitting thread was working (the card idle behind us), the rest while the title \
