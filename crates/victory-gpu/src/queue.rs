@@ -1106,7 +1106,7 @@ fn show_planes(
         return;
     };
     let shown = host.present_planes(texture, state, overlay, what.frame);
-    klbf_bench_present(shown.unwrap_or(false));
+    klbf_bench_present(shown);
     #[cfg(feature = "diagnostics")]
     blinks(what.frame, what.resource as This, state, shown);
     #[cfg(not(feature = "diagnostics"))]
@@ -1117,7 +1117,7 @@ fn show_planes(
 /// loading screens, 1 on the first frame with 500 draws or more, then +1 per present; PR #78 by
 /// Vladimir-Human in PastiiJay/klbf-lab).
 #[cfg(windows)]
-fn klbf_bench_present(black: bool) {
+fn klbf_bench_present(black: Option<bool>) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST_DRAWN: AtomicU64 = AtomicU64::new(0);
     static WORLD_FRAME: AtomicU64 = AtomicU64::new(0);

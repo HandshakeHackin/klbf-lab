@@ -111,15 +111,32 @@ struct Run {
     last: Option<Instant>,
     /// Frame times since the start, ms.
     ms: Vec<f64>,
-    black: u64,
-    /// (27/11, #124) Whether a frame that was not black has been presented in the run: black frames count only
-    /// from then on, so the title's opening fade (seconds of black on slower cards) does not invalidate a run.
-    lit: bool,
+    black: BlackFrames,
     /// [`counters`] at the start.
     base: [u64; 4],
 }
 
-static RUN_STATE: Mutex<Run> = Mutex::new(Run { phase: Phase::Waiting, last: None, ms: Vec::new(), black: 0, lit: false, base: [0; 4] });
+#[derive(Default)]
+struct BlackFrames {
+    count: u64,
+    seen_lit: bool,
+}
+
+impl BlackFrames {
+    fn record(&mut self, black: Option<bool>) {
+        match black {
+            Some(true) => self.count += 1,
+            Some(false) if !self.seen_lit => {
+                // Only an observed lit frame confirms that the leading black frames were a fade.
+                self.count = 0;
+                self.seen_lit = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+static RUN_STATE: Mutex<Run> = Mutex::new(Run { phase: Phase::Waiting, last: None, ms: Vec::new(), black: BlackFrames { count: 0, seen_lit: false }, base: [0; 4] });
 /// Presses the lock kept from the game.
 static BLOCKED: AtomicU64 = AtomicU64::new(0);
 static CARD: OnceLock<(Card, Instant)> = OnceLock::new();
@@ -302,7 +319,7 @@ pub fn window_closed() {
 }
 
 /// Called from `queue.rs` (`present`) for every presented frame.
-pub(crate) fn on_present(black: bool, world_frame: u64) {
+pub(crate) fn on_present(black: Option<bool>, world_frame: u64) {
     if !active() {
         return;
     }
@@ -330,8 +347,7 @@ pub(crate) fn on_present(black: bool, world_frame: u64) {
         r.ms.push(now.duration_since(last).as_secs_f64() * 1000.0);
     }
     r.last = Some(now);
-    r.lit |= !black;
-    r.black += u64::from(black && r.lit);
+    r.black.record(black);
     drop(r);
     if START.get().is_some_and(|s| now.duration_since(*s) >= run_for()) {
         finish(None);
@@ -576,7 +592,7 @@ fn finish(early: Option<&'static str>) {
     }
     r.phase = Phase::Done;
     let ms = std::mem::take(&mut r.ms);
-    let (black, base) = (r.black, r.base);
+    let (black, base) = (r.black.count, r.base);
     drop(r);
     let elapsed = START.get().map_or(Duration::ZERO, Instant::elapsed);
     let early = early.filter(|_| elapsed < run_for());
@@ -1881,6 +1897,22 @@ mod tests {
         assert_eq!(title_text(None), "KLBF Lab Bench | waiting for the world");
         assert_eq!(title_text(Some(Duration::from_secs(133))), "KLBF Lab Bench | Time 2:13 / 5:00");
         assert_eq!(title_text(Some(Duration::from_secs(400))), "KLBF Lab Bench | Time 5:00 / 5:00");
+    }
+
+    #[test]
+    fn black_frames_require_a_measured_end_to_the_fade() {
+        let mut frames = BlackFrames::default();
+        for _ in 0..300 {
+            frames.record(Some(true));
+        }
+        frames.record(None);
+        assert_eq!(frames.count, 300);
+        frames.record(Some(false));
+        assert_eq!(frames.count, 0);
+        for probe in [Some(true), None, Some(false), Some(true)] {
+            frames.record(probe);
+        }
+        assert_eq!(frames.count, 2);
     }
 
     #[test]
