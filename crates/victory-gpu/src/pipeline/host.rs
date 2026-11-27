@@ -1238,8 +1238,7 @@ mod tests {
 
     #[test]
     fn bounds_only_reads_depth_without_enabling_writes() {
-        let mut g = GraphicsState::default();
-        g.depth_bounds = true;
+        let mut g = GraphicsState { depth_bounds: true, ..GraphicsState::default() };
         g.depth.DepthEnable = false.into();
         g.depth.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
         g.depth.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
@@ -1279,8 +1278,8 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
-        let vs = compile(&dxc, dir.path(), VS, "vs_6_5");
-        let ps = compile(&dxc, dir.path(), PS, "ps_6_5");
+        let vs = compile(&dxc, dir.path(), VS, "vs_6_0");
+        let ps = compile(&dxc, dir.path(), PS, "ps_6_0");
         let (root, root_blob) = root_signature(&host.device, &[], &[], false).unwrap();
 
         let mut g = GraphicsState::default();
