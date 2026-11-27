@@ -4,7 +4,8 @@
 //! image (`klbf_bench::save_screenshot`). With our launcher (`KLBF_LAUNCHER`) the caption says them at
 //! its right (`with_hints`). The keys come as window messages (`on_message`, from the title window's
 //! procedure), so a short tap is never missed between two frames. During a bench run none of them acts
-//! (F10 is the bench's: it stops the run).
+//! (F10 is the bench's: it stops the run). Started by another launcher (no `KLBF_LAUNCHER`,
+//! [`launcher`]), nobody restarts the game: F10 / F11 are the title's (F8 stays).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,6 +60,17 @@ fn action_of(message: u32, wparam: usize, lparam: isize) -> Option<Action> {
     }
 }
 
+/// Whether our launcher (play.ps1, `KLBF_LAUNCHER`) started the game: it acts on exit codes 10 and 11.
+pub fn launcher() -> bool {
+    static OURS: OnceLock<bool> = OnceLock::new();
+    *OURS.get_or_init(|| std::env::var_os("KLBF_LAUNCHER").is_some_and(|v| !v.is_empty()))
+}
+
+/// Whether `action` acts for this start: F10 / F11 only under our launcher.
+fn acts(action: Action, launcher: bool) -> bool {
+    launcher || action.exit_code().is_none()
+}
+
 static EXIT: OnceLock<fn(i32)> = OnceLock::new();
 static SHOT: AtomicBool = AtomicBool::new(false);
 
@@ -72,7 +84,7 @@ pub fn on_message(message: u32, wparam: usize, lparam: isize) -> bool {
     if crate::klbf_bench::active() {
         return false;
     }
-    let Some(action) = action_of(message, wparam, lparam) else { return false };
+    let Some(action) = action_of(message, wparam, lparam).filter(|&a| acts(a, launcher())) else { return false };
     match action.exit_code() {
         None => SHOT.store(true, Ordering::Relaxed),
         Some(code) => {
@@ -280,6 +292,13 @@ mod tests {
         assert_eq!(spaces(1290, 300, 5.0, 1600), Some(2));
         assert_eq!(spaces(700, 300, 0.0, 1600), None, "no font measured");
         assert_eq!(spaces(1500, 300, 5.0, 1600), None, "a caption longer than the room");
+    }
+
+    #[test]
+    fn f10_f11_only_under_our_launcher() {
+        assert!(acts(Action::Screenshot, false), "F8 always");
+        assert!(!acts(Action::Settings, false) && !acts(Action::Restart, false));
+        assert!(acts(Action::Settings, true) && acts(Action::Restart, true));
     }
 
     #[test]
