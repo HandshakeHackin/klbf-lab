@@ -10,11 +10,14 @@ permissions:
 
 jobs:
   focused-windows-test:
-    runs-on: windows-latest
-    timeout-minutes: 30
+    runs-on: windows-2022
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
-      - run: rustup toolchain install
+      - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Keep newest idle objects regression
         run: cargo test -p victory-gpu list::tests::tight_pool_trim_keeps_the_newest_lifo_entries --locked -- --exact
+      - name: Exact aperture selection regressions
+        run: cargo test -p victory-gpu --locked --features diagnostics --lib fullest_aperture
+      - name: Compile the diagnostic configuration
+        run: cargo build --profile diag -p victory --features diagnostics --locked
