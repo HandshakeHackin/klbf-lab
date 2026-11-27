@@ -544,10 +544,30 @@ function Set-KlbfTheme($Form) {
     $Form.add_Shown({
         param($sender)
         try {
-            if (-not ('KlbfShow' -as [type])) {
-                Add-Type -Namespace '' -Name KlbfShow -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'
+            # Every dialog (bench guide, Prepare now/Later, the shaders' progress...): centred on the chosen
+            # display; the settings window places itself (Manual).
+            if ($sender.StartPosition -eq 'CenterScreen') {
+                try {
+                    $scr = @(Get-KlbfScreens)
+                    if ($scr.Count) {
+                        $i = Get-KlbfDisplayIndex (Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')) $scr
+                        $sender.Location = New-Object System.Drawing.Point(@(Get-KlbfCentre $scr[$i].work @($sender.Width, $sender.Height)))
+                    }
+                } catch {}
             }
-            [void][KlbfShow]::ShowWindow($sender.Handle, 5) # SW_SHOW
+            if (-not ('KlbfShow2' -as [type])) {
+                Add-Type -Namespace '' -Name KlbfShow2 -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+'@
+            }
+            $h = $sender.Handle
+            [void][KlbfShow2]::ShowWindow($h, 1) # SW_SHOWNORMAL, a second time: the first one may have been hidden
+            # Topmost once then back (brought in front of everything, not kept there), then focused
+            [void][KlbfShow2]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x43) # HWND_TOPMOST, NOMOVE|NOSIZE|SHOWWINDOW
+            [void][KlbfShow2]::SetWindowPos($h, [IntPtr](-2), 0, 0, 0, 0, 0x43) # HWND_NOTOPMOST
+            [void][KlbfShow2]::SetForegroundWindow($h)
             $sender.Activate()
         } catch {}
     })
@@ -1018,23 +1038,25 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.savesNote = & $white (& $label $savesPage '' 6 436 480 60)
 
     # Quick tab: the last bench card, to copy as an image or as a short text
-    $g = & $group $quickPage 'Last benchmark' 4 420
+    # (27/11) Heights from the content, top to bottom (nothing overlaps whatever the number of shortcut lines)
+    $g = & $group $quickPage 'Last benchmark' 4 226
     $c.benchPic = New-Object System.Windows.Forms.PictureBox; $c.benchPic.SizeMode = 'Zoom'
-    [void](& $add $g $c.benchPic 12 22 456 292)
-    $c.benchInfo = & $white (& $label $g '' 12 320 456 20)
-    $c.copyImage = & $btn $g 'Copy image' 12 346 150
-    $c.copyText = & $btn $g 'Copy text' 172 346 150
-    $c.quickNote = & $white (& $label $g '' 12 382 456 30)
+    [void](& $add $g $c.benchPic 12 22 456 140)
+    $c.benchInfo = & $white (& $label $g '' 12 166 456 20)
+    $c.copyImage = & $btn $g 'Copy image' 12 188 140
+    $c.copyText = & $btn $g 'Copy text' 158 188 140
+    $c.quickNote = & $white (& $label $g '' 304 186 164 34)
     # (27/11) Shortcuts: every key, and the in-game actions here (the game is not running: Restart is Play
     # with the settings this window opened with; Settings is this window)
-    $g = & $group $quickPage 'Shortcuts' 428 150
+    $lines = @(Get-KlbfShortcuts)
+    $g = & $group $quickPage 'Shortcuts' 236 (20 + 18 * $lines.Count + 4 + 28 + 10)
     $y = 20
-    foreach ($line in (Get-KlbfShortcuts)) { [void](& $white (& $label $g $line 12 $y 460 18)); $y += 18 }
-    $c.quickRestart = & $btn $g 'Restart (F11)' 12 ($y + 4) 140
-    $c.quickSettings = & $btn $g 'Settings (F10)' 158 ($y + 4) 140
-    $c.shortcut = & $btn $g 'Create desktop shortcut' 304 ($y + 4) 164
+    foreach ($line in $lines) { [void](& $white (& $label $g $line 12 $y 460 18)); $y += 18 }
+    $c.quickRestart = & $btn $g 'Restart (F11)' 12 ($y + 4) 130
+    $c.quickSettings = & $btn $g 'Settings (F10)' 147 ($y + 4) 130
+    $c.shortcut = & $btn $g 'Create desktop shortcut' 282 ($y + 4) 186
     $c.tips.SetToolTip($c.quickRestart, 'Play with the settings this window opened with.')
-    $g = & $group $quickPage 'Screenshots (F8)' 582 82
+    $g = & $group $quickPage 'Screenshots (F8)' (236 + $g.Height + 6) 84
     $c.shots = New-Object System.Windows.Forms.TextBox; $c.shots.ReadOnly = $true
     $c.shots.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.shots.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     [void](& $white (& $label $g 'Folder:' 12 25 50))
@@ -1366,52 +1388,83 @@ function Update-KlbfPrepareProgress($State, [string]$Line) {
     elseif ($Line -match '^(\d+) shaders in the cache') { $State.done = [int]$Matches[1] }
 }
 
-# Runs `victory shaders <rpf>` with a progress window and Cancel (env already set by play.ps1): $true when
-# it finished. A bar when the exe says its total (fsrx3 and later), else a moving bar and the last line.
-function Show-KlbfPrepare([string]$Victory, [string]$Rpf) {
+# (27/11) Progress of `victory warm` from its lines: "... ; M to make, J processes" (the total), "N of M, S s"
+# every 100. @{ total; done } updated in place.
+function Update-KlbfWarmProgress($State, [string]$Line) {
+    if ($Line -match '; (\d+) to make, \d+ processes') { $State.total = [int]$Matches[1] }
+    elseif ($Line -match '^(\d+) of (\d+), \d+ s') { $State.done = [int]$Matches[1]; $State.total = [int]$Matches[2] }
+}
+
+# The overall bar (0..1000) from the phases' weights, the phase running and how far it is (0..1).
+function Get-KlbfPrepareBar([double[]]$Weights, [int]$Phase, [double]$Fraction) {
+    $sum = ($Weights | Measure-Object -Sum).Sum
+    if ($sum -le 0) { return 0 }
+    $before = if ($Phase -gt 0) { ($Weights[0..($Phase - 1)] | Measure-Object -Sum).Sum } else { 0 }
+    [int][math]::Round(1000 * ($before + $Weights[$Phase] * [math]::Min(1.0, [math]::Max(0.0, $Fraction))) / $sum)
+}
+
+# A process and every process it started (victory's workers), ended.
+function Stop-KlbfTree([int]$Id) {
+    foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$Id" -ErrorAction SilentlyContinue)) { Stop-KlbfTree $c.ProcessId }
+    Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+}
+
+# (27/11) The whole preparation in one window, from 0 to done, before Play or the bench: 1. translating the
+# shaders (`victory shaders <rpf>`, unless -NoTranslate), 2. making the pipelines of earlier runs
+# (`victory warm` and its workers, when $Book exists). One bar (translation 30 %, pipelines 70 %), the step
+# and its count under it; Cancel ends every worker. $true when the translation finished (or was not asked).
+function Show-KlbfPrepare([string]$Victory, [string]$Rpf, [string]$Book = '', [switch]$NoTranslate) {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-    $psi = New-Object System.Diagnostics.ProcessStartInfo($Victory)
-    $psi.Arguments = 'shaders "' + $Rpf + '"'
-    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $phases = @()
+    if (-not $NoTranslate) { $phases += @{ args = 'shaders "' + $Rpf + '"'; weight = 0.3; what = 'Translating shaders'; parse = ${function:Update-KlbfPrepareProgress} } }
+    if ($Book -and (Test-Path -LiteralPath $Book)) { $phases += @{ args = 'warm'; weight = 0.7; what = 'Preparing pipelines'; parse = ${function:Update-KlbfWarmProgress} } }
+    if (-not $phases) { return $true }
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'KLBF Lab'; Set-KlbfTheme $f; $f.FormBorderStyle = 'FixedDialog'
     $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.StartPosition = 'CenterScreen'
     $f.ClientSize = New-Object System.Drawing.Size(460, 140)
-    $head = New-Object System.Windows.Forms.Label; $head.Text = 'Preparing shaders (a few minutes, once per build)...'; $head.SetBounds(16, 12, 428, 20)
-    $bar = New-Object System.Windows.Forms.ProgressBar; $bar.SetBounds(16, 38, 428, 22); $bar.Style = 'Marquee'
+    $head = New-Object System.Windows.Forms.Label; $head.Text = 'Preparing the game (once per build; Play starts when it is done)...'; $head.SetBounds(16, 12, 428, 20)
+    $bar = New-Object System.Windows.Forms.ProgressBar; $bar.SetBounds(16, 38, 428, 22); $bar.Maximum = 1000
     $last = New-Object System.Windows.Forms.Label; $last.SetBounds(16, 66, 428, 20)
     $cancel = New-Object System.Windows.Forms.Button; $cancel.Text = 'Cancel'; $cancel.SetBounds(344, 98, 100, 30)
     Set-KlbfButton $cancel
     $f.Controls.AddRange(@($head, $bar, $last, $cancel))
-    $st = @{ total = 0; done = 0; read = $null; ok = $false; p = $null }
-    $fProgress = ${function:Update-KlbfPrepareProgress}
-    $timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 200
-    $timer.add_Tick({
-        while ($st.read -and $st.read.IsCompleted) {
-            $line = $st.read.Result
-            if ($null -eq $line) { $st.read = $null; break }
-            & $fProgress $st $line
-            $last.Text = $line
-            $st.read = $st.p.StandardOutput.ReadLineAsync()
-        }
-        if ($st.total -gt 0) {
-            $bar.Style = 'Continuous'; $bar.Maximum = $st.total; $bar.Value = [math]::Min($st.done, $st.total)
-            $last.Text = '{0} of {1} shaders' -f $st.done, $st.total
-        }
-        if (-not $st.read -and $st.p.HasExited) {
-            $st.ok = $st.p.ExitCode -eq 0
-            $f.Close()
-        }
-    }.GetNewClosure())
-    $cancel.add_Click({ try { $st.p.Kill() } catch {}; $f.Close() }.GetNewClosure())
-    $f.add_Shown({
+    $st = @{ i = 0; total = 0; done = 0; read = $null; ok = $true; p = $null; cancelled = $false }
+    $weights = [double[]]@($phases | ForEach-Object { $_.weight })
+    $fBar = ${function:Get-KlbfPrepareBar}; $fStop = ${function:Stop-KlbfTree}
+    $start = {
+        $ph = $phases[$st.i]
+        $psi = New-Object System.Diagnostics.ProcessStartInfo($Victory)
+        $psi.Arguments = $ph.args
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $st.total = 0; $st.done = 0
         $st.p = [System.Diagnostics.Process]::Start($psi)
         $null = $st.p.StandardError.ReadToEndAsync()
         $st.read = $st.p.StandardOutput.ReadLineAsync()
-        $timer.Start()
+        $last.Text = "$($ph.what)..."
+    }.GetNewClosure()
+    $timer = New-Object System.Windows.Forms.Timer; $timer.Interval = 200
+    $timer.add_Tick({
+        $ph = $phases[$st.i]
+        while ($st.read -and $st.read.IsCompleted) {
+            $line = $st.read.Result
+            if ($null -eq $line) { $st.read = $null; break }
+            & $ph.parse $st $line
+            $st.read = $st.p.StandardOutput.ReadLineAsync()
+        }
+        $frac = if ($st.total -gt 0) { $st.done / $st.total } else { 0 }
+        $bar.Value = & $fBar $weights $st.i $frac
+        if ($st.total -gt 0) { $last.Text = '{0}: {1} of {2}' -f $ph.what, $st.done, $st.total }
+        if (-not $st.read -and $st.p.HasExited) {
+            # The translation must succeed; pipelines left over are made while playing.
+            if ($ph.args -ne 'warm' -and $st.p.ExitCode -ne 0) { $st.ok = $false }
+            if ($st.ok -and $st.i + 1 -lt $phases.Count) { $st.i++; & $start } else { $bar.Value = 1000; $f.Close() }
+        }
     }.GetNewClosure())
-    $f.add_FormClosing({ $timer.Stop(); if ($st.p -and -not $st.p.HasExited) { try { $st.p.Kill() } catch {} } }.GetNewClosure())
+    $cancel.add_Click({ $st.cancelled = $true; $st.ok = $false; $f.Close() }.GetNewClosure())
+    $f.add_Shown({ & $start; $timer.Start() }.GetNewClosure())
+    $f.add_FormClosing({ $timer.Stop(); if ($st.p -and -not $st.p.HasExited) { & $fStop $st.p.Id } }.GetNewClosure())
     [void]$f.ShowDialog()
     $st.ok
 }
