@@ -6,7 +6,21 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
-## Next
+## v26.11.4 (27 Nov 2026)
+
+Thanks to the testers whose reports led to this release: Neffffffff, Domi, INGLIP, deydey103, Solar, pacoravan,
+Dominic, MalarkZA and Aphantasiac.
+
+### Controls
+- Keyboard and mouse: a click in the game takes the mouse for the camera (F9 or leaving the window lets it go);
+  keys by position, usual PC defaults, works beside a controller. New Controls tab in Settings: on/off,
+  sensitivity, invert, keys. Ideas from LooperSalty's AnyXboxX and eikkapine's keyboard and mouse controls.
+- Rumble stops when the game loses focus or closes, and never runs more than 1 s without a refresh.
+  `KLBF_RUMBLE=0` turns it off.
+
+### Picture
+- Faces: no pipeline skipped for good while shaders are still compiling.
+- Trees and plants that flicker: `KLBF_TREE_FIX=1` (off by default) gives each list a larger budget.
 
 ### Game window
 - The game window takes the keyboard focus at the start: F8, F10, F11 and Alt+F4 work without a click
@@ -28,6 +42,9 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
   written to `logs\launcher-error.txt`
   (PowerShell version, execution policy, language mode, files still marked as downloaded).
 - The pipelines step runs only when runs wrote down new pipelines: the bench no longer prepares again.
+- Updates: the window reopens after an update, and the backup stays inside the build folder.
+- The settings window opens even when Windows blocks its helpers (screens, Add-Type).
+
 ## v26.11.3 (27 Nov 2026)
 
 - The launcher starts from "KLBF Lab.cmd" instead of "KLBF Lab.vbs": Windows Defender's cloud check flagged the .vbs (a script starting a hidden PowerShell) as a trojan, a false positive. An existing desktop shortcut is repaired automatically.
