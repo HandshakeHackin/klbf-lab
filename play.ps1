@@ -73,6 +73,19 @@ if (-not $Victory) { $Victory = Join-Path $root "target\$Build\victory.exe" }
 if (-not (Test-Path -LiteralPath $Victory -PathType Leaf)) {
     throw "No $Victory. Build it first: cargo build --profile diag -p victory --features diagnostics --locked"
 }
+# The exe asks for the DirectX 12 Agility SDK 1.620.2 in D3D12\ beside it (Windows' own runtime is older).
+# A source build has no such folder: fetched once from Microsoft's NuGet package (27/11, #82).
+$agility = Join-Path (Split-Path -Parent $Victory) 'D3D12'
+if (-not (Test-Path -LiteralPath (Join-Path $agility 'D3D12Core.dll'))) {
+    Write-Host 'Fetching the DirectX 12 Agility SDK 1.620.2 (Microsoft NuGet, once)...'
+    $pkg = Join-Path $env:TEMP 'klbf-agility-1.620.2.zip'
+    $tmp = Join-Path $env:TEMP 'klbf-agility-1.620.2'
+    Invoke-WebRequest -UseBasicParsing 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.620.2' -OutFile $pkg
+    Expand-Archive -LiteralPath $pkg -DestinationPath $tmp -Force
+    New-Item -ItemType Directory -Force -Path $agility | Out-Null
+    Copy-Item (Join-Path $tmp 'build\native\bin\x64\D3D12Core.dll'), (Join-Path $tmp 'build\native\bin\x64\d3d12SDKLayers.dll') $agility
+    Remove-Item -Recurse -Force $pkg, $tmp
+}
 if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
 if (-not $Data) { $Data = Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }
 New-Item -ItemType Directory -Force -Path $Cache, $Data | Out-Null
