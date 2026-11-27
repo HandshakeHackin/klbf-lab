@@ -97,6 +97,16 @@ fn fullest_aperture(segments: Vec<Segment>) -> Option<Segment> {
     })
 }
 
+/// Applies the on/off threshold to a successful segment sample. A missing
+/// sample keeps the last state: a transient graphics-kernel query failure
+/// must not silently release the pressure back-off.
+fn tight_from_sample(was_tight: bool, fullest: Option<Segment>, percent: u64) -> bool {
+    let threshold = if was_tight { percent.saturating_sub(10) } else { percent };
+    fullest.map_or(was_tight, |s| {
+        u128::from(s.resident) * 100 > u128::from(s.limit) * u128::from(threshold)
+    })
+}
+
 /// Whether an aperture segment holds more than [`TIGHT_PERCENT`] of its
 /// limit, as of the last look (one every [`LOOK_MS`], by whichever thread
 /// asks first). Said in the log when it starts and stops.
@@ -114,8 +124,9 @@ pub(crate) fn tight(adapter: &IDXGIAdapter3) -> bool {
     {
         LOOKED.store(now, Ordering::Relaxed);
         let fullest = fullest_aperture(segments(adapter));
-        let percent = if TIGHT.load(Ordering::Relaxed) { percent.saturating_sub(10) } else { percent };
-        let tight = fullest.is_some_and(|s| u128::from(s.resident) * 100 > u128::from(s.limit) * u128::from(percent));
+        let was_tight = TIGHT.load(Ordering::Relaxed);
+        let threshold = if was_tight { percent.saturating_sub(10) } else { percent };
+        let tight = tight_from_sample(was_tight, fullest, percent);
         if TIGHT.swap(tight, Ordering::Relaxed) != tight
             && let Some(s) = fullest
         {
@@ -124,7 +135,7 @@ pub(crate) fn tight(adapter: &IDXGIAdapter3) -> bool {
                 segment = s.id,
                 resident_mb = s.resident >> 20,
                 limit_mb = s.limit >> 20,
-                "an aperture segment of the card's memory {} {percent}% of its limit: flights sent ahead {}",
+                "an aperture segment of the card's memory {} {threshold}% of its limit: flights sent ahead {}",
                 if tight { "passed" } else { "fell below" },
                 if tight { "land as they are sent and idle host lists go" } else { "go on as before" }
             );
@@ -153,5 +164,18 @@ mod tests {
         let local = Segment { id: 1, aperture: false, limit: 1, resident: 1 };
         let unknown = Segment { id: 2, aperture: true, limit: 0, resident: 1 };
         assert!(fullest_aperture(vec![local, unknown]).is_none());
+    }
+
+    #[test]
+    fn tight_state_survives_a_missing_sample_and_uses_hysteresis() {
+        let at = |resident| {
+            Some(Segment { id: 1, aperture: true, limit: 100, resident })
+        };
+        assert!(!tight_from_sample(false, None, 80));
+        assert!(tight_from_sample(true, None, 80));
+        assert!(!tight_from_sample(false, at(80), 80));
+        assert!(tight_from_sample(false, at(81), 80));
+        assert!(!tight_from_sample(true, at(70), 80));
+        assert!(tight_from_sample(true, at(71), 80));
     }
 }
