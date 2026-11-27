@@ -2,7 +2,7 @@
 # title, and no third-party binary (the launcher fetches Microsoft's Agility SDK and AMD's FSR DLLs from
 # their official sources on the first start, Install-KlbfComponent in launcher-menu.ps1).
 #
-#   .\scripts\package-release.ps1 -Tag v1.0.0 -Victory target\release\victory.exe -Out dist
+#   .\scripts\package-release.ps1 -Tag v1.0.0 -Victory target\diag\victory.exe -Out dist
 #
 # The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.vbs", klbf-lab.ico, README.txt, LICENSE and
 # SHA256SUMS.txt, at its root (Windows' "Extract All" makes the folder).
