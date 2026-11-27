@@ -256,7 +256,10 @@ if ($Bench) {
 }
 if ($benchLabel) { $set.KLBF_BENCH_SAVE = $benchLabel }
 # (27/11) F8's screenshots: the folder chosen in Settings, else Pictures\KLBF Lab
-$set.KLBF_SHOTS_DIR = Get-KlbfShotsDir (Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json'))
+$saved = Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')
+$set.KLBF_SHOTS_DIR = Get-KlbfShotsDir $saved
+# (27/11) The Display chosen in Settings: the game window opens centred on that monitor (else the main one)
+if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 if ($PrintEnv) {

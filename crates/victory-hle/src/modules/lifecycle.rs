@@ -158,22 +158,51 @@ pub extern "system" fn CreateWindowExA(
 /// chain stretches). `VICTORY_WINDOW_MAX=WIDTHxHEIGHT` applies a smaller
 /// limit without changing the title's render targets.
 /// `reserve`: the height our menu bar will add below it (kept free of the work area).
+/// (KLBF Lab, 27/11) `KLBF_WINDOW_MONITOR=<n>` (the launcher's Display, 0 = the first monitor Windows
+/// lists): that monitor's work area instead of the primary's, the window always centred on it.
 fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32, reserve: i32) -> (i32, i32, i32, i32) {
     let mut area = RECT::default();
+    let chosen = chosen_monitor();
     // SAFETY: `area` receives the primary monitor's work area.
-    let known =
-        unsafe { wm::SystemParametersInfoW(wm::SPI_GETWORKAREA, 0, (&raw mut area).cast(), 0) };
+    let known = match chosen {
+        Some(a) => {
+            area = a;
+            1
+        }
+        None => unsafe { wm::SystemParametersInfoW(wm::SPI_GETWORKAREA, 0, (&raw mut area).cast(), 0) },
+    };
     area.bottom -= reserve;
     let limit = window_limit();
     let fitted = fit_with_limit(&area, width, height, limit);
-    if !parent.is_null() || known == 0 || fitted == (width, height) {
+    if !parent.is_null() || known == 0 || width <= 0 || height <= 0 || (fitted == (width, height) && chosen.is_none()) {
         return (x, y, width, height);
     }
     tracing::info!(width, height, to = ?fitted, ?limit, "title window fitted to the screen");
-    let (w, h) = fitted;
-    let left = area.left + (area.right - area.left - w) / 2;
-    let top = area.top + (area.bottom - area.top - h) / 2;
-    (left, top, w, h)
+    centred(&area, fitted)
+}
+
+/// A window of `size` centred on `area` (left, top, width, height).
+fn centred(area: &RECT, (w, h): (i32, i32)) -> (i32, i32, i32, i32) {
+    (area.left + (area.right - area.left - w) / 2, area.top + (area.bottom - area.top - h) / 2, w, h)
+}
+
+/// The work area of the monitor `KLBF_WINDOW_MONITOR` names, in the order Windows lists them; `None`
+/// when unset or gone.
+fn chosen_monitor() -> Option<RECT> {
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+    let n: usize = std::env::var("KLBF_WINDOW_MONITOR").ok()?.trim().parse().ok()?;
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> i32 {
+        // SAFETY: `list` is the vector below, alive during the call.
+        unsafe { (*(list as *mut Vec<HMONITOR>)).push(m) };
+        1
+    }
+    let mut list: Vec<HMONITOR> = Vec::new();
+    // SAFETY: the callback only pushes into `list`; then a plain query.
+    unsafe {
+        EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &raw mut list as LPARAM);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..std::mem::zeroed() };
+        (GetMonitorInfoW(*list.get(n)?, &mut info) != 0).then_some(info.rcWork)
+    }
 }
 
 fn parse_window_limit(value: &str) -> Option<(i32, i32)> {
@@ -490,6 +519,23 @@ pub(crate) fn module() -> HleModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (KLBF Lab) A 3840x2160 window on a 2560x1440 monitor left of the primary (negative x), and on a
+    /// 5120x1440 primary: shrunk to fit, the same proportions, centred on it.
+    #[test]
+    fn a_window_is_centred_on_the_chosen_monitor() {
+        let left = RECT { left: -2560, top: 0, right: 0, bottom: 1400 };
+        let (w, h) = fit_with_limit(&left, 3840, 2160, None);
+        assert!(w <= 2560 && h <= 1400 && (w * 9 - h * 16).abs() <= 16, "{w}x{h}");
+        let (x, y, ..) = centred(&left, (w, h));
+        assert_eq!((x, y), (-2560 + (2560 - w) / 2, (1400 - h) / 2));
+        assert!(x >= -2560 && x + w <= 0, "inside the left monitor");
+        let wide = RECT { left: 0, top: 0, right: 5120, bottom: 1400 };
+        let (w, h) = fit_with_limit(&wide, 3840, 2160, None);
+        let (x, ..) = centred(&wide, (w, h));
+        assert_eq!(x, (5120 - w) / 2);
+        assert_eq!(centred(&wide, (800, 600)), (2160, 400, 800, 600), "a window that fits: centred, its size kept");
+    }
 
     extern "system" fn noop(_: u8, _: *mut c_void) {}
 

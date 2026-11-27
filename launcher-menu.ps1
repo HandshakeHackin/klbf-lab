@@ -21,7 +21,7 @@ function Get-KlbfLauncherDir {
 # The owner's setting: Profile X, FSR 4 Performance, 3840x2160, frame generation, hooks and texture trim
 # (= -Tout -FsrQuality performance -Output 3840x2160).
 function Get-KlbfDefaults {
-    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = '' }
+    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1 }
 }
 
 # Any object (a parsed JSON) over the defaults: unknown or invalid values keep the default.
@@ -36,6 +36,7 @@ function ConvertTo-KlbfChoice($o) {
     if ($o.advanced -is [bool]) { $c.advanced = $o.advanced }
     if ($o.game -is [string]) { $c.game = $o.game }
     if ($o.shotsDir -is [string]) { $c.shotsDir = $o.shotsDir }
+    if (($o.display -is [int] -or $o.display -is [long]) -and $o.display -ge -1 -and $o.display -lt 16) { $c.display = [int]$o.display }
     $c
 }
 
@@ -163,10 +164,9 @@ function Get-KlbfSwitches($Choice) {
     $s
 }
 
-# (27/11) The PRIMARY monitor's real mode (DPI-independent), where the game window opens; the first video
-# controller's mode was another monitor's on a two-screen PC. $Screens (tests): @{ primary; device; mode }.
-function Get-KlbfScreenSize($Screens = $null) {
-    if ($null -eq $Screens) {
+# (27/11) The monitors in the order Windows lists them (KLBF_WINDOW_MONITOR's numbers): @{ primary; device;
+# mode (the real mode, DPI-independent); bounds; work = x, y, width, height of the work area }.
+function Get-KlbfScreens {
         try {
             Add-Type -AssemblyName System.Windows.Forms
             if (-not ('KlbfDisplay' -as [type])) {
@@ -191,14 +191,43 @@ public static class KlbfDisplay {
 }
 '@
             }
-            $Screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
-                @{ primary = $_.Primary; device = $_.DeviceName; mode = [KlbfDisplay]::Mode($_.DeviceName); bounds = '{0}x{1}' -f $_.Bounds.Width, $_.Bounds.Height }
+            @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+                $w = $_.WorkingArea
+                @{ primary = $_.Primary; device = $_.DeviceName; mode = [KlbfDisplay]::Mode($_.DeviceName); bounds = '{0}x{1}' -f $_.Bounds.Width, $_.Bounds.Height; work = @($w.X, $w.Y, $w.Width, $w.Height) }
             })
-        } catch { $Screens = @() }
-    }
+        } catch { @() }
+}
+
+# The PRIMARY monitor's real mode, where the game window opens by default; the first video controller's
+# mode was another monitor's on a two-screen PC. $Screens (tests): as Get-KlbfScreens gives them.
+function Get-KlbfScreenSize($Screens = $null) {
+    if ($null -eq $Screens) { $Screens = Get-KlbfScreens }
     $p = @($Screens | Where-Object { $_.primary }) + @($Screens) | Select-Object -First 1
     if (-not $p) { return '1920x1080' }
     if ($p.mode) { $p.mode } else { $p.bounds }
+}
+
+# (27/11) Display: "Screen 1 (main) 5120x1440", "Screen 2 2560x1440" (no device names).
+function Get-KlbfDisplayNames($Screens) {
+    $i = 0
+    foreach ($m in @($Screens)) { $i++; 'Screen {0}{1} {2}' -f $i, $(if ($m.primary) { ' (main)' } else { '' }), $(if ($m.mode) { $m.mode } else { $m.bounds }) }
+}
+
+# The monitor a choice's display names (-1 or one that is gone: the main one), as an index in $Screens.
+function Get-KlbfDisplayIndex($Choice, $Screens) {
+    $list = @($Screens)
+    $d = if ($Choice) { [int]$Choice.display } else { -1 }
+    if ($d -ge 0 -and $d -lt $list.Count) { return $d }
+    for ($i = 0; $i -lt $list.Count; $i++) { if ($list[$i].primary) { return $i } }
+    0
+}
+
+# The top-left corner that centres a $Size (width, height) window on a work area (x, y, width, height),
+# kept inside it when larger. Negative coordinates (a monitor left of the main one) are fine.
+function Get-KlbfCentre($Work, $Size) {
+    $x = $Work[0] + [math]::Max(0, [math]::Floor(($Work[2] - $Size[0]) / 2))
+    $y = $Work[1] + [math]::Max(0, [math]::Floor(($Work[3] - $Size[1]) / 2))
+    @([int]$x, [int]$y)
 }
 
 function Test-KlbfShift {
@@ -681,7 +710,8 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $f.Text = 'KLBF Lab Settings'
     Set-KlbfTheme $f
     $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
-    $f.StartPosition = 'CenterScreen'
+    # (27/11) Centred on the chosen display (moved when Display changes), not on the main one
+    $f.StartPosition = 'Manual'
     $f.ClientSize = New-Object System.Drawing.Size(520, 906)
     $soft = Get-KlbfColor $script:KlbfTheme.soft
     $back = Get-KlbfColor $script:KlbfTheme.back
@@ -782,7 +812,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $g = & $group $page 'Output resolution' 426 78
     $c.output = & $combo $g 12 22 140
     foreach ($m in $script:KlbfModes) { [void]$c.output.Items.Add($m) }
-    $c.screen = & $white (& $label $g "Your screen: $Screen" 170 25 304)
+    $c.screen = & $white (& $label $g 'Display:' 170 25 56)
+    $c.screens = if ($null -ne $Info.screens) { @($Info.screens) } else { @(Get-KlbfScreens) }
+    $c.display = & $combo $g 228 22 246
+    foreach ($n in (Get-KlbfDisplayNames $c.screens)) { [void]$c.display.Items.Add($n) }
+    $c.primaryIndex = Get-KlbfDisplayIndex $null $c.screens
+    if ($c.display.Items.Count) { $c.display.SelectedIndex = Get-KlbfDisplayIndex $Choice $c.screens }
+    $c.tips.SetToolTip($c.display, 'The monitor the game window (and this window) opens on, centred.')
     $c.outputRec = if ($tested -and $rec.profile -eq 'X') { "Recommended for your hardware: $($rec.output)" } else { '' }
     $c.outputNote = & $white (& $label $g '' 12 52 460)
 
@@ -903,6 +939,9 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle, $c.fg, $c.adv) + @($c.presets.Values)) { $r.add_CheckedChanged($markIt) }
     $c.output.add_SelectedIndexChanged($markIt)
     $c.output.add_SelectedIndexChanged($update)
+    $fCentre = ${function:Get-KlbfCentre}
+    $c.place = { if ($c.display.SelectedIndex -ge 0) { $c.form.Location = New-Object System.Drawing.Point(@(& $fCentre $c.screens[$c.display.SelectedIndex].work @($c.form.Width, $c.form.Height))) } }.GetNewClosure()
+    $c.display.add_SelectedIndexChanged({ & $c.place; & $markIt }.GetNewClosure())
     $c.saved.add_SelectedIndexChanged({ $c.save.Enabled = $null -ne $c.saved.SelectedItem }.GetNewClosure())
     $c.load.add_Click({
         if (-not $c.saved.SelectedItem) { return }
@@ -1032,6 +1071,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         try { & $fClear $c.info.cache; $c.cacheGB = 0; $c.clearCache.Text = 'Clear shader cache (0 GB)'; $c.clearCache.Enabled = $false; $c.status.Text = 'Shaders: not prepared yet (Play offers it).' }
         catch { $c.status.Text = "$_" }
     }.GetNewClosure())
+    if ($c.screens.Count) { & $c.place } else { $f.StartPosition = 'CenterScreen' }
     @{ form = $f; c = $c }
 }
 
@@ -1097,6 +1137,7 @@ function Get-KlbfFormChoice($c) {
         advanced = [bool]$c.adv.Checked
         game = [string]$c.gamePath
         shotsDir = [string]$c.shotsDir
+        display = $(if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -eq $c.primaryIndex) { -1 } else { [int]$c.display.SelectedIndex })
     })
 }
 
