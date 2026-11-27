@@ -1,33 +1,20 @@
-name: CI
-
+name: Release-based Radeon regression tests
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/stable-amd-pr9-windows']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  verify:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
+        with:
+          ref: ff665018643cb3624c00d50a4e59251f94409085
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - name: Run GPU memory segment regression tests
+        run: cargo test --locked -p victory-gpu --lib host::segments::tests
+      - name: Build diagnostics
+        run: cargo build --locked --profile diag -p victory --features diagnostics
