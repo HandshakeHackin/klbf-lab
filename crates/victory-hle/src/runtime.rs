@@ -281,13 +281,18 @@ pub fn use_console_timers() {
 /// `VICTORY_PROCESS_PRIORITY=normal`: as it was started.
 #[cfg(windows)]
 fn ahead_of_other_programs() {
-    use windows_sys::Win32::System::Threading::{ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass};
+    use windows_sys::Win32::System::Threading::{
+        ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, HIGH_PRIORITY_CLASS, SetPriorityClass,
+    };
     if std::env::var_os("VICTORY_PROCESS_PRIORITY").is_some_and(|v| v == "normal" || v == "0") {
         return;
     }
+    // (`KLBF_PRIORITY=1`, off, after eikkapine/victory-amd) high instead of above normal.
+    let high = std::env::var_os("KLBF_PRIORITY").is_some_and(|v| v == "1");
+    let class = if high { HIGH_PRIORITY_CLASS } else { ABOVE_NORMAL_PRIORITY_CLASS };
     // SAFETY: a plain process setting.
-    let set = unsafe { SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) } != 0;
-    tracing::info!(set, "the process runs above normal priority (VICTORY_PROCESS_PRIORITY=normal: not)");
+    let set = unsafe { SetPriorityClass(GetCurrentProcess(), class) } != 0;
+    tracing::info!(set, high, "the process runs above normal priority (VICTORY_PROCESS_PRIORITY=normal: not; KLBF_PRIORITY=1: high)");
 }
 
 #[cfg(test)]

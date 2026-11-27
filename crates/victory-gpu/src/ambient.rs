@@ -30,6 +30,12 @@
 //!
 //! Unset, `KLBF_AMBIENT_EST=1` has all of the estimate (cool_fox's default).
 //!
+//! `KLBF_NIGHT_LIGHTS=1` (off): unset, 0.8 of the estimate, the air bounded at 1.5 and the
+//! title's own resolved light kept where it is above the estimate (bounded by `most` times
+//! it, magenta leftovers dropped), so the light of lamps and headlights carried by the
+//! frame's surfaces reaches what is around them at night. The settings and the kept
+//! leftover are those of eikkapine/victory-amd (GPL-3.0), rewritten here.
+//!
 //! `VICTORY_AMBIENT_SHADE=<strength>,<radius in metres>` sets the creases.
 //!
 //! The air of a room is lit by the same probes: without rays they hold the
@@ -98,6 +104,7 @@ fn set() -> Set {
     static SET: OnceLock<Set> = OnceLock::new();
     *SET.get_or_init(|| match std::env::var("VICTORY_AMBIENT") {
         Ok(set) => parse(&set),
+        Err(_) if night_lights() => Set::Estimate(0.8),
         Err(_) if est() => Set::Estimate(1.0),
         Err(_) => Set::Off,
     })
@@ -108,6 +115,12 @@ fn set() -> Set {
 /// (DoubleGhosty/cool_fox f4164f86, calibrated at 1 in 64b89673).
 fn est() -> bool {
     std::env::var_os("KLBF_AMBIENT_EST").is_some_and(|v| v == "1")
+}
+
+/// `KLBF_NIGHT_LIGHTS=1` (off): see the module's notes (after eikkapine/victory-amd).
+pub(crate) fn night_lights() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_NIGHT_LIGHTS").is_some_and(|v| v == "1"))
 }
 
 /// Whether the stand-in is on: set, and the title's rays find nothing.
@@ -121,7 +134,8 @@ fn air() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_AIR").unwrap_or_default();
-        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(0.0)
+        let night = if night_lights() { 1.5 } else { 0.0 };
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(night)
     })
 }
 
@@ -150,7 +164,7 @@ const SOURCE: &str = r#"
 cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
-    float follow; float most; float air; float unused;
+    float follow; float most; float air; float own;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -334,6 +348,16 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
     // Willy/Neptune-VE leftover=off: do not blend with uninitialized resolve memory (fixes magenta/purple skin).
+    if (own > 0.0) {
+        // (KLBF_NIGHT_LIGHTS, after eikkapine/victory-amd) The title's own light where it is
+        // brighter (lamps, headlights), up to `most` times the estimate; magenta (green far
+        // under red and blue) is old probe memory, not light.
+        float3 was = unpack(light[p]);
+        if (was.g < 0.5 * min(was.r, was.b) && max(was.r, was.b) > 0.02) was = 0.0;
+        float top = max(dot(found, LUMA) * most, 1e-6);
+        was *= min(1.0, top / max(dot(was, LUMA), 1e-6));
+        found = max(found, was);
+    }
     light[p] = pack(found);
 }
 #endif
@@ -469,6 +493,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[8] = 0.04f32.to_bits();
     words[9] = 4.0f32.to_bits();
     words[10] = air().to_bits();
+    words[11] = if night_lights() { 1.0f32 } else { 0.0 }.to_bits();
     let l = &list.list;
     // SAFETY: an open list with the heap of the views set; the title's
     // program has just used both views, so their textures are in the states

@@ -225,6 +225,31 @@ pub(crate) fn not_resident() -> D3D12_HEAP_FLAGS {
     if wait_resident() { D3D12_HEAP_FLAG_CREATE_NOT_RESIDENT } else { D3D12_HEAP_FLAG_NONE }
 }
 
+/// (`KLBF_BUFFER_NO_WAIT=1`, off) The short-lived buffers of [`Host::upload_buffer`],
+/// [`Host::shared_buffer`] and [`Host::uav_buffer`] are made resident and not waited for
+/// ([`resident`], [`mapped`]): only lists recorded after them name them, and those wait for
+/// the system's mapping when they are sent. The waits guard descriptor slots read by lists
+/// sent before, which these buffers never are. Measured by eikkapine/victory-amd (GPL-3.0)
+/// as the main source of hitches (about 25 s of a five-minute session); rewritten here.
+fn short_no_wait() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_BUFFER_NO_WAIT").is_some_and(|v| v == "1"))
+}
+
+/// Heap flags of the short-lived buffers ([`short_no_wait`]).
+fn short_flags() -> D3D12_HEAP_FLAGS {
+    if short_no_wait() { D3D12_HEAP_FLAG_NONE } else { not_resident() }
+}
+
+/// [`resident`] then, if `map`, [`mapped`], for a short-lived buffer ([`short_no_wait`]).
+fn short_wait(device: &ID3D12Device, b: &ID3D12Resource, map: bool) -> windows::core::Result<()> {
+    if short_no_wait() {
+        return Ok(());
+    }
+    resident(device, b)?;
+    if map { mapped(device) } else { Ok(()) }
+}
+
 /// A queue of its own that new memory is waited for with ([`mapped`]).
 struct Aside {
     queue: ID3D12CommandQueue,
@@ -529,6 +554,26 @@ fn bury(finished: u64) {
         }
         retired.drain(..n).collect()
     };
+    if crate::cores::klbf_priority() {
+        // (KLBF_PRIORITY, after eikkapine/victory-amd) COM releases on a thread below normal,
+        // not on the thread that waits for the card.
+        static TO: OnceLock<Option<std::sync::mpsc::Sender<Vec<(u64, Retired)>>>> = OnceLock::new();
+        let to = TO.get_or_init(|| {
+            let (to, from) = std::sync::mpsc::channel::<Vec<(u64, Retired)>>();
+            std::thread::Builder::new()
+                .name("victory-bury".into())
+                .spawn(move || {
+                    crate::cores::priority_if_asked("victory-bury", windows_sys::Win32::System::Threading::THREAD_PRIORITY_BELOW_NORMAL);
+                    from.iter().for_each(drop);
+                })
+                .ok()
+                .map(|_| to)
+        });
+        if let Some(to) = to {
+            let _ = to.send(done);
+            return;
+        }
+    }
     drop(done);
 }
 
@@ -1321,53 +1366,6 @@ mod tests {
 /// ([`HostList::batch_place`]).
 const BATCHES: u32 = 8;
 
-/// A host command list and its allocator, always used together.
-static PRELUDE_IDLE: std::sync::Mutex<Vec<Prelude>> = std::sync::Mutex::new(Vec::new());
-
-const PRELUDE_IDLE_MOST: usize = 64;
-
-fn max_preludes() -> usize {
-    static ON: OnceLock<usize> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var_os("VICTORY_MAX_PRELUDES")
-            .and_then(|v| v.to_string_lossy().parse().ok())
-            .unwrap_or(PRELUDE_IDLE_MOST)
-    })
-}
-
-struct PreludeSlot {
-    inner: OnceLock<Option<Prelude>>,
-}
-
-impl PreludeSlot {
-    fn new() -> Self {
-        Self { inner: OnceLock::new() }
-    }
-
-    fn set(&self, prelude: Option<Prelude>) -> Result<(), Option<Prelude>> {
-        self.inner.set(prelude)
-    }
-
-    fn get_or_init<F>(&self, f: F) -> Option<&Prelude>
-    where
-        F: FnOnce() -> Option<Prelude>,
-    {
-        self.inner.get_or_init(f).as_ref()
-    }
-}
-
-impl Drop for PreludeSlot {
-    fn drop(&mut self) {
-        let old = std::mem::replace(&mut self.inner, OnceLock::new());
-        if let Some(prelude) = old.into_inner().flatten() {
-            let mut idle = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner());
-            if idle.len() < max_preludes() {
-                idle.push(prelude);
-            }
-        }
-    }
-}
-
 pub(crate) struct HostList {
     allocator: ID3D12CommandAllocator,
     pub(crate) list: ID3D12GraphicsCommandList,
@@ -1391,9 +1389,10 @@ pub(crate) struct HostList {
     /// for the log, and with `VICTORY_PLANE_NOW=1` the pass recorded at once
     /// ([`HostList::planes_now`]).
     plane_late: Mutex<Vec<(std::sync::Arc<crate::resource::HostTexture>, std::sync::Arc<crate::resource::Twin>)>>,
-    /// The list that runs those transitions just before this one, made
-    /// when the list first has such transitions ([`lazy_prelude`]).
-    prelude: PreludeSlot,
+    /// The list that runs those transitions just before this one, taken
+    /// when the list is first submitted with such transitions and given
+    /// back at its reset ([`take_prelude`], [`lazy_prelude`]).
+    prelude: Mutex<Option<Prelude>>,
     /// The pipelines the list binds, for reports of slow submissions.
     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// What its indirect executions ran, for the report of a removed device.
@@ -1442,6 +1441,50 @@ pub(crate) struct HostList {
 
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+
+/// A prelude in [`PRELUDES`].
+struct IdlePrelude(Prelude);
+
+// SAFETY: D3D12 objects (free-threaded), touched by nobody while idle.
+unsafe impl Send for IdlePrelude {}
+
+/// Preludes of host lists that ran ([`HostList::reset`]), for the next list
+/// that needs one. Kept by its list for the list's life, a prelude held its
+/// allocator's command memory while the list sat idle or recorded: 952 for
+/// 1,476 host lists, near 1 GB of a 2 GB aperture segment on an RX 6700 XT
+/// (`FINDINGS-6700XT.md`), where only lists being submitted or in the air
+/// need one.
+static PRELUDES: Mutex<Vec<IdlePrelude>> = Mutex::new(Vec::new());
+
+/// The most preludes kept idle, and while an aperture segment of the card's
+/// memory is near its limit ([`trim_preludes`]).
+const PRELUDES_MOST: (usize, usize) = (128, 16);
+
+/// A prelude for a list about to be submitted: an idle one, or a new one.
+fn take_prelude() -> Option<Prelude> {
+    let idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    idle.map(|IdlePrelude(prelude)| prelude).or_else(|| host().and_then(|h| h.make_prelude()))
+}
+
+/// Keeps `prelude`, whose submission has finished, for [`take_prelude`].
+fn give_prelude(prelude: Prelude) {
+    let mut idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
+    if idle.len() < PRELUDES_MOST.0 {
+        idle.push(IdlePrelude(prelude));
+    }
+}
+
+/// Lets idle preludes past [`PRELUDES_MOST`]'s second number go, and their
+/// command memory with them.
+pub(crate) fn trim_preludes() {
+    let gone: Vec<IdlePrelude> = {
+        let mut idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
+        let keep = idle.len().min(PRELUDES_MOST.1);
+        idle.split_off(keep)
+    };
+    // (Outside the lock: freeing lists takes the graphics kernel's time.)
+    drop(gone);
+}
 
 /// Whether a host list's prelude is made when the list first needs one. A
 /// prelude runs the texture transitions and twin copies a list needs before
@@ -3865,6 +3908,7 @@ struct RelayFetch {
 /// lists and looking at what queues hold are left to [`late_helper`].
 fn relay_worker() {
     crate::cores::keep_on_fast_cores("victory-relay");
+    crate::cores::priority_if_asked("victory-relay", windows_sys::Win32::System::Threading::THREAD_PRIORITY_ABOVE_NORMAL);
     let Some(host) = host() else {
         return;
     };
@@ -4500,9 +4544,6 @@ impl Host {
 
     /// An allocator and a closed list for a prelude.
     fn make_prelude(&self) -> Option<Prelude> {
-        if let Some(prelude) = PRELUDE_IDLE.lock().unwrap_or_else(|e| e.into_inner()).pop() {
-            return Some(prelude);
-        }
         // SAFETY: plain object creation.
         let made: windows::core::Result<Prelude> = unsafe {
             (|| {
@@ -4537,10 +4578,7 @@ impl Host {
                 &allocator,
                 None,
             )?;
-            let prelude = PreludeSlot::new();
-            if !lazy_prelude() {
-                let _ = prelude.set(self.make_prelude());
-            }
+            let prelude = Mutex::new(if lazy_prelude() { None } else { self.make_prelude() });
             #[cfg(feature = "diagnostics")]
             let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
             let pipelines = std::sync::Arc::<Mutex<std::collections::BTreeSet<String>>>::default();
@@ -5726,6 +5764,7 @@ impl Host {
         let tight = self.adapter.as_ref().is_some_and(segments::tight);
         if tight {
             crate::list::trim_idle();
+            trim_preludes();
         }
         if told && !late_writes() {
             self.settle(&mut submitted, WHY_WRITES);
@@ -6878,6 +6917,11 @@ impl HostList {
         let started = std::time::Instant::now();
         let _resetting = crate::timeline::span("resetting a host list");
         self._alive.used();
+        // Every submission of the list has run, its prelude's too.
+        let prelude = self.prelude.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(prelude) = prelude {
+            give_prelude(prelude);
+        }
         *self.coming.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -7305,10 +7349,11 @@ impl HostList {
         if barriers.is_empty() && syncs.is_empty() {
             return None;
         }
-        let Some((allocator, list)) = self
-            .prelude
-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
-        else {
+        let mut held = self.prelude.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() {
+            *held = take_prelude();
+        }
+        let Some((allocator, list)) = held.as_ref() else {
             fail(format_args!("no host list for a state prelude"));
         };
         // SAFETY: the prelude is not executing (every submission is waited
@@ -9924,7 +9969,7 @@ impl Host {
             self.device
                 .CreateCommittedResource(
                     &heap,
-                    not_resident(),
+                    short_flags(),
                     &desc,
                     D3D12_RESOURCE_STATE_GENERIC_READ,
                     None,
@@ -9932,7 +9977,7 @@ impl Host {
                 )
                 .and_then(|()| {
                     let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    resident(&self.device, b)?;
+                    short_wait(&self.device, b, false)?;
                     b.Map(0, None, Some(&mut data))
                 })
         };
@@ -10979,7 +11024,7 @@ impl Host {
             self.device
                 .CreateCommittedResource(
                     &heap,
-                    not_resident(),
+                    short_flags(),
                     &desc,
                     D3D12_RESOURCE_STATE_COMMON,
                     None,
@@ -10987,8 +11032,7 @@ impl Host {
                 )
                 .and_then(|()| {
                     let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    resident(&self.device, b)?;
-                    mapped(&self.device)?;
+                    short_wait(&self.device, b, true)?;
                     b.Map(0, None, Some(&mut data))
                 })
         };
@@ -11125,7 +11169,7 @@ impl Host {
         let made = unsafe {
             self.device.CreateCommittedResource(
                 &heap,
-                not_resident(),
+                short_flags(),
                 &desc,
                 D3D12_RESOURCE_STATE_COMMON,
                 None,
@@ -11136,7 +11180,7 @@ impl Host {
         if let Some(b) = &buffer {
             crate::book::made(b, || "an unordered access buffer".into());
         }
-        let made = made.and_then(|()| buffer.as_ref().map_or(Ok(()), |b| resident(&self.device, b))).and_then(|()| mapped(&self.device));
+        let made = made.and_then(|()| buffer.as_ref().map_or(Ok(()), |b| short_wait(&self.device, b, true)));
         match made {
             Ok(()) => buffer,
             Err(e) => {
