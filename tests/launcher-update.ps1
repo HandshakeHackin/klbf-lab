@@ -1,4 +1,4 @@
-# KLBF Lab: the launcher's updater, headless (no window, no network): a fake v0.27.0 build and a fake v0.28.0
+# KLBF Lab: the launcher's updater, headless (no window, no network): a fake v26.11.1 build and a fake v26.11.2
 # release (JSON + zip made by scripts\package-release.ps1). powershell -NoProfile -File tests\launcher-update.ps1
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -14,20 +14,20 @@ function Same($a, $b) { ($a.Keys.Count -eq $b.Keys.Count) -and -not @($a.Keys | 
 try {
     # Two releases: victory.exe differs (a text file stands for it)
     $zips = @{}
-    foreach ($v in 'v0.27.0', 'v0.28.0') {
+    foreach ($v in 'v26.11.1', 'v26.11.2') {
         $exe = Join-Path $t "victory-$v.exe"; Set-Content -LiteralPath $exe -Value "fake victory $v"
         $zips[$v] = & (Join-Path $repo 'scripts\package-release.ps1') -Tag $v -Victory $exe -Out (Join-Path $t "dist-$v") -Source $repo
     }
-    $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zips['v0.28.0']).Hash.ToLower()
+    $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zips['v26.11.2']).Hash.ToLower()
     $json = Join-Path $t 'latest.json'
-    @{ tag_name = 'v0.28.0'; html_url = 'https://github.com/PastiiJay/klbf-lab/releases/tag/v0.28.0'
-        body = "Download KLBF-Lab-v0.28.0-win64.zip ... SHA-256 of the zip: $sha"
-        assets = @(@{ name = 'KLBF-Lab-v0.28.0-win64.zip'; browser_download_url = $zips['v0.28.0'] }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $json
-    # A fresh v0.27.0 build folder with the player's extras
+    @{ tag_name = 'v26.11.2'; html_url = 'https://github.com/PastiiJay/klbf-lab/releases/tag/v26.11.2'
+        body = "Download KLBF-Lab-v26.11.2-win64.zip ... SHA-256 of the zip: $sha"
+        assets = @(@{ name = 'KLBF-Lab-v26.11.2-win64.zip'; browser_download_url = $zips['v26.11.2'] }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $json
+    # A fresh v26.11.1 build folder with the player's extras
     $n = 0
     $newBuild = {
         $d = Join-Path $t "build$script:n"; $script:n++
-        Expand-Archive -LiteralPath $zips['v0.27.0'] -DestinationPath $d
+        Expand-Archive -LiteralPath $zips['v26.11.1'] -DestinationPath $d
         New-Item -ItemType Directory -Path (Join-Path $d 'bench-results'), (Join-Path $d 'D3D12') | Out-Null
         Set-Content (Join-Path $d 'bench-results\card.txt') 'my card'; Set-Content (Join-Path $d 'D3D12\D3D12Core.dll') 'component'
         Set-Content (Join-Path $d 'game-folder.txt') 'D:\Games\Mine'
@@ -35,26 +35,30 @@ try {
     }
 
     $b = & $newBuild; $before = Get-Sums $b
-    Check 'VERSION read from the build' ((Get-KlbfVersion $b) -eq 'v0.27.0')
+    Check 'VERSION read from the build' ((Get-KlbfVersion $b) -eq 'v26.11.1')
     Check 'no VERSION (source checkout): no version' ((Get-KlbfVersion $t) -eq '')
-    $u = Get-KlbfUpdate 'v0.27.0' $json
-    Check 'newer release found, zip and SHA-256 from the notes' ($u.tag -eq 'v0.28.0' -and $u.sha -eq $sha -and $u.zip -eq $zips['v0.28.0'])
-    Check 'same version: no update' ($null -eq (Get-KlbfUpdate 'v0.28.0' $json))
+    $u = Get-KlbfUpdate 'v26.11.1' $json
+    Check 'newer release found, zip and SHA-256 from the notes' ($u.tag -eq 'v26.11.2' -and $u.sha -eq $sha -and $u.zip -eq $zips['v26.11.2'])
+    Check 'same version: no update' ($null -eq (Get-KlbfUpdate 'v26.11.2' $json))
     Check 'source checkout: no update' ($null -eq (Get-KlbfUpdate '' $json))
-    Check 'offline check: silent $null' ($null -eq (Get-KlbfUpdate 'v0.27.0' 'http://127.0.0.1:9/latest'))
+    # YY.MM.N compared as numbers; the old v0.x tags are older
+    $order = { param($have, $latest) Set-Content -LiteralPath $json -Value ((Get-Content -LiteralPath $json -Raw) -replace '"tag_name":\s*"[^"]*"', "`"tag_name`": `"$latest`"") ; $null -ne (Get-KlbfUpdate $have $json) }
+    Check 'YY.MM.N order: 26.11.1 < 26.11.2 < 26.12.1 < 27.1.1, v0.27.0 older' ((& $order 'v26.11.2' 'v26.12.1') -and (& $order 'v26.12.1' 'v27.1.1') -and (& $order 'v26.11.9' 'v26.11.10') -and (& $order 'v0.27.0' 'v26.11.1') -and -not (& $order 'v26.11.1' 'v0.28.0') -and -not (& $order 'v26.12.1' 'v26.11.2'))
+    $null = & $order 'v26.11.1' 'v26.11.2'
+    Check 'offline check: silent $null' ($null -eq (Get-KlbfUpdate 'v26.11.1' 'http://127.0.0.1:9/latest'))
 
-    $r = Install-KlbfUpdate @{ tag = 'v0.28.0'; zip = 'http://127.0.0.1:9/x.zip'; sha = $sha } $b
+    $r = Install-KlbfUpdate @{ tag = 'v26.11.2'; zip = 'http://127.0.0.1:9/x.zip'; sha = $sha } $b
     Check "offline download refused, unchanged ($($r.message))" (-not $r.ok -and (Same $before (Get-Sums $b)))
-    $r = Install-KlbfUpdate @{ tag = 'v0.28.0'; zip = $u.zip; sha = ('0' * 64) } $b
+    $r = Install-KlbfUpdate @{ tag = 'v26.11.2'; zip = $u.zip; sha = ('0' * 64) } $b
     Check "bad zip hash refused, unchanged ($($r.message))" (-not $r.ok -and $r.message -like '*SHA-256*' -and (Same $before (Get-Sums $b)))
-    $r = Install-KlbfUpdate @{ tag = 'v0.28.0'; zip = $u.zip; sha = '' } $b
+    $r = Install-KlbfUpdate @{ tag = 'v26.11.2'; zip = $u.zip; sha = '' } $b
     Check 'no SHA-256 in the notes refused' (-not $r.ok -and (Same $before (Get-Sums $b)))
 
     # A zip whose hash is right (in the notes) but one file differs from its SHA256SUMS.txt
     $bad = Join-Path $t 'bad'; Expand-Archive -LiteralPath $u.zip -DestinationPath $bad
     Add-Content -LiteralPath (Join-Path $bad 'victory.exe') 'tampered'
     $badZip = Join-Path $t 'bad.zip'; Compress-Archive -Path (Join-Path $bad '*') -DestinationPath $badZip
-    $r = Install-KlbfUpdate @{ tag = 'v0.28.0'; zip = $badZip; sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $badZip).Hash.ToLower() } $b
+    $r = Install-KlbfUpdate @{ tag = 'v26.11.2'; zip = $badZip; sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $badZip).Hash.ToLower() } $b
     Check "file not matching SHA256SUMS.txt refused ($($r.message))" (-not $r.ok -and $r.message -like '*victory.exe does not match*' -and (Same $before (Get-Sums $b)))
 
     # The game running from the build folder (ping.exe, hidden, stands for it)
@@ -81,10 +85,10 @@ try {
 
     # The good update
     $r = Install-KlbfUpdate $u $b
-    Check "good update installed ($($r.message))" ($r.ok -and $r.message -eq "Updated to v0.28.0 $([char]0x2014) shaders will be prepared again")
-    Check 'new files in place, all match SHA256SUMS.txt' ((& { $now = Get-Sums $b; -not @($staged.Keys | Where-Object { $now[$_] -ne $staged[$_] }) }) -and (Get-KlbfVersion $b) -eq 'v0.28.0' -and (Get-Content (Join-Path $b 'victory.exe')) -eq 'fake victory v0.28.0')
+    Check "good update installed ($($r.message))" ($r.ok -and $r.message -eq "Updated to v26.11.2 $([char]0x2014) shaders will be prepared again")
+    Check 'new files in place, all match SHA256SUMS.txt' ((& { $now = Get-Sums $b; -not @($staged.Keys | Where-Object { $now[$_] -ne $staged[$_] }) }) -and (Get-KlbfVersion $b) -eq 'v26.11.2' -and (Get-Content (Join-Path $b 'victory.exe')) -eq 'fake victory v26.11.2')
     Check 'bench-results, D3D12 and game-folder.txt kept' ((Get-Content (Join-Path $b 'bench-results\card.txt')) -eq 'my card' -and (Test-Path (Join-Path $b 'D3D12\D3D12Core.dll')) -and (Test-Path (Join-Path $b 'game-folder.txt')))
-    Check 'old files in <folder>.previous, no .new left' ((Get-Content (Join-Path "$b.previous" 'victory.exe')) -eq 'fake victory v0.27.0' -and -not (Test-Path "$b.new"))
+    Check 'old files in <folder>.previous, no .new left' ((Get-Content (Join-Path "$b.previous" 'victory.exe')) -eq 'fake victory v26.11.1' -and -not (Test-Path "$b.new"))
 
     # Components checked by hash: a file of another version is fetched again
     Check 'component with another hash is not "there"' (-not (Install-KlbfComponent agility $b -CheckOnly))

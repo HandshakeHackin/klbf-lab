@@ -6,9 +6,14 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
-## v0.27 (27 Nov 2026)
+## v26.11.1 (27 Nov 2026)
+
+Versions follow YY.MM.N (year, month, release of the month), like AMD's drivers.
 
 ### Launcher (KLBF Lab Settings)
+- Version at the bottom left; when a newer release is out, "Update available" beside it: one click
+  downloads it, checks the zip and every file (SHA-256), swaps the files (put back on any failure) and
+  reopens Settings. Saves and settings are never touched.
 - Settings window on first start: profile X / S, AMD FSR 4 (RDNA 4) or FSR 3.1 (other cards) or the built-in
   upscaler, presets Quality / Balanced / Performance / Ultra Performance, output size, frame generation (FG x2),
   display (which monitor), window or borderless fullscreen, saved profiles.

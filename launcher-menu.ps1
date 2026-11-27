@@ -336,7 +336,7 @@ function Install-KlbfUpdate($Update, [string]$BuildDir) {
     }
 }
 
-# The update line beside the version: "Update available: v0.28.0 - Update   What's new" (two links).
+# The update line beside the version: "Update available: v26.11.2 - Update   What's new" (two links).
 function Set-KlbfUpdateLine($c, $Update) {
     $c.updateInfo = $Update
     $t = "Update available: $($Update.tag) $([char]0x2014) "
