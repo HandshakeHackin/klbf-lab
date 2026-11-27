@@ -36,6 +36,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::pixels::{Bitmap, short_cpu, short_gpu};
 
+#[cfg(test)]
 const RUN: Duration = Duration::from_secs(300);
 const GRACE: Duration = Duration::from_secs(5);
 const CARD_FOR: Duration = Duration::from_secs(60);
@@ -49,6 +50,38 @@ const PROJECT: &str = env!("KLBF_PROJECT");
 const PROJECT_SOURCE: &str = env!("KLBF_PROJECT_SOURCE");
 const SHA: &str = env!("KLBF_SHA");
 const ID: &str = "BM-v1";
+
+/// `KLBF_BENCH_LENGTH` (27/11): `short` 5 minutes (BM-v1, the default and the board's test), `medium` 15,
+/// `long` 30, `marathon` 60. Same place, same rules; the longer ones say whether a build holds.
+fn length() -> (&'static str, u64) {
+    static L: LazyLock<(&'static str, u64)> = LazyLock::new(|| {
+        match std::env::var("KLBF_BENCH_LENGTH").map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Ok("medium") => ("Medium", 15),
+            Ok("long") => ("Long", 30),
+            Ok("marathon") => ("Marathon", 60),
+            _ => ("Short", 5),
+        }
+    });
+    *L
+}
+
+/// How long the run lasts.
+fn run_for() -> Duration {
+    Duration::from_secs(length().1 * 60)
+}
+
+/// The test's name: `BM-v1` for the 5-minute run, `BM-v1-Marathon` and so on for the longer ones.
+fn id() -> String {
+    match length() {
+        (_, 5) => ID.to_string(),
+        (name, _) => format!("{ID}-{name}"),
+    }
+}
+
+/// The run's target time, `5:00` .. `60:00`.
+fn target() -> String {
+    mmss(run_for())
+}
 
 /// Whether `KLBF_BENCH=bm-v1` is set.
 pub fn active() -> bool {
@@ -212,7 +245,7 @@ pub(crate) fn on_present(black: bool, world_frame: u64) {
                 r.phase = Phase::Running;
                 r.last = Some(now);
                 r.base = counters();
-                tracing::info!("KLBF Lab Bench BM-v1: measuring 5:00 from the first world frame");
+                tracing::info!("KLBF Lab Bench {}: measuring {} from the first world frame", id(), target());
             }
             return;
         }
@@ -224,7 +257,7 @@ pub(crate) fn on_present(black: bool, world_frame: u64) {
     r.last = Some(now);
     r.black += u64::from(black);
     drop(r);
-    if START.get().is_some_and(|s| now.duration_since(*s) >= RUN) {
+    if START.get().is_some_and(|s| now.duration_since(*s) >= run_for()) {
         finish(None);
     }
 }
@@ -326,7 +359,7 @@ fn verdict(early: bool, elapsed: Duration, s: &Summary, black: u64, removed: boo
         return (Stamp::Invalid, "device removed".into());
     }
     if early {
-        return (Stamp::Partial, format!("PARTIAL {} / 5:00 \u{2013} not comparable", mmss(elapsed)));
+        return (Stamp::Partial, format!("PARTIAL {} / {} \u{2013} not comparable", mmss(elapsed), target()));
     }
     if s.frames < 300 {
         return (Stamp::Invalid, "too few frames".into());
@@ -337,7 +370,7 @@ fn verdict(early: bool, elapsed: Duration, s: &Summary, black: u64, removed: boo
     if s.longest_ms >= 10_000.0 {
         return (Stamp::Invalid, "a stall of 10 s or more".into());
     }
-    (Stamp::Certified, "5:00 complete \u{b7} no input".into())
+    (Stamp::Certified, format!("{} complete \u{b7} no input", target()))
 }
 
 /// The machine, read once when the window is up.
@@ -454,10 +487,10 @@ fn finish(early: Option<&'static str>) {
     let (black, base) = (r.black, r.base);
     drop(r);
     let elapsed = START.get().map_or(Duration::ZERO, Instant::elapsed);
-    let early = early.filter(|_| elapsed < RUN);
+    let early = early.filter(|_| elapsed < run_for());
     let removed = device_removed();
     let s = summarize(&ms);
-    let (stamp, reason) = verdict(early.is_some(), elapsed.min(RUN), &s, black, removed);
+    let (stamp, reason) = verdict(early.is_some(), elapsed.min(run_for()), &s, black, removed);
     let now = counters();
     let set = Settings::read(s.frames, now[2].saturating_sub(base[2]), now[3].saturating_sub(base[3]));
     let t = local_time();
@@ -471,7 +504,7 @@ fn finish(early: Option<&'static str>) {
         date: format!("{} {month} {}", t.wDay, t.wYear),
         date_short: format!("{:02}.{:02}.{:02}", t.wDay, t.wMonth, t.wYear % 100),
         date_iso: format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond),
-        elapsed: elapsed.min(RUN),
+        elapsed: elapsed.min(run_for()),
         s,
         sys: SYS.get().cloned().unwrap_or_default(),
         set,
@@ -496,12 +529,13 @@ fn finish(early: Option<&'static str>) {
         compiled: [now[0].saturating_sub(base[0]), now[1].saturating_sub(base[1])],
         vram,
         ram: ram_bytes(),
-        why: early.unwrap_or("5:00 reached"),
+        why: early.unwrap_or("the full time reached"),
     };
     let mut doc = result_json(&card, &extra, &window_fps(&ms));
     card.serial = serial(&doc);
     card.share = format!(
-        "[KLBF Lab Bench {ID}] {PROJECT}@{SHA} | {} | {} | avg {:.1} fps, 1% low {:.1} | {} | {}",
+        "[KLBF Lab Bench {}] {PROJECT}@{SHA} | {} | {} | avg {:.1} fps, 1% low {:.1} | {} | {}",
+        id(),
         short_gpu(&card.sys.gpu),
         short_cpu(&card.sys.cpu),
         s.avg,
@@ -510,7 +544,7 @@ fn finish(early: Option<&'static str>) {
         card.serial
     );
     // Local date and time first, so the results sort and never overwrite each other.
-    card.file_stem = format!("KLBF-Bench-{ID}-{:04}{:02}{:02}-{:02}{:02}-{}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, card.serial);
+    card.file_stem = format!("KLBF-Bench-{}-{:04}{:02}{:02}-{:02}{:02}-{}", id(), t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, card.serial);
     card.png_name = format!("bench-results\\{}.png", card.file_stem);
     if let J::O(m) = &mut doc {
         m.insert("serial", J::S(card.serial.clone()));
@@ -690,7 +724,7 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
     J::obj([
         ("bench", J::S("KLBF Lab Bench".into())),
         ("test", J::S("Bayside Morning v1".into())),
-        ("test_id", J::S(ID.into())),
+        ("test_id", J::S(id())),
         ("schema", J::I(1)),
         ("stamp", J::S(c.stamp.word().into())),
         ("reason", J::S(c.reason.clone())),
@@ -706,7 +740,7 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
         ("ram_gb", J::F(c.sys.ram_gb)),
         ("os", J::S(c.sys.os.clone())),
         ("duration_s", J::F(c.elapsed.as_secs_f64())),
-        ("target_s", J::I(RUN.as_secs())),
+        ("target_s", J::I(run_for().as_secs())),
         ("frames", J::I(s.frames as u64)),
         (
             "fps",
@@ -758,7 +792,7 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         format!("From:       {} \u{b7} player: {}", c.from, c.player),
         format!("Machine:    {}", c.sys.line()),
         format!("Settings:   {}", c.set.line()),
-        format!("Duration:   {} / 5:00 ({})", mmss(c.elapsed), x.why),
+        format!("Duration:   {} / {} ({})", mmss(c.elapsed), target(), x.why),
         format!(
             "FPS:        avg {:.1} \u{b7} median {:.1} \u{b7} 1% low {:.1} \u{b7} 5% low {:.1} \u{b7} min {:.1} \u{b7} max {:.1} (1 s windows)",
             s.avg, s.median, s.low1, s.low5, s.min, s.max
@@ -793,7 +827,7 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         Ok(()) => {
             let path = stem.with_extension("png");
             tracing::info!(path = %path.display(), share = %c.share, "KLBF Lab Bench: results saved");
-            println!("KLBF Lab Bench {ID} saved: {}\n{}", path.display(), c.share);
+            println!("KLBF Lab Bench {} saved: {}\n{}", id(), path.display(), c.share);
         }
         Err(e) => tracing::warn!(error = %e, dir = %dir.display(), "KLBF Lab Bench: results not written"),
     }
@@ -1058,7 +1092,7 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> is
 fn label_text(started: Option<Duration>) -> String {
     match started {
         None => "KLBF Lab Bench \u{b7} waiting for the world".into(),
-        Some(d) => format!("KLBF Lab Bench \u{b7} in progress {} / 5:00", mmss(d.min(RUN))),
+        Some(d) => format!("KLBF Lab Bench \u{b7} in progress {} / {}", mmss(d.min(run_for())), target()),
     }
 }
 
@@ -1067,7 +1101,7 @@ fn label_text(started: Option<Duration>) -> String {
 fn title_text(started: Option<Duration>) -> String {
     match started {
         None => "KLBF Lab \u{b7} Bench waiting for the world".into(),
-        Some(d) => format!("KLBF Lab \u{b7} Bench {} / 5:00", mmss(d.min(RUN))),
+        Some(d) => format!("KLBF Lab \u{b7} Bench {} / {}", mmss(d.min(run_for())), target()),
     }
 }
 
@@ -1217,8 +1251,8 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
                 }
                 pressed = now;
             }
-            // A game that stops presenting still ends at 5:00.
-            if START.get().is_some_and(|s| s.elapsed() >= RUN) {
+            // A game that stops presenting still ends at the run's time.
+            if START.get().is_some_and(|s| s.elapsed() >= run_for()) {
                 finish(None);
             }
             // The title and the corner label, once a second at most.
@@ -1625,9 +1659,24 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
                 put(&mut bm, ox.round() as i32 + i, oy.round() as i32 + j, rgb, v[3] as u32);
             }
         }
+        // (27/11) Longer runs: the template's "5 minutes at ..." line (between the dotted lines at 290
+        // and 347) is covered with the background just above it; the run's own length is written below.
+        if length().1 != 5 {
+            let ys = (294.0 * k * sy) as i32;
+            for i in (90.0 * k) as i32..(420.0 * k) as i32 {
+                let p = texel(((i as f32 + 0.5) * sx) as i32, ys);
+                let rgb = [0, 1, 2].map(|n| (p[n] * 255.0 / p[3].max(1.0)).clamp(0.0, 255.0) as u8);
+                for j in (298.0 * k) as i32..(343.0 * k) as i32 {
+                    put(&mut bm, ox.round() as i32 + i, oy.round() as i32 + j, rgb, 255);
+                }
+            }
+        }
     }
     let mut pen = Pen { bm: &mut bm, ox, oy, k, boxes: Vec::new() };
     let ink = hex(INK);
+    if length().1 != 5 {
+        pen.text(GEORGIA, 18.0, &format!("{} minutes at the male lead's house", length().1), 255.0, 336.0, true, 370.0, ink);
+    }
     // Left: the date and how it ended.
     pen.text(GEORGIA, 18.0, &format!("{} \u{b7} {}", c.date, c.reason), 255.0, 394.0, true, 370.0, ink);
     // Postmark: serial and date at the bottom, inside the ring.
