@@ -126,6 +126,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// AmericasLauncher reads this list (one pipeline hash): it stays in the repository.
+    #[test]
+    fn skip_list_for_other_launchers() {
+        let list = include_str!("../../../docs/klbf/skip-amd.txt").trim();
+        assert!(!list.is_empty() && list.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
     /// play.ps1 marks its starts, so the built-in settings never replace its own.
     #[test]
     fn our_launcher_says_so() {
