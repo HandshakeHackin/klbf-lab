@@ -81,7 +81,8 @@ param(
     [hashtable]$More = @{},
     [switch]$Setup,
     [switch]$NoMenu,
-    [switch]$PrintEnv
+    [switch]$PrintEnv,
+    [switch]$Quick
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'launcher-menu.ps1')
@@ -94,7 +95,7 @@ if (-not $PrintEnv -and -not (Test-Path -LiteralPath (Get-KlbfHome))) {
 $menuAction = ''
 $passOn = @{}
 foreach ($k in 'Game', 'Build', 'Victory', 'Cache', 'Data', 'FfxDir') { if ($PSBoundParameters.ContainsKey($k)) { $passOn[$k] = $PSBoundParameters[$k] } }
-$notSettings = @($passOn.Keys) + @('Setup', 'NoMenu', 'PrintEnv')
+$notSettings = @($passOn.Keys) + @('Setup', 'NoMenu', 'PrintEnv', 'Quick')
 $explicit = @($PSBoundParameters.Keys | Where-Object { $_ -notin $notSettings })
 if (-not $explicit) {
     $settingsFile = Join-Path (Get-KlbfLauncherDir) 'settings.json'
@@ -113,7 +114,7 @@ if (-not $explicit) {
             $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared yet (Play offers it).' }
         } catch {}
         $known = if ($Game) { $Game } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt')) { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt') -TotalCount 1).Trim() } else { '' }
-        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path (Get-KlbfHome) 'data' }) $known $Cache
+        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path (Get-KlbfHome) 'data' }) $known $Cache $(if ($Quick) { 2 } else { 0 })
         if (-not $picked) { exit 0 }
         $choice = $picked.choice; $menuAction = $picked.action
         Save-KlbfSettings $choice $settingsFile
@@ -368,7 +369,8 @@ if ($Fsr) {
 # (its Play starts the game again), or the same start again; the saves are backed up again at that start.
 # ponytail: a new play.ps1 per relaunch (nested), fine for a session's few dozen restarts.
 $code = $LASTEXITCODE
-switch (Get-KlbfNextStart $code) {
+switch (Get-KlbfNextStart $code ([bool]$Bench)) {
+    'quick' { $again = $passOn; & $PSCommandPath -Setup -Quick @again; exit $LASTEXITCODE }
     'settings' { $again = $passOn; & $PSCommandPath -Setup @again; exit $LASTEXITCODE }
     'restart' { $again = Get-KlbfRestartArgs $PSBoundParameters; & $PSCommandPath @again; exit $LASTEXITCODE }
 }

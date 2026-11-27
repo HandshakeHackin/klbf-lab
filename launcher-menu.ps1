@@ -140,14 +140,16 @@ function Get-KlbfShotsDir($Choice) {
 
 # (27/11) What play.ps1 does when the game ends with $Code: 10 (F10, Settings) opens the settings window,
 # whose Play starts it again; 11 (F11, Restart) starts it again with the same settings; anything else stops.
-function Get-KlbfNextStart([int]$Code) {
+# After a benchmark (whatever the exit): 'quick', the settings window on the Quick tab with the new card.
+function Get-KlbfNextStart([int]$Code, [bool]$Bench = $false) {
+    if ($Bench) { return 'quick' }
     switch ($Code) { 10 { 'settings' } 11 { 'restart' } default { '' } }
 }
 
 # F11's start: play.ps1's own parameters again, without the settings window.
 function Get-KlbfRestartArgs($Bound) {
     $a = @{}
-    foreach ($k in $Bound.Keys) { if ($k -ne 'Setup') { $a[$k] = $Bound[$k] } }
+    foreach ($k in $Bound.Keys) { if ($k -notin 'Setup', 'Quick') { $a[$k] = $Bound[$k] } }
     $a.NoMenu = [switch]$true
     $a
 }
@@ -414,7 +416,13 @@ function Get-KlbfHardware {
         if ($v) { $gpu = [string]$v.Name; $vram = [double]$v.AdapterRAM }
     }
     # Installed memory (Windows' total leaves out what is reserved: 31.2 GB on a 32 GB PC)
-    $ram = [double](Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | Measure-Object Capacity -Sum).Sum
+    $ram = 0
+    try {
+        if (-not ('KlbfMem' -as [type])) { Add-Type -Namespace '' -Name KlbfMem -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool GetPhysicallyInstalledSystemMemory(out ulong kb);' }
+        $kb = [uint64]0
+        if ([KlbfMem]::GetPhysicallyInstalledSystemMemory([ref]$kb)) { $ram = [double]$kb * 1KB }
+    } catch {}
+    if (-not $ram) { $ram = [double](Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | Measure-Object Capacity -Sum).Sum }
     if (-not $ram) { $ram = [double](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory }
     @{ gpu = $gpu; vramGB = [math]::Round($vram / 1GB); ramGB = [math]::Round($ram / 1GB); screen = Get-KlbfScreenSize }
 }
@@ -1359,10 +1367,11 @@ function Update-KlbfForm($c) {
 }
 
 # Shows the window: @{ action = 'play'|'prepare'|'bench'; choice; benchPlayer; benchSave } or $null if closed.
-function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '', [string]$Data = '', [string]$Game = '', [string]$Cache = '') {
+function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '', [string]$Data = '', [string]$Game = '', [string]$Cache = '', [int]$Tab = 0) {
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
     $info = @{ victory = $Victory; data = $Data; game = $Game; cache = $Cache; windows = $(if ($os) { "$($os.Caption) (build $($os.BuildNumber))" } else { '' }) }
     $m = New-KlbfMenuForm $Choice (Get-KlbfHardware) $ShaderStatus $info
+    $m.c.tabs.SelectedIndex = $Tab
     [void]$m.form.ShowDialog()
     if (-not $m.form.Tag) { return $null }
     @{ action = [string]$m.form.Tag; choice = Get-KlbfFormChoice $m.c; benchPlayer = $m.c.benchPlayer; benchSave = $m.c.benchSave }
