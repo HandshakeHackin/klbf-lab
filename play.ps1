@@ -14,9 +14,9 @@
 #              Remembered in game-folder.txt next to the repository's README, so later starts need no -Game.
 # -Build       diag (default: the build all measurements are of) or release
 # -Victory     another victory.exe than target\<Build>\victory.exe
-# -Cache       shader and pipeline caches (default: %LOCALAPPDATA%\klbf-lab\cache). A first run fills them
+# -Cache       shader and pipeline caches (default: Saved Games\KLBF Lab\cache). A first run fills them
 #              and is slow; faces can be missing in that first run and are right from the second.
-# -Data        saves (default: %LOCALAPPDATA%\klbf-lab\data)
+# -Data        saves (default: Saved Games\KLBF Lab\data)
 # -RayTracing  the title's own ray tracing (VICTORY_BVH_BUILDER=1): better light, much slower. Off by default.
 # -Fsr        Profile S with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
 # -FsrX       Profile X with AMD FSR 4 (KLBF_X_FSR=1): the title is made to use its FidelityFX path, sent to
@@ -85,6 +85,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'launcher-menu.ps1')
+# (27/11) First start with the Saved Games home: the older AppData folder's saves, settings, backups and
+# cache are COPIED into it once (the older folder is left as it was).
+if (-not $PrintEnv -and -not (Test-Path -LiteralPath (Get-KlbfHome))) {
+    try { $moved = Move-KlbfOldData; if ($moved) { Write-Host $moved } } catch { Write-Warning "Older KLBF Lab folder not copied: $_" }
+}
 # The setup window's choice (launcher-menu.ps1), only when no settings switch is given.
 $menuAction = ''
 $passOn = @{}
@@ -103,15 +108,19 @@ if (-not $explicit) {
         $status = ''
         try {
             $v = if ($Victory) { $Victory } else { Join-Path $PSScriptRoot "target\$Build\victory.exe" }
-            $m = Join-Path $(if ($Cache) { $Cache } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }) 'scarlett-shaders-ahead.txt'
+            $m = Join-Path (Get-KlbfCacheDir $Cache) 'scarlett-shaders-ahead.txt'
             $ready = (Test-Path -LiteralPath $m) -and ((Get-Content -LiteralPath $m -TotalCount 1) -eq (Get-KlbfShaderStamp $v $Build '1' ''))
             $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared yet (Play offers it).' }
         } catch {}
         $known = if ($Game) { $Game } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt')) { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt') -TotalCount 1).Trim() } else { '' }
-        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }) $known $Cache
+        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path (Get-KlbfHome) 'data' }) $known $Cache
         if (-not $picked) { exit 0 }
         $choice = $picked.choice; $menuAction = $picked.action
         Save-KlbfSettings $choice $settingsFile
+        # (27/11) Once, after the first setup: a desktop shortcut for this build
+        if ($menuAction -eq 'play') {
+            try { $null = Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $PSScriptRoot $Victory) { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } } catch {}
+        }
     }
     # "Run benchmark": the player's settings and -Bench (-BenchPlayer from the bench window)
     $switches = if ($menuAction -eq 'bench') { Get-KlbfBenchSwitches $choice $picked.benchPlayer } else { Get-KlbfSwitches $choice }
@@ -148,8 +157,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $agility 'D3D12Core.dll'))) {
     Copy-Item (Join-Path $tmp 'build\native\bin\x64\D3D12Core.dll'), (Join-Path $tmp 'build\native\bin\x64\d3d12SDKLayers.dll') $agility
     Remove-Item -Recurse -Force $pkg, $tmp
 }
-if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
-if (-not $Data) { $Data = Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }
+if (-not $Cache) { $Cache = Get-KlbfCacheDir '' }
+if (-not $Data) { $Data = Join-Path (Get-KlbfHome) 'data' }
+# (27/11) Never a new game over saves left in an older folder: said, and nothing starts
+if (-not $PrintEnv -and -not $Bench) { $lost = Test-KlbfLostSaves $Data; if ($lost) { throw $lost } }
 New-Item -ItemType Directory -Force -Path $Cache, $Data | Out-Null
 # (27/11) A bench from the window loads the save picked there: the run gets a copy of the data folder in which
 # that save is the only one (Continue can load nothing else), and the player's own saves are not opened.
@@ -260,6 +271,7 @@ $saved = Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')
 $set.KLBF_SHOTS_DIR = Get-KlbfShotsDir $saved
 # (27/11) The Display chosen in Settings: the game window opens centred on that monitor (else the main one)
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
+if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 if ($PrintEnv) {

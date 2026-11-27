@@ -134,10 +134,14 @@ fn subdir(root: &Path, sub: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `%LOCALAPPDATA%/victory/<name>` (elsewhere the XDG or home cache).
+/// (KLBF Lab, 27/11) `%USERPROFILE%/Saved Games/KLBF Lab/<name>`, as the launcher's (elsewhere the XDG or
+/// home cache's `victory`). Not AppData: a process started from a packaged (MSIX) app sees its own private
+/// copy of AppData, and the saves of the same player split in two folders (27/11).
 fn default_dir(name: &str) -> Result<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
+    if let Some(home) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(home).join("Saved Games").join("KLBF Lab").join(name));
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .context("cannot determine a user directory; set VICTORY_CACHE_DIR and VICTORY_DATA_DIR")?;

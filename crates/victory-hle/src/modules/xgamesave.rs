@@ -408,6 +408,11 @@ impl Provider {
         let root = saves
             .join(format!("{:016X}", xuser::XUID))
             .join(file_name(config));
+        // (KLBF Lab, 27/11) A brand-new saves folder: the game starts with no saves. Said with the path, in
+        // case the player's saves are in another folder (27/11: a second AppData seen by a packaged app).
+        if !root.exists() {
+            tracing::warn!(path = %std::path::absolute(&root).unwrap_or_else(|_| root.clone()).display(), "no saves folder yet: a new one is made (the game starts with no saves)");
+        }
         std::fs::create_dir_all(&root).map_err(|_| NO_ACCESS)?;
         let _saves = saves_lock();
         containers(&root); // converts old containers now

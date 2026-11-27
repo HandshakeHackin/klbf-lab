@@ -1,6 +1,7 @@
 # KLBF Lab: the launcher's setup window and shader preparation, dot-sourced by play.ps1.
-# Settings: %LOCALAPPDATA%\KLBF-Lab\launcher\settings.json (the current choice) and presets\<name>.json
-# (KLBF_LAUNCHER_DIR moves that folder, for tests).
+# Settings: <home>\launcher\settings.json (the current choice) and presets\<name>.json (KLBF_LAUNCHER_DIR
+# moves that folder, for tests). <home> = Saved Games\KLBF Lab (Get-KlbfHome): data, cache, launcher,
+# save-backups, bench-data.
 
 # (27/11) Hardware we have tested: on it the window marks the suggested options "(recommended for your
 # hardware)" (without picking them). Add a line as players' reports come in: gen as Get-KlbfGpuKind names it.
@@ -13,15 +14,104 @@ $script:KlbfModes = '1280x720', '1664x936', '1920x1080', '2560x1440', '3840x2160
 # plan overflows, victory-loader resolution.rs).
 $script:KlbfPresets = [ordered]@{ quality = 'Quality'; balanced = 'Balanced'; performance = 'Performance'; ultraperformance = 'Ultra Performance' }
 
+# (27/11) KLBF Lab's home: the Saved Games folder's "KLBF Lab" (KLBF_HOME overrides, for tests). Never
+# AppData: a process started from a packaged (MSIX) app sees its own private AppData, and the player's saves
+# split into two folders (27/11).
+function Get-KlbfHome {
+    if ($env:KLBF_HOME) { return $env:KLBF_HOME }
+    $saved = $null
+    try {
+        if (-not ('KlbfKnown' -as [type])) {
+            Add-Type -Namespace '' -Name KlbfKnown -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SHGetKnownFolderPath(ref Guid id, int flags, IntPtr token, out string path);'
+        }
+        $id = [Guid]'4C5C32FF-BB9D-43b0-B5B4-2D72E54EAAA4' # FOLDERID_SavedGames
+        $p = ''
+        if ([KlbfKnown]::SHGetKnownFolderPath([ref]$id, 0, [IntPtr]::Zero, [ref]$p) -eq 0) { $saved = $p }
+    } catch {}
+    if (-not $saved) { $saved = Join-Path $env:USERPROFILE 'Saved Games' }
+    Join-Path $saved 'KLBF Lab'
+}
+
 function Get-KlbfLauncherDir {
     if ($env:KLBF_LAUNCHER_DIR) { return $env:KLBF_LAUNCHER_DIR }
-    Join-Path $env:LOCALAPPDATA 'KLBF-Lab\launcher'
+    Join-Path (Get-KlbfHome) 'launcher'
+}
+
+# The folders an older launcher used (AppData's klbf-lab, and the copy a packaged app saw): KLBF_OLD_HOMES
+# (';'-separated) for tests.
+function Get-KlbfOldHomes {
+    if ($null -ne $env:KLBF_OLD_HOMES) { return @($env:KLBF_OLD_HOMES -split ';' | Where-Object { $_ }) }
+    @(Join-Path $env:LOCALAPPDATA 'klbf-lab') + @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Packages\*\LocalCache\Local\klbf-lab') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+}
+
+# The newest save file's time under a home's data folder, or $null without saves.
+function Get-KlbfNewestSave([string]$Dir) {
+    $r = Get-KlbfSavesRoot (Join-Path $Dir 'data')
+    if (-not $r) { return $null }
+    $s = @(Get-KlbfSaves $r)
+    if (-not $s) { return $null }
+    ($s | Sort-Object date -Descending | Select-Object -First 1).date
+}
+
+# (27/11) One-time move to the new home: COPIES (never moves or deletes) from the old folder with the newest
+# save: data (saves and game settings), launcher settings and presets, save backups, and the shader cache
+# unless -NoCache. Files already in the new home are never overwritten; nothing is copied into a data folder
+# that already has saves. Returns what was done (one line), or '' when there was nothing to copy.
+function Move-KlbfOldData([string]$To = (Get-KlbfHome), [string[]]$From = (Get-KlbfOldHomes), [switch]$NoCache) {
+    $best = $null; $when = $null
+    foreach ($h in $From) {
+        if (-not (Test-Path -LiteralPath $h)) { continue }
+        $n = Get-KlbfNewestSave $h
+        if ($n -and (-not $when -or $n -gt $when)) { $best = $h; $when = $n }
+    }
+    if (-not $best) { return '' }
+    $parts = @('launcher', 'save-backups') + @(if (-not $NoCache) { 'cache' })
+    if (-not (Get-KlbfNewestSave $To)) { $parts = @('data') + $parts }
+    $copied = @()
+    foreach ($p in $parts) {
+        $src = Join-Path $best $p
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        $n = 0
+        foreach ($f in (Get-ChildItem -LiteralPath $src -Recurse -File -Force)) {
+            $rel = $f.FullName.Substring($src.Length).TrimStart('\')
+            if ($p -eq 'data' -and $rel -match '\\saves\\saves(\\|$)') { continue }
+            $dst = Join-Path (Join-Path $To $p) $rel
+            if (Test-Path -LiteralPath $dst) { continue }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+            Copy-Item -LiteralPath $f.FullName -Destination $dst
+            (Get-Item -LiteralPath $dst).LastWriteTime = $f.LastWriteTime
+            $n++
+        }
+        # The game's empty folders too (a save container without files yet)
+        foreach ($d in (Get-ChildItem -LiteralPath $src -Recurse -Directory -Force)) {
+            $rel = $d.FullName.Substring($src.Length).TrimStart('\')
+            if ($p -eq 'data' -and $rel -match '\\saves\\saves(\\|$)') { continue }
+            New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $To $p) $rel) | Out-Null
+        }
+        if ($n) { $copied += "$p ($n files)" }
+    }
+    if (-not $copied) { return '' }
+    "Copied from the older KLBF Lab folder (saves of $($when.ToString('yyyy-MM-dd HH:mm'))): $($copied -join ', '). The older folder is left as it was."
+}
+
+# (27/11) Before a start: the data folder has no saves while an older folder has some. The message to show
+# (the game is not started), or ''.
+function Test-KlbfLostSaves([string]$Data, [string[]]$From = (Get-KlbfOldHomes)) {
+    $r = Get-KlbfSavesRoot $Data
+    if ($r -and @(Get-KlbfSaves $r)) { return '' }
+    foreach ($h in $From) {
+        $n = Get-KlbfNewestSave $h
+        if ($n) {
+            return "No saves in the KLBF Lab data folder, but an older KLBF Lab folder has saves (newest $($n.ToString('yyyy-MM-dd HH:mm'))). The game was not started, so it does not begin a new game over them. Copy them once with: . .\launcher-menu.ps1; Move-KlbfOldData  (then start again)."
+        }
+    }
+    ''
 }
 
 # The owner's setting: Profile X, FSR 4 Performance, 3840x2160, frame generation, hooks and texture trim
 # (= -Tout -FsrQuality performance -Output 3840x2160).
 function Get-KlbfDefaults {
-    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1 }
+    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1; borderless = $false }
 }
 
 # Any object (a parsed JSON) over the defaults: unknown or invalid values keep the default.
@@ -36,6 +126,7 @@ function ConvertTo-KlbfChoice($o) {
     if ($o.advanced -is [bool]) { $c.advanced = $o.advanced }
     if ($o.game -is [string]) { $c.game = $o.game }
     if ($o.shotsDir -is [string]) { $c.shotsDir = $o.shotsDir }
+    if ($o.borderless -is [bool]) { $c.borderless = $o.borderless }
     if (($o.display -is [int] -or $o.display -is [long]) -and $o.display -ge -1 -and $o.display -lt 16) { $c.display = [int]$o.display }
     $c
 }
@@ -61,6 +152,46 @@ function Get-KlbfRestartArgs($Bound) {
     $a
 }
 
+# (27/11) The desktop shortcut that starts this build: hidden PowerShell running its play.ps1 with -Setup
+# (the settings window first), in the build's folder, with our icon.
+function Get-KlbfShortcutSpec([string]$BuildDir = $PSScriptRoot, [string]$Victory = '') {
+    if (-not $Victory) { $Victory = Join-Path $BuildDir 'victory.exe' }
+    $ico = Join-Path $BuildDir 'klbf-lab.ico'
+    if (-not (Test-Path -LiteralPath $ico)) { $ico = Join-Path $BuildDir 'apps\victory\klbf-lab.ico' }
+    @{
+        target = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Victory "{1}" -Setup' -f (Join-Path $BuildDir 'play.ps1'), $Victory
+        workdir = $BuildDir
+        icon = $ico
+    }
+}
+
+# Desktop\KLBF Lab.lnk (the Desktop known folder) from a spec; $Path for tests.
+function New-KlbfShortcut($Spec, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
+    $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
+    $s.TargetPath = $Spec.target; $s.Arguments = $Spec.arguments; $s.WorkingDirectory = $Spec.workdir
+    if (Test-Path -LiteralPath $Spec.icon) { $s.IconLocation = "$($Spec.icon),0" }
+    $s.Save()
+    $Path
+}
+
+# The button and the first-run offer: replaces an existing shortcut only after $Ask says yes. Its path, or ''.
+function Set-KlbfShortcut($Spec, $Ask, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
+    if ((Test-Path -LiteralPath $Path) -and -not (& $Ask 'Replace the KLBF Lab shortcut on the desktop with one for this build?')) { return '' }
+    New-KlbfShortcut $Spec $Path
+}
+
+# Once, at the end of the first setup: "Create a desktop shortcut?" (the answer remembered beside the settings).
+function Invoke-KlbfShortcutOffer($Spec, $Ask, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
+    $mark = Join-Path (Get-KlbfLauncherDir) 'shortcut-asked.txt'
+    if (Test-Path -LiteralPath $mark) { return '' }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $mark) | Out-Null
+    $yes = & $Ask 'Create a desktop shortcut for KLBF Lab?'
+    Set-Content -LiteralPath $mark -Value $(if ($yes) { 'yes' } else { 'no' }) -Encoding utf8
+    if (-not $yes) { return '' }
+    Set-KlbfShortcut $Spec $Ask $Path
+}
+
 # Every key of KLBF Lab, as the Quick tab lists them.
 function Get-KlbfShortcuts {
     @(
@@ -68,6 +199,7 @@ function Get-KlbfShortcuts {
         'F10  Settings: closes the game and opens this window; Play starts it again'
         'F11  Restart: closes the game and starts it again with the same settings'
         'F10  during a benchmark: stops it (F8 and F11 do nothing during a run)'
+        'Alt+Enter  borderless fullscreen on and off (in the game)'
         'Shift  held while starting: opens these settings first'
     )
 }
@@ -85,7 +217,7 @@ $script:KlbfSpaceGB = 10
 # none of the window's choices do (profile, upscaler, preset, output, frame generation, hooks).
 $script:KlbfCacheFullGB = 7.2
 
-function Get-KlbfCacheDir([string]$Cache) { if ($Cache) { $Cache } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' } }
+function Get-KlbfCacheDir([string]$Cache) { if ($Cache) { $Cache } else { Join-Path (Get-KlbfHome) 'cache' } }
 
 # Bytes in the cache folder (0 without one).
 function Get-KlbfCacheBytes([string]$Cache) {
@@ -118,7 +250,7 @@ function Clear-KlbfShaderCache([string]$Cache) {
 }
 
 function Get-KlbfSpace([string]$Cache) {
-    if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
+    if (-not $Cache) { $Cache = Get-KlbfCacheDir '' }
     $root = [IO.Path]::GetPathRoot($Cache)
     $free = try { [math]::Floor((New-Object IO.DriveInfo($root)).AvailableFreeSpace / 1GB) } catch { -1 }
     @{ drive = $root.TrimEnd('\'); needGB = $script:KlbfSpaceGB; freeGB = $free; ok = $free -ge $script:KlbfSpaceGB }
@@ -436,12 +568,12 @@ $script:KlbfRepo = 'https://github.com/PastiiJay/klbf-lab'
 # names) and one file per blob: 0 the save, 1 its header, whose title (UTF-16 at 0x24) the menu shows.
 
 function Get-KlbfSavesRoot([string]$Data) {
-    if (-not $Data) { $Data = Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }
+    if (-not $Data) { $Data = Join-Path (Get-KlbfHome) 'data' }
     Get-ChildItem -LiteralPath $Data -Directory -ErrorAction SilentlyContinue |
         ForEach-Object { Join-Path $_.FullName 'saves' } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 
-function Get-KlbfBackupDir { Join-Path (Split-Path -Parent (Get-KlbfLauncherDir)) 'save-backups' }
+function Get-KlbfBackupDir { if ($env:KLBF_LAUNCHER_DIR) { Join-Path (Split-Path -Parent $env:KLBF_LAUNCHER_DIR) 'save-backups' } else { Join-Path (Get-KlbfHome) 'save-backups' } }
 
 function Read-KlbfManifest([string]$Path) {
     $b = [IO.File]::ReadAllBytes($Path); $at = 0; $out = @()
@@ -489,7 +621,11 @@ function Get-KlbfSaves([string]$SavesRoot) {
 # A zip of the saves folder in save-backups\<date>.zip; the last $Keep are kept. Its path, or $null.
 # (27/11) A "saves" folder inside it (left by an old copy into an existing folder) is not the game's: left out.
 function Backup-KlbfSaves([string]$SavesRoot, [string]$Dir = (Get-KlbfBackupDir), [int]$Keep = 10) {
-    if (-not $SavesRoot -or -not (Test-Path -LiteralPath $SavesRoot)) { return $null }
+    if (-not $SavesRoot -or -not (Test-Path -LiteralPath $SavesRoot)) {
+        # (27/11) Said, never silent: an empty folder here hid the saves being in another folder
+        Write-Warning "No saves to back up$(if ($SavesRoot) { " in $SavesRoot" } else { ' (no saves folder yet)' })."
+        return $null
+    }
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     $zip = Join-Path $Dir ((Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff') + '.zip')
@@ -538,7 +674,7 @@ function Copy-KlbfSave($From, $To, [string]$SavesRoot, [string]$Dir = (Get-KlbfB
 
 # The newest log of the title (the crash log beside its data), or ''.
 function Get-KlbfLatestLog([string]$Data) {
-    if (-not $Data) { $Data = Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }
+    if (-not $Data) { $Data = Join-Path (Get-KlbfHome) 'data' }
     $l = Get-ChildItem -Path (Join-Path $Data '*\crashes.log') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($l) { $l.FullName } else { '' }
 }
@@ -670,9 +806,9 @@ function Get-KlbfSaveLabel($Save) {
     if ($Save.auto) { 'Autosave' } else { '#' + ($Save.slot -replace '^Slot ', '') }
 }
 
-# "Save #2" / "Autosave", with the in-game name after it only when $Show (the Saves tab's Show names).
+# "Slot 2" / "Autosave", with the in-game name after it only when $Show (the Saves tab's Show names).
 function Get-KlbfSaveName($Save, [bool]$Show = $false) {
-    $n = if ($Save.auto) { 'Autosave' } else { 'Save ' + (Get-KlbfSaveLabel $Save) }
+    $n = if ($Save.auto) { 'Autosave' } else { $Save.slot }
     if ($Show -and $Save.title) { "$n ($($Save.title))" } else { $n }
 }
 
@@ -809,28 +945,32 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.presets[$k] = & $white (& $radio $p $script:KlbfPresets[$k] $at[$k][0] 2 $at[$k][1])
     }
 
-    $g = & $group $page 'Output resolution' 426 78
-    $c.output = & $combo $g 12 22 140
+    $g = & $group $page 'Output resolution, display, mode' 426 90
+    $c.output = & $combo $g 12 22 112
     foreach ($m in $script:KlbfModes) { [void]$c.output.Items.Add($m) }
-    $c.screen = & $white (& $label $g 'Display:' 170 25 56)
     $c.screens = if ($null -ne $Info.screens) { @($Info.screens) } else { @(Get-KlbfScreens) }
-    $c.display = & $combo $g 228 22 246
+    $c.display = & $combo $g 130 22 192
+    # (27/11) Window or borderless fullscreen on the chosen display (Alt+Enter switches in the game)
+    $c.mode = & $combo $g 328 22 146
+    [void]$c.mode.Items.Add('Window'); [void]$c.mode.Items.Add('Borderless fullscreen')
+    $c.mode.SelectedIndex = [int][bool]$Choice.borderless
+    $c.tips.SetToolTip($c.mode, 'Borderless fullscreen covers the chosen display, the picture kept in shape. Alt+Enter switches in the game.')
     foreach ($n in (Get-KlbfDisplayNames $c.screens)) { [void]$c.display.Items.Add($n) }
     $c.primaryIndex = Get-KlbfDisplayIndex $null $c.screens
     if ($c.display.Items.Count) { $c.display.SelectedIndex = Get-KlbfDisplayIndex $Choice $c.screens }
     $c.tips.SetToolTip($c.display, 'The monitor the game window (and this window) opens on, centred.')
     $c.outputRec = if ($tested -and $rec.profile -eq 'X') { "Recommended for your hardware: $($rec.output)" } else { '' }
-    $c.outputNote = & $white (& $label $g '' 12 52 460)
+    $c.outputNote = & $white (& $label $g '' 12 50 460 36)
 
-    $g = & $group $page 'Options' 508 74
+    $g = & $group $page 'Options' 520 64
     $c.fg = New-Object System.Windows.Forms.CheckBox
     $c.fgText = & $mark 'Frame generation (FG x2)' $rec.frameGen
     $c.fg.Text = $c.fgText
-    [void](& $white (& $add $g $c.fg 12 20 460 22))
+    [void](& $white (& $add $g $c.fg 12 16 460 22))
     $c.optionsGroup = $g
     $c.adv = New-Object System.Windows.Forms.CheckBox
     $c.adv.Text = 'Advanced: memory hooks and texture trim (faster, uses less RAM)'
-    [void](& $white (& $add $g $c.adv 12 44 462 22))
+    [void](& $white (& $add $g $c.adv 12 38 462 22))
 
     $g = & $group $page 'Saved profiles' 586 60
     # (27/11) Save overwrites the selected profile, Save as... makes a new one; the loaded one shows
@@ -850,7 +990,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.savesList.View = 'Details'; $c.savesList.FullRowSelect = $true; $c.savesList.HeaderStyle = 'Nonclickable'
     $c.savesList.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.savesList.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     # (27/11) In-game names (the title's mission names) hidden until Show names, every time the window opens
-    foreach ($h in @(@('Save', 90), @('Name in the game', 190), @('Date', 120), @('Size', 70))) { [void]$c.savesList.Columns.Add($h[0], $h[1]) }
+    foreach ($h in @(@('Slot', 90), @('Name in the game', 190), @('Date', 120), @('Size', 70))) { [void]$c.savesList.Columns.Add($h[0], $h[1]) }
     $c.showNames = $false
     [void](& $add $savesPage $c.savesList 6 8 480 250)
     $note = & $label $savesPage ("Numbered as the game's Load menu lists them: the autosave first, then the newest first. " +
@@ -858,7 +998,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $note.ForeColor = $soft
     $c.backup = & $btn $savesPage 'Back up all' 6 322 150
     $c.restore = & $btn $savesPage "Restore a backup$([char]0x2026)" 166 322 170
-    $c.showNamesBtn = & $btn $savesPage 'Show names' 346 322 140
+    $c.showNamesBtn = & $btn $savesPage "$([char]::ConvertFromUtf32(0x1F441)) Show names" 346 322 140
     $g = & $group $savesPage 'Copy a save over another (all saves are backed up first)' 362 64
     $c.copyFrom = & $combo $g 12 26 170
     [void](& $white (& $label $g 'over' 190 30 36))
@@ -879,8 +1019,9 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $g = & $group $quickPage 'Shortcuts' 428 150
     $y = 20
     foreach ($line in (Get-KlbfShortcuts)) { [void](& $white (& $label $g $line 12 $y 460 18)); $y += 18 }
-    $c.quickRestart = & $btn $g 'Restart (F11)' 12 ($y + 4) 150
-    $c.quickSettings = & $btn $g 'Settings (F10)' 172 ($y + 4) 150
+    $c.quickRestart = & $btn $g 'Restart (F11)' 12 ($y + 4) 140
+    $c.quickSettings = & $btn $g 'Settings (F10)' 158 ($y + 4) 140
+    $c.shortcut = & $btn $g 'Create desktop shortcut' 304 ($y + 4) 164
     $c.tips.SetToolTip($c.quickRestart, 'Play with the settings this window opened with.')
     $g = & $group $quickPage 'Screenshots (F8)' 582 82
     $c.shots = New-Object System.Windows.Forms.TextBox; $c.shots.ReadOnly = $true
@@ -941,7 +1082,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.output.add_SelectedIndexChanged($update)
     $fCentre = ${function:Get-KlbfCentre}
     $c.place = { if ($c.display.SelectedIndex -ge 0) { $c.form.Location = New-Object System.Drawing.Point(@(& $fCentre $c.screens[$c.display.SelectedIndex].work @($c.form.Width, $c.form.Height))) } }.GetNewClosure()
-    $c.display.add_SelectedIndexChanged({ & $c.place; & $markIt }.GetNewClosure())
+    $c.display.add_SelectedIndexChanged({ & $c.place; & $markIt; & $fUpdate $c }.GetNewClosure())
     $c.saved.add_SelectedIndexChanged({ $c.save.Enabled = $null -ne $c.saved.SelectedItem }.GetNewClosure())
     $c.load.add_Click({
         if (-not $c.saved.SelectedItem) { return }
@@ -1044,6 +1185,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $opened = $Choice; $fShots = ${function:Set-KlbfShotsPath}; $fShotsDir = ${function:Get-KlbfShotsDir}
     $c.quickRestart.add_Click({ & $fSet $c $opened; $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
     $c.quickSettings.add_Click({ $c.tabs.SelectedIndex = 0 }.GetNewClosure())
+    $fShortcut = ${function:Set-KlbfShortcut}; $fSpec = ${function:Get-KlbfShortcutSpec}; $here = $PSScriptRoot
+    $c.shortcut.add_Click({
+        $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } }
+        $spec = & $fSpec $here $c.info.victory
+        $done = if ($c.shortcutPath) { & $fShortcut $spec $ask $c.shortcutPath } else { & $fShortcut $spec $ask }
+        if ($done) { $c.shotsNote.Text = 'Desktop shortcut made.' }
+    }.GetNewClosure())
     $c.shotsShow.add_Click({ $c.showShots = -not $c.showShots; & $fShots $c $c.shotsDir }.GetNewClosure())
     $c.shotsChange.add_Click({
         $d = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1085,7 +1233,7 @@ function Update-KlbfSavesTab($c) {
         [void]$c.savesList.Items.Add($it)
         [void]$c.copyFrom.Items.Add((Get-KlbfSaveName $s)); [void]$c.copyTo.Items.Add((Get-KlbfSaveName $s))
     }
-    $c.showNamesBtn.Text = if ($c.showNames) { 'Hide names' } else { 'Show names' }
+    $c.showNamesBtn.Text = "$([char]::ConvertFromUtf32(0x1F441)) $(if ($c.showNames) { 'Hide names' } else { 'Show names' })" 
     if (-not $c.saves) { $c.savesNote.Text = $(if ($c.savesRoot) { 'No saves yet.' } else { 'No saves folder yet: it appears after the first save in the game.' }) }
 }
 
@@ -1137,8 +1285,18 @@ function Get-KlbfFormChoice($c) {
         advanced = [bool]$c.adv.Checked
         game = [string]$c.gamePath
         shotsDir = [string]$c.shotsDir
+        borderless = [bool]($c.mode.SelectedIndex -eq 1)
         display = $(if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -eq $c.primaryIndex) { -1 } else { [int]$c.display.SelectedIndex })
     })
+}
+
+# (27/11) The line under Output: why 3840x2160 on a smaller screen, the HUD issue below it.
+function Get-KlbfOutputNote([bool]$ProfileS, [string]$Output, [string]$Screen) {
+    if ($ProfileS) { return 'Profile S: the title sets its own render size and output.' }
+    if ($Output -ne '3840x2160') { return "Below 3840x2160 the game's HUD gets bigger (known issue)." }
+    $sw, $sh = ($Screen -split 'x') + @(0, 0) | Select-Object -First 2 | ForEach-Object { [int]$_ }
+    if ($Screen -and $sh -lt 2160) { return "3840x2160 recommended: the game's HUD is only the right size at 4K; it is scaled down to your $Screen screen (sharper image, the cost depends on the FSR preset)." }
+    '3840x2160 recommended: the size the game''s HUD is made for.'
 }
 
 # What applies to what: Profile S has the title's FSR, render size and output; frame generation needs FSR.
@@ -1148,7 +1306,7 @@ function Update-KlbfForm($c) {
     $c.upFsr.Enabled = -not $s; $c.upTitle.Enabled = -not $s
     foreach ($k in $c.presets.Keys) { $c.presets[$k].Enabled = -not $s -and $fsr }
     $c.output.Enabled = -not $s
-    $c.outputNote.Text = $(if ($s) { 'Profile S: the title sets its own render size and output.' } elseif ([string]$c.output.SelectedItem -ne '3840x2160') { "Below 3840x2160 the game's HUD gets bigger (known issue)." } else { [string]$c.outputRec })
+    $c.outputNote.Text = Get-KlbfOutputNote $s ([string]$c.output.SelectedItem) $(if ($c.display.SelectedIndex -ge 0) { $m = $c.screens[$c.display.SelectedIndex]; if ($m.mode) { $m.mode } else { $m.bounds } } else { '' })
     $c.fg.Enabled = $fsr
     # (27/11) A control greyed by a rule says why, beside it and in a tooltip (a greyed control shows no
     # tooltip of its own: its group's says it too).

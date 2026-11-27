@@ -120,6 +120,7 @@ pub extern "system" fn CreateWindowExW(
     };
     keep_client(hwnd, ex_style, style, height, extra);
     hook(hwnd);
+    borderless_at_start(hwnd, extra);
     hwnd
 }
 
@@ -148,6 +149,7 @@ pub extern "system" fn CreateWindowExA(
     };
     keep_client(hwnd, ex_style, style, height, extra);
     hook(hwnd);
+    borderless_at_start(hwnd, extra);
     hwnd
 }
 
@@ -320,6 +322,118 @@ fn keep_client(hwnd: HWND, ex_style: u32, style: u32, height: i32, extra: i32) {
     }
 }
 
+/// (KLBF Lab, 27/11) Borderless fullscreen: the window without its frame and menu bar, on its monitor,
+/// keeping the picture's proportions (`letterbox`; black bars from a backdrop window behind it). The
+/// swap chain and output keep their size (scaled into the window). Alt+Enter toggles it; the window's
+/// place, style and menu come back. `KLBF_BORDERLESS=1` (the launcher's Display mode) starts in it.
+struct Borderless {
+    style: isize,
+    rect: RECT,
+    menu: usize,
+    backdrop: usize,
+}
+
+static BORDERLESS: Mutex<Option<Borderless>> = Mutex::new(None);
+
+fn borderless_at_start(hwnd: HWND, extra: i32) {
+    // Only the window that got our menu (the title's main one), once.
+    if extra > 0 && std::env::var("KLBF_BORDERLESS").is_ok_and(|v| v.trim() == "1") && !victory_gpu::klbf_bench::active() {
+        toggle_borderless(hwnd);
+    }
+}
+
+/// The largest rect of `aspect` (width, height) centred in `area`.
+fn letterbox(area: &RECT, (aw, ah): (i32, i32)) -> RECT {
+    let (w, h) = (area.right - area.left, area.bottom - area.top);
+    if aw <= 0 || ah <= 0 || w <= 0 || h <= 0 {
+        return *area;
+    }
+    let (fw, fh) = if i64::from(w) * i64::from(ah) > i64::from(h) * i64::from(aw) {
+        ((i64::from(h) * i64::from(aw) / i64::from(ah)) as i32, h)
+    } else {
+        (w, (i64::from(w) * i64::from(ah) / i64::from(aw)) as i32)
+    };
+    let (left, top) = (area.left + (w - fw) / 2, area.top + (h - fh) / 2);
+    RECT { left, top, right: left + fw, bottom: top + fh }
+}
+
+/// A black, inert window covering `area`, just behind `game`.
+fn backdrop(game: HWND, area: &RECT) -> HWND {
+    use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject};
+    const CLASS: PCWSTR = w!("KLBF Lab backdrop");
+    // SAFETY: registers a plain class once (a second time fails harmlessly) and makes a window of it.
+    unsafe {
+        let instance = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
+        let class = wm::WNDCLASSW {
+            lpfnWndProc: Some(wm::DefWindowProcW),
+            hInstance: instance,
+            lpszClassName: CLASS,
+            hbrBackground: GetStockObject(BLACK_BRUSH) as _,
+            ..std::mem::zeroed()
+        };
+        wm::RegisterClassW(&class);
+        let b = wm::CreateWindowExW(
+            wm::WS_EX_TOOLWINDOW | wm::WS_EX_NOACTIVATE,
+            CLASS,
+            w!("KLBF Lab"),
+            wm::WS_POPUP | wm::WS_VISIBLE | wm::WS_DISABLED,
+            area.left,
+            area.top,
+            area.right - area.left,
+            area.bottom - area.top,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null(),
+        );
+        if !b.is_null() {
+            wm::SetWindowPos(b, game, 0, 0, 0, 0, wm::SWP_NOMOVE | wm::SWP_NOSIZE | wm::SWP_NOACTIVATE);
+        }
+        b
+    }
+}
+
+/// Into borderless fullscreen on the window's monitor, or back to the window it was. On the window's
+/// thread (its procedure, or right after it is made).
+fn toggle_borderless(hwnd: HWND) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
+    let mut state = BORDERLESS.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: our title's window, on its own thread; plain window calls.
+    unsafe {
+        if let Some(was) = state.take() {
+            if was.backdrop != 0 {
+                wm::DestroyWindow(was.backdrop as HWND);
+            }
+            wm::SetWindowLongPtrW(hwnd, wm::GWL_STYLE, was.style);
+            wm::SetMenu(hwnd, was.menu as HMENU);
+            let r = was.rect;
+            wm::SetWindowPos(hwnd, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, wm::SWP_FRAMECHANGED | wm::SWP_NOZORDER | wm::SWP_NOOWNERZORDER);
+            tracing::info!("KLBF Lab: back to the window");
+            return;
+        }
+        let (mut rect, mut client) = (RECT::default(), RECT::default());
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..std::mem::zeroed() };
+        if wm::GetWindowRect(hwnd, &mut rect) == 0
+            || wm::GetClientRect(hwnd, &mut client) == 0
+            || GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info) == 0
+        {
+            return;
+        }
+        let style = wm::GetWindowLongPtrW(hwnd, wm::GWL_STYLE);
+        let menu = wm::GetMenu(hwnd);
+        let screen = info.rcMonitor;
+        let fit = letterbox(&screen, (client.right - client.left, client.bottom - client.top));
+        let bars = fit.left != screen.left || fit.top != screen.top || fit.right != screen.right || fit.bottom != screen.bottom;
+        wm::SetMenu(hwnd, std::ptr::null_mut());
+        let popup = (style as u32 & !(wm::WS_OVERLAPPEDWINDOW)) | wm::WS_POPUP | wm::WS_VISIBLE;
+        wm::SetWindowLongPtrW(hwnd, wm::GWL_STYLE, popup as isize);
+        wm::SetWindowPos(hwnd, wm::HWND_TOP, fit.left, fit.top, fit.right - fit.left, fit.bottom - fit.top, wm::SWP_FRAMECHANGED | wm::SWP_NOOWNERZORDER);
+        let backdrop = if bars { backdrop(hwnd, &screen) as usize } else { 0 };
+        *state = Some(Borderless { style, rect, menu: menu as usize, backdrop });
+        tracing::info!(left = fit.left, top = fit.top, right = fit.right, bottom = fit.bottom, "KLBF Lab: borderless fullscreen");
+    }
+}
+
 /// Puts our procedure in front of the title's.
 fn hook(hwnd: HWND) {
     if hwnd.is_null() {
@@ -364,6 +478,16 @@ extern "system" fn window_proc(
     // the title aborts itself about half a minute later. A console has no window
     // menu. The mouse still opens it from the title bar.
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
+        return 0;
+    }
+    // KLBF Lab: Alt+Enter toggles borderless fullscreen (the Enter that follows as a character is eaten,
+    // or Windows beeps).
+    if (message == wm::WM_SYSKEYDOWN && wparam == 0x0D && lparam & (1 << 29) != 0 && !victory_gpu::klbf_bench::active())
+        || (message == wm::WM_SYSCHAR && wparam == 0x0D)
+    {
+        if message == wm::WM_SYSKEYDOWN && lparam & (1 << 30) == 0 {
+            toggle_borderless(hwnd);
+        }
         return 0;
     }
     // KLBF Lab: F8, F10, F11 and our menu bar's items.
@@ -519,6 +643,23 @@ pub(crate) fn module() -> HleModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (KLBF Lab) Borderless fullscreen keeps the picture's proportions: bars at the sides of a wide
+    /// monitor (one left of the main one too), none on a 16:9 one.
+    #[test]
+    fn borderless_fills_the_monitor_at_the_pictures_shape() {
+        let wide = RECT { left: 0, top: 0, right: 5120, bottom: 1440 };
+        let r = letterbox(&wide, (3840, 2160));
+        assert_eq!((r.left, r.top, r.right, r.bottom), (1280, 0, 3840, 1440));
+        let left = RECT { left: -2560, top: 0, right: 0, bottom: 1440 };
+        let r = letterbox(&left, (2560, 1440));
+        assert_eq!((r.left, r.top, r.right, r.bottom), (-2560, 0, 0, 1440));
+        let tall = RECT { left: 0, top: 0, right: 1920, bottom: 1200 };
+        let r = letterbox(&tall, (1920, 1080));
+        assert_eq!((r.left, r.top, r.right, r.bottom), (0, 60, 1920, 1140));
+        let r = letterbox(&wide, (0, 0));
+        assert_eq!(r.right, 5120, "no client size: the whole monitor");
+    }
 
     /// (KLBF Lab) A 3840x2160 window on a 2560x1440 monitor left of the primary (negative x), and on a
     /// 5120x1440 primary: shrunk to fit, the same proportions, centred on it.

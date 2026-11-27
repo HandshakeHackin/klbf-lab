@@ -10790,6 +10790,8 @@ impl Host {
             if framegen {
                 crate::framegen::display(width, height, format.0);
             }
+            // (KLBF Lab) Alt+Enter is ours (borderless fullscreen), never DXGI's exclusive fullscreen.
+            let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
             let copy = self.new_list()?;
             copy.close();
             tracing::info!(width, height, format = format.0, "presenting to a window");
