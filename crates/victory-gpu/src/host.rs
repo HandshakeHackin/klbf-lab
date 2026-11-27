@@ -9974,6 +9974,9 @@ struct Meter {
     copy_stats_frames: u64,
     drawn: u64,
     logged: std::time::Instant,
+    /// (KLBF Lab, 27/11) The last present, and the frame times (ms) since `since`, for the caption's 1 % low.
+    last: std::time::Instant,
+    frame_ms: Vec<f64>,
 }
 
 /// (C3, from another-victory-fork f36a0fc) `VICTORY_METER_THREAD=1`, default
@@ -10023,6 +10026,8 @@ impl Meter {
             copy_stats_frames: 0,
             drawn: crate::draw::drawn(),
             logged: now,
+            last: now,
+            frame_ms: Vec::with_capacity(256),
         }
     }
 
@@ -10043,10 +10048,16 @@ impl Meter {
         {
             self.copy_stats_frames += 1;
         }
-        let elapsed = self.since.elapsed();
+        let now = std::time::Instant::now();
+        self.frame_ms.push(now.duration_since(self.last).as_secs_f64() * 1000.0);
+        self.last = now;
+        let elapsed = now.duration_since(self.since);
         if elapsed < std::time::Duration::from_secs(1) {
             return;
         }
+        self.frame_ms.sort_by(f64::total_cmp);
+        let low1 = crate::klbf_bench::low_pct_fps(&self.frame_ms, 0.01);
+        self.frame_ms.clear();
         let drawn = crate::draw::drawn();
         let frames = f64::from(self.frames);
         let fps = frames / elapsed.as_secs_f64();
@@ -10345,13 +10356,9 @@ impl Meter {
             };
             meter_lines(lines);
         }
-        // (ours) The caption the player sees, as PastiiJay/klbf-lab's: "KLBF Lab · F FPS · M ms"
+        // (ours) The caption the player sees, as PastiiJay/klbf-lab's: "KLBF Lab · F FPS · M ms", then
+        // (27/11) what the bench card shows but the time (`klbf_bench::caption`)
         // (was "Scarlett | <game> | F FPS | M ms | D draws", which tools/*.sh split at '|').
-        let _ = (ms, draws);
-        // While pipelines are being made: "· compiling N shaders" (the frame line's counter).
-        let text = crate::shell::compiling(crate::shell::caption(fps), "  \u{b7}  ", crate::pipeline::making());
-        let mut text: Vec<u16> = text.encode_utf16().collect();
-        text.push(0);
         // Setting the text waits for the window's thread (a title thread,
         // which may not pump for a while), so a thread of ours does it and
         // presenting never waits; it takes the newest text when free.
@@ -10359,6 +10366,9 @@ impl Meter {
         static SETTER: std::sync::Once = std::sync::Once::new();
         // KLBF Lab Bench: a run owns the title meanwhile (no figures during it).
         if !crate::klbf_bench::holds_title() {
+            // While pipelines are being made: "· compiling N shaders" (the frame line's counter).
+            let text = crate::klbf_bench::caption(fps, low1, draws, crate::pipeline::making());
+            let text: Vec<u16> = text.encode_utf16().chain([0]).collect();
             *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd.0 as usize, text));
         }
         SETTER.call_once(|| {

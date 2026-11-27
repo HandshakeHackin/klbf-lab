@@ -122,10 +122,11 @@ pub fn display_name() -> Option<&'static str> {
 }
 
 /// The window's caption (ours, PastiiJay/klbf-lab's form): `KLBF Lab · F FPS · M ms` over the
-/// last interval (`fps` 0: no frame was presented in it, `–` ms). No game name on screen.
+/// last interval (`fps` 0: no frame was presented in it, `–` ms). No game name on screen. (27/11) Single
+/// spaces: `klbf_bench::caption` adds the bench's figures after it.
 pub fn caption(fps: f64) -> String {
     let ms = if fps > 0.0 { format!("{:.0}", 1000.0 / fps) } else { "\u{2013}".to_owned() };
-    format!("KLBF Lab  \u{b7}  {fps:.0} FPS  \u{b7}  {ms} ms")
+    format!("KLBF Lab \u{b7} {fps:.0} FPS \u{b7} {ms} ms")
 }
 
 /// `caption` with `sep` and "compiling N shaders" after it while `making` host pipelines are
@@ -488,9 +489,9 @@ mod tests {
 
     #[test]
     fn the_caption_says_frame_rate_and_time_per_frame() {
-        assert_eq!(caption(10.7), "KLBF Lab  \u{b7}  11 FPS  \u{b7}  93 ms");
+        assert_eq!(caption(10.7), "KLBF Lab \u{b7} 11 FPS \u{b7} 93 ms");
         // No frame presented in the interval.
-        assert_eq!(caption(0.0), "KLBF Lab  \u{b7}  0 FPS  \u{b7}  \u{2013} ms");
+        assert_eq!(caption(0.0), "KLBF Lab \u{b7} 0 FPS \u{b7} \u{2013} ms");
     }
 
     #[test]
@@ -499,7 +500,7 @@ mod tests {
         assert_eq!(compiling(caption(15.0), sep, 0), caption(15.0));
         assert_eq!(
             compiling(caption(15.0), sep, 1558),
-            "KLBF Lab  \u{b7}  15 FPS  \u{b7}  67 ms  \u{b7}  compiling 1558 shaders"
+            "KLBF Lab \u{b7} 15 FPS \u{b7} 67 ms  \u{b7}  compiling 1558 shaders"
         );
         assert_eq!(
             compiling("KLBF Lab \u{b7} Bench 2:13 / 5:00".into(), " \u{b7} ", 1),

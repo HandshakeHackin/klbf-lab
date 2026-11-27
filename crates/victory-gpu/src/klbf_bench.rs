@@ -306,6 +306,11 @@ impl Shown {
     }
 }
 
+/// "Series S" or "Series X".
+fn profile_name() -> &'static str {
+    if profile() == "S" { "Series S" } else { "Series X" }
+}
+
 /// The title's own upscaler's scale: Series X's `KLBF_X_RENDER_SCALE` (victory-loader's
 /// `resolution::asked_render_scale`, 0.5 to 1.0), else 2/3, Series S's too.
 fn title_scale() -> f32 {
@@ -398,6 +403,56 @@ fn shown() -> Shown {
     Shown { output, render, upscaler, fsr: String::new(), fg, screen }
 }
 
+/// (27/11) The window's caption outside a run, refreshed once a second: what the card shows but the time,
+/// "KLBF Lab · 16 FPS · 62 ms · 1% 9 · 9.8k draws · Series X FSR 4 Quality 960p → 1440p · FG · screen
+/// 2560x1440 · VRAM 11.6/14.0 GB · RAM 15.2 GB [· compiling N shaders]". `low1`: the 1 % low of the last
+/// second's frames, fps (0: not known).
+pub(crate) fn caption(fps: f64, low1: f64, draws: f64, making: u64) -> String {
+    let (used, budget) = vram_now();
+    caption_text(fps, low1, draws, profile_name(), &shown(), [used, budget, ram_bytes()], making)
+}
+
+/// [`caption`]'s text; `mem`: card memory used and budget, the process's working set, bytes. Over 160
+/// characters, the screen goes first.
+fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, mem: [u64; 3], making: u64) -> String {
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let mut parts = vec![crate::shell::caption(fps)];
+    if low1 > 0.0 {
+        parts.push(format!("1% {low1:.0}"));
+    }
+    if draws >= 1000.0 {
+        parts.push(format!("{:.1}k draws", draws / 1000.0));
+    } else if draws > 0.0 {
+        parts.push(format!("{draws:.0} draws"));
+    }
+    let label = s.label();
+    if !label.is_empty() {
+        parts.push(format!("{profile} {label}"));
+    }
+    if s.fg {
+        parts.push("FG".into());
+    }
+    let screen = (s.screen[1] > 0).then(|| parts.len());
+    if screen.is_some() {
+        parts.push(format!("screen {}", wxh(s.screen)));
+    }
+    if mem[1] > 0 {
+        parts.push(format!("VRAM {:.1}/{:.1} GB", mem[0] as f64 / GB, mem[1] as f64 / GB));
+    }
+    if mem[2] > 0 {
+        parts.push(format!("RAM {:.1} GB", mem[2] as f64 / GB));
+    }
+    let text = |p: &[String]| crate::shell::compiling(p.join(" \u{b7} "), " \u{b7} ", making);
+    let full = text(&parts);
+    match screen {
+        Some(i) if full.chars().count() > 160 => {
+            parts.remove(i);
+            text(&parts)
+        }
+        _ => full,
+    }
+}
+
 /// (27/11) Live figures after the run's time in the window title, once a second: frames per second over the last
 /// second, the process's RAM, the whole CPU's use and the card's busy share (input is locked, so they cannot sway
 /// the run). Empty on the first call.
@@ -458,7 +513,7 @@ fn device_removed() -> bool {
 }
 
 /// The fps of the slowest `pct` of the frames (ms, sorted ascending).
-fn low_pct_fps(sorted_asc: &[f64], pct: f64) -> f64 {
+pub(crate) fn low_pct_fps(sorted_asc: &[f64], pct: f64) -> f64 {
     if sorted_asc.is_empty() {
         return 0.0;
     }
@@ -2224,6 +2279,24 @@ mod tests {
         set.shown = Shown::default();
         assert_eq!(set.lines()[0], "Series X \u{b7} FSR", "before the first present: the upscaler alone");
         assert!(sample_card().set.line().starts_with("Series S \u{b7} FSR 4 Quality 960p \u{2192} 1440p \u{b7} frame generation on \u{b7} screen 2560x1440 \u{b7} "));
+    }
+
+    #[test]
+    fn window_caption() {
+        const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+        let mem = [(11.6 * GB) as u64, (14.0 * GB) as u64, (15.2 * GB) as u64];
+        let full = "KLBF Lab \u{b7} 16 FPS \u{b7} 63 ms \u{b7} 1% 9 \u{b7} 9.8k draws \u{b7} Series X FSR 4 Quality 960p \u{2192} 1440p \u{b7} FG \u{b7} screen 2560x1440 \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB";
+        assert_eq!(caption_text(15.9, 9.4, 9_800.0, "Series X", &sample_shown(), mem, 0), full);
+        // Compiling: over 160 characters, so the screen goes.
+        let compiling = caption_text(15.9, 9.4, 9_800.0, "Series X", &sample_shown(), mem, 12_345);
+        assert_eq!(compiling, full.replace(" \u{b7} screen 2560x1440", "") + " \u{b7} compiling 12345 shaders");
+        assert!(compiling.chars().count() <= 160);
+        // Nothing known yet but the frame rate.
+        assert_eq!(caption_text(0.0, 0.0, 0.0, "Series S", &Shown::default(), [0; 3], 1), "KLBF Lab \u{b7} 0 FPS \u{b7} \u{2013} ms \u{b7} compiling 1 shader");
+        assert_eq!(
+            caption_text(30.0, 25.0, 812.0, "Series S", &Shown { upscaler: Upscaler::Title, render: [1280, 720], output: [1920, 1080], fg: false, screen: [0; 2], ..sample_shown() }, mem, 0),
+            "KLBF Lab \u{b7} 30 FPS \u{b7} 33 ms \u{b7} 1% 25 \u{b7} 812 draws \u{b7} Series S Title upscaler 720p \u{2192} 1080p \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB"
+        );
     }
 
     #[test]
