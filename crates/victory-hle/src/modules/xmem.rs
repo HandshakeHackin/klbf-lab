@@ -180,6 +180,12 @@ pub extern "system" fn XMemVirtualAlloc(
                 %error,
                 "XMemVirtualAlloc refused"
             );
+            // (27/11, #136) In crashes.log too: the title stops at its own check (+0x19f4f58) when
+            // its graphics reservation (low 4 GiB, flags 7) is refused, and that log is all a
+            // launcher user sends.
+            victory_loader::note_title_output(&format!(
+                "KLBF Lab: XMemVirtualAlloc refused {size:#x} bytes (kind {kind:#x}, flags {flags:#x}): {error}"
+            ));
         }
     }
     // (KLBF Lab, renderer port 1) 32-bit graphics reservations, so that `VICTORY_PORT_CONSTANTS=1` can
