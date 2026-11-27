@@ -200,11 +200,11 @@ fn live_figures() -> String {
             }
             let gpu = GPU.load(Ordering::Relaxed);
             format!(
-                " \u{b7} {:.0} FPS \u{b7} RAM {:.1} GB \u{b7} CPU {:.0} %{}",
+                " | {:.0} FPS{} | CPU usage {:.0} % | Memory usage {:.1} GB",
                 frames.saturating_sub(f) as f64 / secs,
-                ram_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
+                if gpu == u64::MAX { String::new() } else { format!(" | GPU usage {gpu} %") },
                 cpu.clamp(0.0, 100.0),
-                if gpu == u64::MAX { String::new() } else { format!(" \u{b7} GPU {gpu} %") }
+                ram_bytes() as f64 / (1024.0 * 1024.0 * 1024.0)
             )
         }
         None => String::new(),
@@ -1182,8 +1182,8 @@ fn label_text(started: Option<Duration>) -> String {
 /// the title shows in the taskbar and on the window's own frame).
 fn title_text(started: Option<Duration>) -> String {
     match started {
-        None => "KLBF Lab \u{b7} Bench waiting for the world".into(),
-        Some(d) => format!("KLBF Lab \u{b7} Bench {} / {}", mmss(d.min(run_for())), target()),
+        None => "KLBF Lab Bench | waiting for the world".into(),
+        Some(d) => format!("KLBF Lab Bench | Time {} / {}", mmss(d.min(run_for())), target()),
     }
 }
 
@@ -1347,7 +1347,7 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
                 if holds_title() && IsWindow(game) != 0 {
                     // "· compiling N shaders" after it while pipelines are being made (none at 0).
                     let live = if started.is_some() { live_figures() } else { String::new() };
-                    let text = crate::shell::compiling(title_text(started) + &live, " \u{b7} ", crate::pipeline::making());
+                    let text = crate::shell::compiling(title_text(started) + &live, " | ", crate::pipeline::making());
                     set_title(game, &mut title_buf, &text);
                 }
                 // Placed from the game window's own rectangle, read every time (it may sit on
@@ -1855,9 +1855,9 @@ mod tests {
 
     #[test]
     fn title_during_the_run() {
-        assert_eq!(title_text(None), "KLBF Lab \u{b7} Bench waiting for the world");
-        assert_eq!(title_text(Some(Duration::from_secs(133))), "KLBF Lab \u{b7} Bench 2:13 / 5:00");
-        assert_eq!(title_text(Some(Duration::from_secs(400))), "KLBF Lab \u{b7} Bench 5:00 / 5:00");
+        assert_eq!(title_text(None), "KLBF Lab Bench | waiting for the world");
+        assert_eq!(title_text(Some(Duration::from_secs(133))), "KLBF Lab Bench | Time 2:13 / 5:00");
+        assert_eq!(title_text(Some(Duration::from_secs(400))), "KLBF Lab Bench | Time 5:00 / 5:00");
     }
 
     #[test]
