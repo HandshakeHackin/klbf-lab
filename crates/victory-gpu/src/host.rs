@@ -10399,12 +10399,17 @@ impl Meter {
             let _ = std::thread::Builder::new()
                 .name("victory-caption".into())
                 .spawn(|| {
+                    // (KLBF Lab) The same text is not set again: each change is an event the taskbar
+                    // (and tools hooked on it) redraws for.
+                    let mut last: Vec<u16> = Vec::new();
                     loop {
                         let next = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
                         match next {
+                            Some((_, text)) if text == last => {}
                             // SAFETY: a window handle and a NUL-terminated text.
                             Some((hwnd, text)) => unsafe {
                                 let _ = SetWindowTextW(HWND(hwnd as *mut _), PCWSTR(text.as_ptr()));
+                                last = text;
                             },
                             None => std::thread::sleep(std::time::Duration::from_millis(100)),
                         }

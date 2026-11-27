@@ -205,6 +205,15 @@ function Invoke-KlbfShortcutOffer($Spec, $Ask, [string]$Path = (Join-Path ([Envi
     Set-KlbfShortcut $Spec $Ask $Path
 }
 
+# (27/11) This process groups with the game under one KLBF Lab taskbar button (the game sets the same id),
+# shown with the windows' flask instead of PowerShell's icon.
+function Set-KlbfAppId {
+    try {
+        if (-not ('KlbfAppId' -as [type])) { Add-Type -Namespace '' -Name KlbfAppId -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string id);' }
+        [KlbfAppId]::SetCurrentProcessExplicitAppUserModelID('PastiiJay.KLBFLab') -eq 0
+    } catch { $false }
+}
+
 # Every key of KLBF Lab, as the Quick tab lists them.
 function Get-KlbfShortcuts {
     @(

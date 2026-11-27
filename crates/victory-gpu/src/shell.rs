@@ -208,6 +208,15 @@ static ICONS: Mutex<Vec<(usize, [usize; 2])>> = Mutex::new(Vec::new());
 /// of its own: decoding them takes a few milliseconds and is nothing the
 /// window or presenting waits for. Whatever fails, the window keeps the
 /// icon it has and one line says why.
+/// (KLBF Lab, 27/11) The game and KLBF Lab Settings (the launcher sets the same id) group under one
+/// taskbar button, shown with our flask (the windows' icon).
+pub fn set_app_id() {
+    use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    let id: Vec<u16> = "PastiiJay.KLBFLab".encode_utf16().chain([0]).collect();
+    // SAFETY: a NUL-terminated id, read during the call.
+    let _ = unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
+}
+
 pub fn set_icons(hwnd: HWND) {
     if !icons_on() {
         return;
