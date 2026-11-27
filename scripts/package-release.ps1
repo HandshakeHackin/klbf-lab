@@ -36,7 +36,7 @@ Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding ascii -Value 
 KLBF Lab $Tag (Windows, 64-bit)
 
 1. Extract anywhere.
-2. Double-click KLBF Lab.
+2. Double-click "KLBF Lab.vbs" (Windows may hide the ".vbs" part: it is the file with the script icon). Later, use the desktop shortcut it can create.
 3. Choose your game folder (your own copy).
 4. Play.
 
