@@ -50,4 +50,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" "${{ steps.pkg.outputs.zip }}" --title "KLBF Lab ${{ github.ref_name }}" --notes "Download KLBF-Lab-win64.zip, extract it, double-click \"KLBF Lab.cmd\", choose your own game folder. No game files are included. SHA-256 of the zip: ${{ steps.pkg.outputs.sha }}"
+          # A beta tag (v26.11.3-lowend-beta1) is a pre-release: never "Latest", so the launcher's update check
+          # (/releases/latest) never offers it to everyone.
+          $pre = @(); if ("${{ github.ref_name }}" -match '-beta') { $pre = @('--prerelease') }
+          gh release create "${{ github.ref_name }}" "${{ steps.pkg.outputs.zip }}" @pre --title "KLBF Lab ${{ github.ref_name }}" --notes "Download KLBF-Lab-win64.zip, extract it, double-click \"KLBF Lab.cmd\", choose your own game folder. No game files are included. SHA-256 of the zip: ${{ steps.pkg.outputs.sha }}"
