@@ -4887,6 +4887,51 @@ mod copied_and_simd_tests {
         }
     }
 
+    #[test]
+    fn sparse_page_merges_preserve_the_gap_and_unselected_tail() {
+        // Page 1 is clean. Page 3 is dirty, but the requested range ends
+        // 31, 32, or 33 bytes into it. Give GPU-only writes to the gap and
+        // suffix as well, so a merge outside the planned ranges is visible.
+        let size = PAGE * 4 + 19;
+        let old = vec![0x11; size];
+        let mut title = old.clone();
+        let mut gpu = old.clone();
+        for i in (0..size).step_by(3) {
+            gpu[i] = 0xcc;
+        }
+        for i in (0..size).step_by(5) {
+            title[i] = 0x55;
+        }
+        for tail_len in [31, 32, 33] {
+            let end = PAGE * 3 + tail_len;
+            let mut copied = CopiedPages::new(4);
+            for page in 0..4 {
+                copied.set(page, 1);
+            }
+            let writes = [(0, 2), (2, 2), (3, 2)];
+            let plan = copied.plan_stale(0, 0, PAGE * 4, 7, end, 3, &writes);
+            let expected_ranges = [(7, PAGE), (2 * PAGE, end)];
+            assert_eq!(plan.iter().collect::<Vec<_>>(), expected_ranges);
+
+            let (mut scalar_held, mut scalar_title) = (old.clone(), title.clone());
+            let (mut held, mut merged) = (old.clone(), title.clone());
+            for (lo, hi) in expected_ranges {
+                assert!(merge_piece_scalar(
+                    &gpu[lo..hi], &mut scalar_held[lo..hi], &mut scalar_title[lo..hi],
+                ));
+            }
+            for (lo, hi) in plan.iter() {
+                assert!(merge_piece(&gpu[lo..hi], &mut held[lo..hi], &mut merged[lo..hi]));
+            }
+            assert_eq!(held, scalar_held);
+            assert_eq!(merged, scalar_title);
+            for range in [0..7, PAGE..2 * PAGE, end..size] {
+                assert_eq!(held[range.clone()], old[range.clone()]);
+                assert_eq!(merged[range.clone()], title[range]);
+            }
+        }
+    }
+
     /// Nested `wide()` calls execute inline without deadlocking the worker pool.
     #[test]
     fn nested_wide_runs_without_deadlock() {
