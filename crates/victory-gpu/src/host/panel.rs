@@ -366,8 +366,6 @@ impl Panel {
         let _ours = crate::replay::record::unrecorded();
         let scale = scale(height);
         if self.buffers.as_ref().is_none_or(|b| (b.format, b.scale) != (format, scale)) {
-            // (What the card may still read stays: a picture's size changes once or twice in a run.)
-            std::mem::forget(self.buffers.take());
             self.buffers = Buffers::new(host, format, scale);
             self.failed = self.buffers.is_none();
             self.changed = true;
@@ -377,12 +375,15 @@ impl Panel {
             buffers.write(&self.lines);
         }
         let (w, h) = size(scale);
-        let list = &list.list;
+        // A resize can replace these buffers while this present is in flight.
+        list.keep(&buffers.card);
         // SAFETY: an open list and live resources; the box lies within both.
         unsafe {
             if std::mem::take(&mut buffers.fresh) {
-                list.CopyResource(&buffers.card, &buffers.uploads[buffers.turn].0);
-                list.ResourceBarrier(&[transition(
+                let upload = &buffers.uploads[buffers.turn].0;
+                list.keep(upload);
+                list.list.CopyResource(&buffers.card, upload);
+                list.list.ResourceBarrier(&[transition(
                     &buffers.card,
                     D3D12_RESOURCE_STATE_COPY_DEST,
                     D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -417,7 +418,7 @@ impl Panel {
                 bottom: h.min(height),
                 back: 1,
             };
-            list.CopyTextureRegion(&to, 0, 0, 0, &from, Some(&part));
+            list.list.CopyTextureRegion(&to, 0, 0, 0, &from, Some(&part));
         }
         self.cost += began.elapsed();
     }

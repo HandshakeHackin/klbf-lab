@@ -99,9 +99,10 @@ pub(crate) enum Why {
     Budget,
     NoHeap,
     NoQueue,
+    Cleanup,
 }
 
-const WHY: usize = 12;
+const WHY: usize = 13;
 const WHY_NAMES: [&str; WHY] = [
     "not 2D",
     "array or cube",
@@ -115,6 +116,7 @@ const WHY_NAMES: [&str; WHY] = [
     "mapping budget spent",
     "no heap could be made",
     "no mapping thread",
+    "cleanup registration failed",
 ];
 
 /// Since the start: copies sent to the placed pool by [`Why`], and bytes.
@@ -574,13 +576,22 @@ pub(crate) unsafe fn texture(
         .collect();
     MADE[M_ALIVE_PAGES].fetch_add(u64::from(t.total), Ordering::Relaxed);
     drop(pages);
+    let total = t.total;
+    let segs = flat(&runs);
+    // The cleanup object owns the runs before the worker can see the
+    // texture. Its final release balances both live counters on every path.
+    MADE[M_ALIVE].fetch_add(1, Ordering::Relaxed);
+    if let Err(e) = give_back_with(&texture, runs, total) {
+        unreserve(per_call);
+        tracing::warn!(error = %e, pages = total, "could not attach texture page cleanup");
+        return out(Why::Cleanup);
+    }
     let estimate = per_call * maps.len().max(1) as u64;
     BACKLOG_US.fetch_add(estimate - per_call, Ordering::AcqRel);
     // The tiles are mapped by the mapping thread on its queue; the host's
     // queue waits (on the card) for that before anything sent after this,
     // which is all that can name the copy; so does the copy queue of uploads
     // made ahead ([`ready_on`]).
-    let total = t.total;
     let kept_tiling = t.clone();
     let sent = {
         let send = worker.send.lock().unwrap_or_else(|e| e.into_inner());
@@ -600,18 +611,15 @@ pub(crate) unsafe fn texture(
         // The mapping thread is gone: nothing was asked of the host's queue;
         // the pages go back (resting) with the texture, which is not used.
         unreserve(estimate);
-        give_back_with(&texture, runs, total);
         return out(Why::NoQueue);
     }
     MADE[M_COPIES].fetch_add(1, Ordering::Relaxed);
     MADE[M_PAGES].fetch_add(u64::from(total), Ordering::Relaxed);
     MADE[M_PLACED].fetch_add(placed, Ordering::Relaxed);
-    MADE[M_ALIVE].fetch_add(1, Ordering::Relaxed);
     copies().get_or_insert_with(Default::default).insert(
         texture.as_raw() as usize,
-        Copy { segs: flat(&runs), tiling: kept_tiling, desc: d, made: now, host: None },
+        Copy { segs, tiling: kept_tiling, desc: d, made: now, host: None },
     );
-    give_back_with(&texture, runs, total);
     Ok(texture)
 }
 
@@ -848,7 +856,7 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {
     }
 }
 
-fn give_back_with(texture: &ID3D12Resource, runs: Runs, pages: u32) {
+fn give_back_with(texture: &ID3D12Resource, runs: Runs, pages: u32) -> windows::core::Result<()> {
     const KEY: GUID = GUID::from_u128(0x3c1b7a52_8e0d_4f6a_b2d9_5a7e01c4f9a3);
     let raw = texture.as_raw() as usize;
     let made = Box::into_raw(Box::new(Reclaim { methods: &RECLAIM.0, references: AtomicU32::new(1), runs, pages, texture: raw }));
@@ -859,11 +867,7 @@ fn give_back_with(texture: &ID3D12Resource, runs: Runs, pages: u32) {
     // drops at the end; the texture takes its own.
     unsafe {
         let object = IUnknown::from_raw(made.cast());
-        if texture.SetPrivateDataInterface(&KEY, &object).is_err() {
-            // Never given back: the pages stay taken under a texture that
-            // may be alive.
-            std::mem::forget(object);
-        }
+        texture.SetPrivateDataInterface(&KEY, &object)
     }
 }
 

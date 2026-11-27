@@ -1476,8 +1476,9 @@ fn made_now(texture: &ID3D12Resource) {
     recent.push_back((texture.as_raw() as usize, now));
 }
 
-/// Makes `texture` give `piece` back when the last reference to it goes.
-fn give_back_with(texture: &ID3D12Resource, piece: Piece) {
+/// Called before the new texture can be submitted or shared. On failure
+/// our reference to the cleanup object returns the unused piece immediately.
+fn give_back_with(texture: &ID3D12Resource, piece: Piece) -> windows::core::Result<()> {
     const KEY: GUID = GUID::from_u128(0x6f0e2f0c_5a59_4b1e_9a3f_7f4d2c9be713);
     let raw = texture.as_raw() as usize;
     let made = Box::into_raw(Box::new(Reclaim { methods: &RECLAIM.0, references: AtomicU32::new(1), piece, texture: raw }));
@@ -1488,11 +1489,7 @@ fn give_back_with(texture: &ID3D12Resource, piece: Piece) {
     // drops at the end; the texture takes its own.
     unsafe {
         let object = IUnknown::from_raw(made.cast());
-        if texture.SetPrivateDataInterface(&KEY, &object).is_err() {
-            // Never given back: the piece stays taken, nothing is reused
-            // under a texture that may be alive.
-            std::mem::forget(object);
-        }
+        texture.SetPrivateDataInterface(&KEY, &object)
     }
 }
 
@@ -1592,7 +1589,10 @@ pub(crate) unsafe fn texture(
     match (result, made) {
         (Ok(()), Some(made)) => {
             HELD.fetch_add(piece.len, Ordering::Relaxed);
-            give_back_with(&made, piece);
+            if let Err(e) = give_back_with(&made, piece) {
+                tracing::warn!(error = %e, bytes = piece.len, "could not attach texture pool cleanup");
+                return None;
+            }
             made_now(&made);
             #[cfg(feature = "diagnostics")]
             {
