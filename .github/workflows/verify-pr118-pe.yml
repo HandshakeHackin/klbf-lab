@@ -1,0 +1,19 @@
+name: Verify PR 118 PE fixture on beta-2
+on:
+  push:
+    branches: [verify/pr118-pe-beta2]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable-pe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: PE tests
+        run: cargo test -p victory-pe --locked
+      - name: PE clippy
+        run: cargo clippy -p victory-pe --all-targets --locked -- -D warnings
