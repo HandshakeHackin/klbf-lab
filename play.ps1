@@ -255,6 +255,8 @@ if ($Bench) {
     Write-Host 'post it with the form: https://github.com/PastiiJay/klbf-lab/issues/new?template=bench-bm-v1.yml'
 }
 if ($benchLabel) { $set.KLBF_BENCH_SAVE = $benchLabel }
+# (27/11) F8's screenshots: the folder chosen in Settings, else Pictures\KLBF Lab
+$set.KLBF_SHOTS_DIR = Get-KlbfShotsDir (Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json'))
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 if ($PrintEnv) {
@@ -342,4 +344,12 @@ if ($Fsr) {
 } else {
     & $Victory run $exe --execute
 }
-exit $LASTEXITCODE
+# (27/11) In the game F10 (Settings) and F11 (Restart) end it with exit code 10 or 11: the settings window
+# (its Play starts the game again), or the same start again; the saves are backed up again at that start.
+# ponytail: a new play.ps1 per relaunch (nested), fine for a session's few dozen restarts.
+$code = $LASTEXITCODE
+switch (Get-KlbfNextStart $code) {
+    'settings' { $again = $passOn; & $PSCommandPath -Setup @again; exit $LASTEXITCODE }
+    'restart' { $again = Get-KlbfRestartArgs $PSBoundParameters; & $PSCommandPath @again; exit $LASTEXITCODE }
+}
+exit $code

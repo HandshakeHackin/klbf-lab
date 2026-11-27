@@ -21,7 +21,7 @@ function Get-KlbfLauncherDir {
 # The owner's setting: Profile X, FSR 4 Performance, 3840x2160, frame generation, hooks and texture trim
 # (= -Tout -FsrQuality performance -Output 3840x2160).
 function Get-KlbfDefaults {
-    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = '' }
+    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = '' }
 }
 
 # Any object (a parsed JSON) over the defaults: unknown or invalid values keep the default.
@@ -35,7 +35,40 @@ function ConvertTo-KlbfChoice($o) {
     if ($o.frameGen -is [bool]) { $c.frameGen = $o.frameGen }
     if ($o.advanced -is [bool]) { $c.advanced = $o.advanced }
     if ($o.game -is [string]) { $c.game = $o.game }
+    if ($o.shotsDir -is [string]) { $c.shotsDir = $o.shotsDir }
     $c
+}
+
+# (27/11) Where F8's screenshots go (KLBF_SHOTS_DIR): the folder chosen in Settings, else Pictures\KLBF Lab
+# (made by the game on the first screenshot).
+function Get-KlbfShotsDir($Choice) {
+    if ($Choice -and $Choice.shotsDir) { return [string]$Choice.shotsDir }
+    Join-Path ([Environment]::GetFolderPath('MyPictures')) 'KLBF Lab'
+}
+
+# (27/11) What play.ps1 does when the game ends with $Code: 10 (F10, Settings) opens the settings window,
+# whose Play starts it again; 11 (F11, Restart) starts it again with the same settings; anything else stops.
+function Get-KlbfNextStart([int]$Code) {
+    switch ($Code) { 10 { 'settings' } 11 { 'restart' } default { '' } }
+}
+
+# F11's start: play.ps1's own parameters again, without the settings window.
+function Get-KlbfRestartArgs($Bound) {
+    $a = @{}
+    foreach ($k in $Bound.Keys) { if ($k -ne 'Setup') { $a[$k] = $Bound[$k] } }
+    $a.NoMenu = [switch]$true
+    $a
+}
+
+# Every key of KLBF Lab, as the Quick tab lists them.
+function Get-KlbfShortcuts {
+    @(
+        'F8    Screenshot (in the game): the game image, with a small KLBF Lab mark'
+        'F10  Settings: closes the game and opens this window; Play starts it again'
+        'F11  Restart: closes the game and starts it again with the same settings'
+        'F10  during a benchmark: stops it (F8 and F11 do nothing during a run)'
+        'Shift  held while starting: opens these settings first'
+    )
 }
 
 # Whether $Path is a game folder play.ps1 can start: it has game_scarlett_master.exe.
@@ -203,9 +236,9 @@ function Get-KlbfUpscalerName($Hw, [string]$Cache) {
 function Get-KlbfUniversal($Hw) {
     $c = Get-KlbfDefaults
     $c.upscaler = 'title'; $c.frameGen = $false
-    $w, $h = ([string]$Hw.screen -split 'x') + @(0, 0) | Select-Object -First 2 | ForEach-Object { [int]$_ }
-    $fit = @($script:KlbfModes | Where-Object { $m = $_ -split 'x'; [int]$m[0] -le $w -and [int]$m[1] -le $h })
-    $c.output = if ($fit) { $fit[-1] } else { $script:KlbfModes[0] }
+    # (27/11) Profile X: output 3840x2160 on every screen (Windows scales the window down). Below it the
+    # title's HUD and menus get too big and their texts overlap (known issue); the cost is the upscaler's.
+    $c.output = '3840x2160'
     $c
 }
 
@@ -225,7 +258,6 @@ function Get-KlbfRecommended($Hw) {
     if ($gen -notin 'RDNA 3', 'RDNA 4' -or $Hw.vramGB -lt 16) { $c.profile = 'S'; $c.frameGen = $gen -eq 'RDNA 4'; return $c }
     if ($gen -eq 'RDNA 4') { return $c }
     $c.frameGen = $false
-    $c.output = if ($Hw.screen -in $script:KlbfModes) { $Hw.screen } else { '2560x1440' }
     $c
 }
 
@@ -270,6 +302,19 @@ function Set-KlbfTheme($Form) {
     $Form.Font = New-KlbfFont
     $ico = Get-KlbfIconPath
     if ($ico) { $Form.Icon = New-Object System.Drawing.Icon($ico) }
+    # (27/11) Started hidden (Start-Process -WindowStyle Hidden, a scheduled task), the process's first
+    # ShowWindow takes the hidden state from its STARTUPINFO: the form never appeared and the launcher waited
+    # forever. Shown again here (a second ShowWindow is not overridden) and brought to the front.
+    $Form.add_Shown({
+        param($sender)
+        try {
+            if (-not ('KlbfShow' -as [type])) {
+                Add-Type -Namespace '' -Name KlbfShow -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);'
+            }
+            [void][KlbfShow]::ShowWindow($sender.Handle, 5) # SW_SHOW
+            $sender.Activate()
+        } catch {}
+    })
     $Form.add_HandleCreated({
         param($sender)
         try {
@@ -443,6 +488,7 @@ function Get-KlbfBenchGuide {
         ''
         'Each bench:'
         '3. Close other heavy programs. Press Start bench, then touch nothing: after 5 seconds in the world the controller and keyboard are ignored until 5:00.'
+        '   F10 stops the run early (the card then says PARTIAL).'
         '4. The result card covers the screen at the end; a button closes it and the game.'
         ''
         'Results: the bench-results folder beside victory.exe (card PNG, JSON, text).'
@@ -512,8 +558,16 @@ function New-KlbfBenchData([string]$Data, $Save, [string]$Dest = (Join-Path (Spl
 }
 
 # How the card names a save: "#2 <in-game name>" (the Saves tab's number), "Autosave <name>".
+# (27/11, public rule) A save by its number only ("#2", "Autosave"): in-game names are the title's mission
+# names, never on a card, a screenshot or a post. KLBF_BENCH_SAVE carries this.
 function Get-KlbfSaveLabel($Save) {
-    if ($Save.auto) { "Autosave $($Save.title)" } else { '#' + ($Save.slot -replace '^Slot ', '') + " $($Save.title)" }
+    if ($Save.auto) { 'Autosave' } else { '#' + ($Save.slot -replace '^Slot ', '') }
+}
+
+# "Save #2" / "Autosave", with the in-game name after it only when $Show (the Saves tab's Show names).
+function Get-KlbfSaveName($Save, [bool]$Show = $false) {
+    $n = if ($Save.auto) { 'Autosave' } else { 'Save ' + (Get-KlbfSaveLabel $Save) }
+    if ($Show -and $Save.title) { "$n ($($Save.title))" } else { $n }
 }
 
 # The bench window: the guide, the save to load (the most recent by default), a GitHub login box,
@@ -527,7 +581,7 @@ function Show-KlbfBenchGuide($Saves) {
     $t = New-Object System.Windows.Forms.Label; $t.Text = Get-KlbfBenchGuide; $t.SetBounds(16, 12, 488, 300)
     $sl = New-Object System.Windows.Forms.Label; $sl.Text = 'Save the bench loads:'; $sl.SetBounds(16, 358, 200, 20)
     $pick = New-Object System.Windows.Forms.ComboBox; $pick.DropDownStyle = 'DropDownList'; $pick.ForeColor = [System.Drawing.Color]::Black; $pick.SetBounds(216, 355, 288, 24)
-    foreach ($s in $Saves) { [void]$pick.Items.Add("$($s.slot): $($s.title)") }
+    foreach ($s in $Saves) { [void]$pick.Items.Add("$(Get-KlbfSaveName $s) ($($s.date.ToString('yyyy-MM-dd HH:mm')))") }
     if ($Saves) { $pick.SelectedIndex = [array]::IndexOf(@($Saves), (@($Saves) | Sort-Object date -Descending | Select-Object -First 1)) }
     $l = New-Object System.Windows.Forms.Label; $l.Text = 'Your GitHub login (on the card; empty: anonymous):'; $l.SetBounds(16, 322, 300, 20)
     $box = New-Object System.Windows.Forms.TextBox; $box.SetBounds(316, 319, 188, 24)
@@ -637,7 +691,9 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.tips = New-Object System.Windows.Forms.ToolTip
     $c.tips.SetToolTip($c.upTitle, "The game's own upscaler, translated: works on every card; softer image, no frame generation.")
     $c.tips.SetToolTip($c.upFsr, 'AMD FSR (FSR 4 on RX 9000, FSR 3.1 elsewhere): sharper, presets, frame generation.')
-    [void](& $white (& $label $g $(if ($tested) { "Preset (recommended for your hardware: $($script:KlbfPresets[$rec.preset])):" } else { 'Preset:' }) 12 68 460))
+    $c.presetText = if ($tested) { "Preset (recommended for your hardware: $($script:KlbfPresets[$rec.preset]))" } else { 'Preset' }
+    $c.presetLabel = & $white (& $label $g "$($c.presetText):" 12 68 460)
+    $c.upscalerGroup = $g
     $p = New-Object System.Windows.Forms.Panel
     [void](& $add $g $p 8 86 466 26)
     $c.presets = @{}
@@ -655,32 +711,41 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
 
     $g = & $group $page 'Options' 508 74
     $c.fg = New-Object System.Windows.Forms.CheckBox
-    $c.fg.Text = & $mark 'Frame generation (FG x2)' $rec.frameGen
+    $c.fgText = & $mark 'Frame generation (FG x2)' $rec.frameGen
+    $c.fg.Text = $c.fgText
     [void](& $white (& $add $g $c.fg 12 20 460 22))
+    $c.optionsGroup = $g
     $c.adv = New-Object System.Windows.Forms.CheckBox
     $c.adv.Text = 'Advanced: memory hooks and texture trim (faster, uses less RAM)'
     [void](& $white (& $add $g $c.adv 12 44 462 22))
 
     $g = & $group $page 'Saved profiles' 586 60
-    $c.saved = & $combo $g 12 24 196
+    # (27/11) Save overwrites the selected profile, Save as... makes a new one; the loaded one shows
+    # "name *" once the settings differ from it.
+    $c.saved = & $combo $g 12 24 150
     foreach ($n in (Get-KlbfPresetNames)) { [void]$c.saved.Items.Add($n) }
     if ($c.saved.Items.Count) { $c.saved.SelectedIndex = 0 }
-    $c.load = & $btn $g 'Load' 214 22 78
-    $c.saveAs = & $btn $g "Save as$([char]0x2026)" 298 22 84
-    $c.delete = & $btn $g 'Delete' 388 22 78
+    $c.load = & $btn $g 'Load' 168 22 70
+    $c.save = & $btn $g 'Save' 244 22 70
+    $c.saveAs = & $btn $g "Save as$([char]0x2026)" 320 22 80
+    $c.delete = & $btn $g 'Delete' 406 22 62
+    $c.save.Enabled = $null -ne $c.saved.SelectedItem
 
     # Saves tab
     $c.savesRoot = Get-KlbfSavesRoot $Info.data
     $c.savesList = New-Object System.Windows.Forms.ListView
     $c.savesList.View = 'Details'; $c.savesList.FullRowSelect = $true; $c.savesList.HeaderStyle = 'Nonclickable'
     $c.savesList.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.savesList.ForeColor = Get-KlbfColor $script:KlbfTheme.text
-    foreach ($h in @(@('In the menu', 90), @('Name in the game', 190), @('Date', 120), @('Size', 70))) { [void]$c.savesList.Columns.Add($h[0], $h[1]) }
+    # (27/11) In-game names (the title's mission names) hidden until Show names, every time the window opens
+    foreach ($h in @(@('Save', 90), @('Name in the game', 190), @('Date', 120), @('Size', 70))) { [void]$c.savesList.Columns.Add($h[0], $h[1]) }
+    $c.showNames = $false
     [void](& $add $savesPage $c.savesList 6 8 480 250)
     $note = & $label $savesPage ("Numbered as the game's Load menu lists them: the autosave first, then the newest first. " +
         'All saves are backed up before every launch and every bench (the last 10 are kept).') 6 264 480 54
     $note.ForeColor = $soft
     $c.backup = & $btn $savesPage 'Back up all' 6 322 150
     $c.restore = & $btn $savesPage "Restore a backup$([char]0x2026)" 166 322 170
+    $c.showNamesBtn = & $btn $savesPage 'Show names' 346 322 140
     $g = & $group $savesPage 'Copy a save over another (all saves are backed up first)' 362 64
     $c.copyFrom = & $combo $g 12 26 170
     [void](& $white (& $label $g 'over' 190 30 36))
@@ -696,6 +761,25 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.copyImage = & $btn $g 'Copy image' 12 346 150
     $c.copyText = & $btn $g 'Copy text' 172 346 150
     $c.quickNote = & $white (& $label $g '' 12 382 456 30)
+    # (27/11) Shortcuts: every key, and the in-game actions here (the game is not running: Restart is Play
+    # with the settings this window opened with; Settings is this window)
+    $g = & $group $quickPage 'Shortcuts' 428 150
+    $y = 20
+    foreach ($line in (Get-KlbfShortcuts)) { [void](& $white (& $label $g $line 12 $y 460 18)); $y += 18 }
+    $c.quickRestart = & $btn $g 'Restart (F11)' 12 ($y + 4) 150
+    $c.quickSettings = & $btn $g 'Settings (F10)' 172 ($y + 4) 150
+    $c.tips.SetToolTip($c.quickRestart, 'Play with the settings this window opened with.')
+    $g = & $group $quickPage 'Screenshots (F8)' 582 82
+    $c.shots = New-Object System.Windows.Forms.TextBox; $c.shots.ReadOnly = $true
+    $c.shots.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.shots.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    [void](& $white (& $label $g 'Folder:' 12 25 50))
+    [void](& $add $g $c.shots 64 22 214 24)
+    $c.showShots = $false
+    $c.shotsShow = & $btn $g 'Show' 284 20 72
+    $c.shotsChange = & $btn $g "Change$([char]0x2026)" 362 20 106
+    $c.shotsOpen = & $btn $g 'Open folder' 12 50 150
+    $c.shotsNote = & $white (& $label $g '' 172 54 300)
+    Set-KlbfShotsPath $c $Choice.shotsDir
     $c.lastBench = Get-KlbfLastBench $Info.victory
     if ($c.lastBench) {
         $c.benchPic.Image = [System.Drawing.Image]::FromStream((New-Object IO.MemoryStream(, [IO.File]::ReadAllBytes($c.lastBench.png))))
@@ -729,14 +813,32 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $fUpdate = ${function:Update-KlbfForm}; $fSet = ${function:Set-KlbfFormChoice}; $fGet = ${function:Get-KlbfFormChoice}
     $fPath = ${function:Get-KlbfPresetPath}; $fRead = ${function:Read-KlbfSettings}; $fSave = ${function:Save-KlbfSettings}
     $fSaves = ${function:Update-KlbfSavesTab}; $fBackup = ${function:Backup-KlbfSaves}; $fRestore = ${function:Restore-KlbfSaves}
-    $fCopy = ${function:Copy-KlbfSave}; $fReport = ${function:Get-KlbfBugReport}; $fLog = ${function:Get-KlbfLatestLog}
+    $fCopy = ${function:Copy-KlbfSave}; $fSaveName = ${function:Get-KlbfSaveName}; $fReport = ${function:Get-KlbfBugReport}; $fLog = ${function:Get-KlbfLatestLog}
     $fGamePath = ${function:Set-KlbfGamePath}; $fGuide = ${function:Show-KlbfBenchGuide}; $repo = $script:KlbfRepo; $backupDir = Get-KlbfBackupDir
     $update = { & $fUpdate $c }.GetNewClosure()
     foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle)) { $r.add_CheckedChanged($update) }
+    $fMark = ${function:Update-KlbfProfileMark}; $fKey = ${function:Get-KlbfProfileKey}
+    $markIt = { & $fMark $c }.GetNewClosure()
+    foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle, $c.fg, $c.adv) + @($c.presets.Values)) { $r.add_CheckedChanged($markIt) }
+    $c.output.add_SelectedIndexChanged($markIt)
+    $c.output.add_SelectedIndexChanged($update)
+    $c.saved.add_SelectedIndexChanged({ $c.save.Enabled = $null -ne $c.saved.SelectedItem }.GetNewClosure())
     $c.load.add_Click({
         if (-not $c.saved.SelectedItem) { return }
-        $path = & $fPath $c.saved.SelectedItem
-        & $fSet $c (& $fRead $path)
+        $name = $c.saved.SelectedItem -replace ' \*$', ''
+        $c.loaded = $null
+        & $fSet $c (& $fRead (& $fPath $name))
+        $c.loaded = $name; $c.loadedKey = & $fKey (& $fGet $c)
+        & $fMark $c
+    }.GetNewClosure())
+    $c.save.add_Click({
+        if (-not $c.saved.SelectedItem) { return }
+        $name = $c.saved.SelectedItem -replace ' \*$', ''
+        $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } }
+        if (-not (& $ask "Replace '$name' with the current settings?")) { return }
+        & $fSave (& $fGet $c) (& $fPath $name)
+        $c.loaded = $name; $c.loadedKey = & $fKey (& $fGet $c)
+        & $fMark $c
     }.GetNewClosure())
     $c.saveAs.add_Click({
         Add-Type -AssemblyName Microsoft.VisualBasic
@@ -745,15 +847,20 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         if (-not $path) { return }
         & $fSave (& $fGet $c) $path
         $base = [IO.Path]::GetFileNameWithoutExtension($path)
+        if ($c.loaded) { $c.loaded = $null; & $fMark $c }
         if (-not $c.saved.Items.Contains($base)) { [void]$c.saved.Items.Add($base) }
         $c.saved.SelectedItem = $base
+        $c.loaded = $base; $c.loadedKey = & $fKey (& $fGet $c)
     }.GetNewClosure())
     $c.delete.add_Click({
         if (-not $c.saved.SelectedItem) { return }
-        $path = & $fPath $c.saved.SelectedItem
+        $name = $c.saved.SelectedItem -replace ' \*$', ''
+        if ($c.loaded -eq $name) { $c.loaded = $null }
+        $path = & $fPath $name
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
         $c.saved.Items.Remove($c.saved.SelectedItem)
         if ($c.saved.Items.Count) { $c.saved.SelectedIndex = 0 }
+        $c.save.Enabled = $null -ne $c.saved.SelectedItem
     }.GetNewClosure())
     $c.recommend.add_Click({ & $fSet $c $c.recommended }.GetNewClosure())
     $c.link.add_LinkClicked({ & $c.openUrl $repo }.GetNewClosure())
@@ -793,16 +900,17 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.savesNote.Text = 'Restored. The saves before it are backed up too.' 
     }.GetNewClosure())
     $c.copy.add_Click({
-        $from = $c.saves | Where-Object slot -eq $c.copyFrom.SelectedItem
-        $to = $c.saves | Where-Object slot -eq $c.copyTo.SelectedItem
+        $from = if ($c.copyFrom.SelectedIndex -ge 0) { $c.saves[$c.copyFrom.SelectedIndex] }
+        $to = if ($c.copyTo.SelectedIndex -ge 0) { $c.saves[$c.copyTo.SelectedIndex] }
         if (-not $from -or -not $to -or $from.dir -eq $to.dir) { $c.savesNote.Text = 'Pick two different saves.'; return }
         $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Warning') -eq 'Yes' } }
-        if (-not (& $ask "Copy $($from.slot) ($($from.title)) over $($to.slot) ($($to.title))?`r`nAll saves are backed up first.")) { return }
+        if (-not (& $ask "Copy $(& $fSaveName $from $c.showNames) over $(& $fSaveName $to $c.showNames)?`r`nAll saves are backed up first.")) { return }
         $z = & $fCopy $from $to $c.savesRoot
         & $fSaves $c
         $c.savesNote.Text = 'Copied. The saves before it are backed up.' 
     }.GetNewClosure())
     $fShare = ${function:Get-KlbfBenchShareText}
+    $c.showNamesBtn.add_Click({ $c.showNames = -not $c.showNames; & $fSaves $c }.GetNewClosure())
     $c.copyImage.add_Click({
         try { & $c.clipboardImage $c.benchPic.Image; $c.quickNote.Text = 'Card copied: paste it anywhere.' } catch { $c.quickNote.Text = 'Could not copy the image.' }
     }.GetNewClosure())
@@ -813,6 +921,22 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         try { & $c.clipboard $text; $c.quickNote.Text = 'Text copied: paste it anywhere.' } catch { $c.quickNote.Text = 'Could not copy the text.' }
     }.GetNewClosure())
     $c.play.add_Click({ $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
+    $opened = $Choice; $fShots = ${function:Set-KlbfShotsPath}; $fShotsDir = ${function:Get-KlbfShotsDir}
+    $c.quickRestart.add_Click({ & $fSet $c $opened; $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
+    $c.quickSettings.add_Click({ $c.tabs.SelectedIndex = 0 }.GetNewClosure())
+    $c.shotsShow.add_Click({ $c.showShots = -not $c.showShots; & $fShots $c $c.shotsDir }.GetNewClosure())
+    $c.shotsChange.add_Click({
+        $d = New-Object System.Windows.Forms.FolderBrowserDialog
+        $d.Description = 'The folder for screenshots (F8 in the game)'
+        $d.SelectedPath = & $fShotsDir @{ shotsDir = $c.shotsDir }
+        $picked = if ($c.pickShotsFolder) { & $c.pickShotsFolder } elseif ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }
+        if ($picked) { & $fShots $c $picked; $c.shotsNote.Text = 'Saved when you press Play.' }
+    }.GetNewClosure())
+    $c.shotsOpen.add_Click({
+        $dir = & $fShotsDir @{ shotsDir = $c.shotsDir }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        & $c.openUrl $dir
+    }.GetNewClosure())
     $c.prepare.add_Click({ $c.form.Tag = 'prepare'; $c.form.Close() }.GetNewClosure())
     @{ form = $f; c = $c }
 }
@@ -822,11 +946,12 @@ function Update-KlbfSavesTab($c) {
     $c.saves = @(Get-KlbfSaves $c.savesRoot)
     $c.savesList.Items.Clear(); $c.copyFrom.Items.Clear(); $c.copyTo.Items.Clear()
     foreach ($s in $c.saves) {
-        $it = New-Object System.Windows.Forms.ListViewItem($s.slot)
-        [void]$it.SubItems.Add($s.title); [void]$it.SubItems.Add($s.date.ToString('yyyy-MM-dd HH:mm')); [void]$it.SubItems.Add('{0:N0} KB' -f ($s.size / 1KB))
+        $it = New-Object System.Windows.Forms.ListViewItem((Get-KlbfSaveName $s))
+        [void]$it.SubItems.Add($(if ($c.showNames) { $s.title } else { ([string][char]0x2022) * 8 + ' (hidden)' })); [void]$it.SubItems.Add($s.date.ToString('yyyy-MM-dd HH:mm')); [void]$it.SubItems.Add('{0:N0} KB' -f ($s.size / 1KB))
         [void]$c.savesList.Items.Add($it)
-        [void]$c.copyFrom.Items.Add($s.slot); [void]$c.copyTo.Items.Add($s.slot)
+        [void]$c.copyFrom.Items.Add((Get-KlbfSaveName $s)); [void]$c.copyTo.Items.Add((Get-KlbfSaveName $s))
     }
+    $c.showNamesBtn.Text = if ($c.showNames) { 'Hide names' } else { 'Show names' }
     if (-not $c.saves) { $c.savesNote.Text = $(if ($c.savesRoot) { 'No saves yet.' } else { 'No saves folder yet: it appears after the first save in the game.' }) }
 }
 
@@ -835,6 +960,27 @@ function Set-KlbfGamePath($c, [string]$Path) {
     $c.gamePath = $Path
     $c.game.Text = if (-not $Path) { '' } elseif ($c.showPath) { $Path } else { ([string][char]0x2022) * 8 + ' (hidden)' }
     $c.show.Text = if ($c.showPath) { 'Hide' } else { 'Show' }
+}
+
+# The screenshot folder kept in $c.shotsDir ('' = Pictures\KLBF Lab); the box shows it only after Show.
+function Set-KlbfShotsPath($c, [string]$Path) {
+    $c.shotsDir = $Path
+    $c.shots.Text = if ($c.showShots) { Get-KlbfShotsDir @{ shotsDir = $Path } } else { ([string][char]0x2022) * 8 + ' (hidden)' }
+    $c.shotsShow.Text = if ($c.showShots) { 'Hide' } else { 'Show' }
+}
+
+# What a saved profile holds of a choice, to compare (the game and screenshot folders apart).
+function Get-KlbfProfileKey($Choice) {
+    ($Choice.profile, $Choice.upscaler, $Choice.preset, $Choice.output, $Choice.frameGen, $Choice.advanced) -join '|'
+}
+
+# The loaded profile's entry in the list: "name", or "name *" when the settings differ from it.
+function Update-KlbfProfileMark($c) {
+    for ($i = 0; $i -lt $c.saved.Items.Count; $i++) {
+        $plain = [string]$c.saved.Items[$i] -replace ' \*$', ''
+        $want = if ($c.loaded -eq $plain -and (Get-KlbfProfileKey (Get-KlbfFormChoice $c)) -ne $c.loadedKey) { "$plain *" } else { $plain }
+        if ([string]$c.saved.Items[$i] -ne $want) { $sel = $c.saved.SelectedIndex; $c.saved.Items[$i] = $want; $c.saved.SelectedIndex = -1; $c.saved.SelectedIndex = $sel }
+    }
 }
 
 function Set-KlbfFormChoice($c, $Choice) {
@@ -856,6 +1002,7 @@ function Get-KlbfFormChoice($c) {
         frameGen = [bool]$c.fg.Checked
         advanced = [bool]$c.adv.Checked
         game = [string]$c.gamePath
+        shotsDir = [string]$c.shotsDir
     })
 }
 
@@ -866,8 +1013,16 @@ function Update-KlbfForm($c) {
     $c.upFsr.Enabled = -not $s; $c.upTitle.Enabled = -not $s
     foreach ($k in $c.presets.Keys) { $c.presets[$k].Enabled = -not $s -and $fsr }
     $c.output.Enabled = -not $s
-    $c.outputNote.Text = $(if ($s) { 'Profile S: the title sets its own render size and output.' } else { [string]$c.outputRec })
+    $c.outputNote.Text = $(if ($s) { 'Profile S: the title sets its own render size and output.' } elseif ([string]$c.output.SelectedItem -ne '3840x2160') { "Below 3840x2160 the game's HUD gets bigger (known issue)." } else { [string]$c.outputRec })
     $c.fg.Enabled = $fsr
+    # (27/11) A control greyed by a rule says why, beside it and in a tooltip (a greyed control shows no
+    # tooltip of its own: its group's says it too).
+    $why = @{ fg = $(if (-not $fsr) { 'needs AMD FSR' } else { '' }); preset = $(if ($s) { 'set by the game in Profile S' } elseif (-not $fsr) { 'needs AMD FSR' } else { '' }) }
+    $c.fg.Text = if ($why.fg) { "Frame generation (FG x2) - $($why.fg)" } else { $c.fgText }
+    $c.presetLabel.Text = if ($why.preset) { "$($c.presetText) - $($why.preset):" } else { "$($c.presetText):" }
+    $c.tips.SetToolTip($c.optionsGroup, $(if ($why.fg) { 'Frame generation is fed by the AMD FSR upscale: pick AMD FSR to use it.' } else { '' }))
+    $c.tips.SetToolTip($c.upscalerGroup, $(if ($s) { 'Profile S: the game sets its own upscaler, render size and output.' } elseif ($why.preset) { 'The presets are AMD FSR''s: pick AMD FSR to choose one.' } else { '' }))
+    $c.tips.SetToolTip($c.output, $(if ($s) { 'Set by the game in Profile S.' } else { '' }))
     # Play, bench and shaders need the game files
     $ok = Test-KlbfGameFolder $c.gamePath
     $c.gameDot.ForeColor = Get-KlbfColor $(if ($ok) { 0x22C55E } else { 0xEF4444 })
