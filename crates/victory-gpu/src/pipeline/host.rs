@@ -230,7 +230,9 @@ impl GraphicsState {
                 )
             })
             .collect();
-        let bounds = if self.depth_bounds {
+        let bounds = if self.read_depth_for_bounds() {
+            " depth-bounds read-only"
+        } else if self.depth_bounds {
             " depth-bounds"
         } else {
             ""
@@ -249,8 +251,21 @@ impl GraphicsState {
         )
     }
 
+    fn read_depth_for_bounds(&self) -> bool {
+        self.depth_bounds
+            && !self.depth.DepthEnable.as_bool()
+            && self.depth_format != DXGI_FORMAT_UNKNOWN
+    }
+
     fn depth1(&self) -> D3D12_DEPTH_STENCIL_DESC1 {
-        let d = &self.depth;
+        let mut d = self.depth;
+        if self.read_depth_for_bounds() {
+            // WARP ignores the bounds with depth disabled. Read the stored depth
+            // for the bounds test while letting every ordinary comparison pass.
+            d.DepthEnable = true.into();
+            d.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+            d.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        }
         D3D12_DEPTH_STENCIL_DESC1 {
             DepthEnable: d.DepthEnable,
             DepthWriteMask: d.DepthWriteMask,
@@ -1218,8 +1233,34 @@ mod tests {
 
     const VS: &str = "float4 main(uint i : SV_VertexID) : SV_Position {
         float2 p = float2((i << 1) & 2, i & 2);
-        return float4(p * 2.0 - 1.0, 0.5, 1.0);
+        return float4(p * 2.0 - 1.0, 0.25, 1.0);
     }";
+
+    #[test]
+    fn bounds_only_reads_depth_without_enabling_writes() {
+        let mut g = GraphicsState::default();
+        g.depth_bounds = true;
+        g.depth.DepthEnable = false.into();
+        g.depth.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        g.depth.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        assert!(!g.depth1().DepthEnable.as_bool()); // no depth format
+
+        g.depth_format = DXGI_FORMAT_D32_FLOAT;
+        let d = g.depth1();
+        assert!(d.DepthBoundsTestEnable.as_bool() && d.DepthEnable.as_bool());
+        assert_eq!(d.DepthFunc, D3D12_COMPARISON_FUNC_ALWAYS);
+        assert_eq!(d.DepthWriteMask, D3D12_DEPTH_WRITE_MASK_ZERO);
+        assert!(g.describe().contains("depth-bounds read-only"));
+
+        g.depth.DepthEnable = true.into();
+        let d = g.depth1();
+        assert_eq!(d.DepthFunc, D3D12_COMPARISON_FUNC_LESS);
+        assert_eq!(d.DepthWriteMask, D3D12_DEPTH_WRITE_MASK_ALL);
+
+        g.depth.DepthEnable = false.into();
+        g.depth_bounds = false;
+        assert!(!g.depth1().DepthEnable.as_bool());
+    }
 
     /// A graphics pipeline with `DepthBoundsTestEnable` loads back from the
     /// pipeline library and culls or passes fragments according to
@@ -1469,6 +1510,7 @@ mod tests {
             }
         };
 
+        // Bounds compare against the stored 0.5, even though the triangle is at 0.25.
         assert_eq!(run_draw(0.6, 1.0), 0, "depth 0.5 outside [0.6, 1.0] must be rejected");
         assert_eq!(run_draw(0.4, 0.6), 255, "depth 0.5 inside [0.4, 0.6] must pass");
     }
