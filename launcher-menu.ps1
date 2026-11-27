@@ -126,15 +126,42 @@ function Get-KlbfSwitches($Choice) {
     $s
 }
 
-# The monitor's real mode (DPI-independent), else the primary screen's bounds.
-function Get-KlbfScreenSize {
-    try {
-        $v = Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object CurrentHorizontalResolution | Select-Object -First 1
-        if ($v) { return '{0}x{1}' -f $v.CurrentHorizontalResolution, $v.CurrentVerticalResolution }
-    } catch {}
-    Add-Type -AssemblyName System.Windows.Forms
-    $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    '{0}x{1}' -f $b.Width, $b.Height
+# (27/11) The PRIMARY monitor's real mode (DPI-independent), where the game window opens; the first video
+# controller's mode was another monitor's on a two-screen PC. $Screens (tests): @{ primary; device; mode }.
+function Get-KlbfScreenSize($Screens = $null) {
+    if ($null -eq $Screens) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            if (-not ('KlbfDisplay' -as [type])) {
+                Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class KlbfDisplay {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra; public int dmFields;
+        public int dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettings(string device, int mode, ref DEVMODE dm);
+    public static string Mode(string device) {
+        var dm = new DEVMODE(); dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        return EnumDisplaySettings(device, -1, ref dm) ? dm.dmPelsWidth + "x" + dm.dmPelsHeight : "";
+    }
+}
+'@
+            }
+            $Screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+                @{ primary = $_.Primary; device = $_.DeviceName; mode = [KlbfDisplay]::Mode($_.DeviceName); bounds = '{0}x{1}' -f $_.Bounds.Width, $_.Bounds.Height }
+            })
+        } catch { $Screens = @() }
+    }
+    $p = @($Screens | Where-Object { $_.primary }) + @($Screens) | Select-Object -First 1
+    if (-not $p) { return '1920x1080' }
+    if ($p.mode) { $p.mode } else { $p.bounds }
 }
 
 function Test-KlbfShift {
@@ -393,13 +420,23 @@ function Get-KlbfSaves([string]$SavesRoot) {
     $sorted
 }
 
-# A zip of the whole saves folder in save-backups\<date>.zip; the last $Keep are kept. Its path, or $null.
+# A zip of the saves folder in save-backups\<date>.zip; the last $Keep are kept. Its path, or $null.
+# (27/11) A "saves" folder inside it (left by an old copy into an existing folder) is not the game's: left out.
 function Backup-KlbfSaves([string]$SavesRoot, [string]$Dir = (Get-KlbfBackupDir), [int]$Keep = 10) {
     if (-not $SavesRoot -or -not (Test-Path -LiteralPath $SavesRoot)) { return $null }
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     $zip = Join-Path $Dir ((Get-Date -Format 'yyyy-MM-dd_HH-mm-ss-fff') + '.zip')
-    [IO.Compression.ZipFile]::CreateFromDirectory($SavesRoot, $zip)
+    $root = (Get-Item -LiteralPath $SavesRoot).FullName.TrimEnd('\') + '\'
+    $a = [IO.Compression.ZipFile]::Open($zip, 'Create')
+    try {
+        foreach ($f in (Get-ChildItem -LiteralPath $root -Recurse -Force)) {
+            $rel = $f.FullName.Substring($root.Length)
+            if ($rel -eq 'saves' -or $rel -like 'saves\*') { continue }
+            if (-not $f.PSIsContainer) { [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($a, $f.FullName, $rel.Replace('\', '/')) }
+            elseif (-not (Get-ChildItem -LiteralPath $f.FullName -Force)) { [void]$a.CreateEntry($rel.Replace('\', '/') + '/') }
+        }
+    } finally { $a.Dispose() }
     Get-ChildItem -LiteralPath $Dir -Filter *.zip | Sort-Object Name -Descending | Select-Object -Skip $Keep | Remove-Item
     $zip
 }
@@ -549,8 +586,11 @@ function Get-KlbfBenchSwitches($Choice, [string]$Player) {
 # Continue can only load that one; the player's own saves are never opened by the run. Rebuilt each run.
 function New-KlbfBenchData([string]$Data, $Save, [string]$Dest = (Join-Path (Split-Path -Parent (Get-KlbfLauncherDir)) 'bench-data')) {
     if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Recurse -Force }
-    Copy-Item -LiteralPath $Data -Destination $Dest -Recurse
+    # The folder's CONTENTS into a new folder (Copy-Item of a folder into an existing one nests it)
+    New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+    foreach ($i in (Get-ChildItem -LiteralPath $Data -Force)) { Copy-Item -LiteralPath $i.FullName -Destination (Join-Path $Dest $i.Name) -Recurse }
     $root = Get-KlbfSavesRoot $Dest
+    if ($root -and (Test-Path -LiteralPath (Join-Path $root 'saves'))) { Remove-Item -LiteralPath (Join-Path $root 'saves') -Recurse -Force }
     foreach ($s in (Get-KlbfSaves $root)) {
         if ((Split-Path -Leaf $s.dir) -ne (Split-Path -Leaf $Save.dir)) { Remove-Item -LiteralPath $s.dir -Recurse -Force }
     }
