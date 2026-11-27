@@ -4431,25 +4431,40 @@ impl State {
     /// The stand-in for the indirect light after a dispatch of `p`
     /// (`crate::ambient`). Whether it recorded anything.
     fn ambient(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role) -> bool {
-        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, Role, Views};
+        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, REFLECT, Role, Views};
         let Some(t) = p.stages.first().map(|s| s.translated()) else {
             return false;
         };
-        let Some(heap) = (self.heaps[0] != 0).then(|| crate::descriptor::heap(self.heaps[0] as This).host()).flatten()
-        else {
-            return false;
-        };
-        let entry = |kind: ResourceType, (slot, offset): (u8, u32)| {
+        // The title resource the program reads or writes through a table at (root parameter,
+        // dwords into the table).
+        let resource = |kind: ResourceType, (slot, offset): (u8, u32)| {
             t.used.iter().find(|u| {
                 u.kind == kind && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
             })?;
             let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(slot)) else {
                 return None;
             };
-            let resource = match crate::descriptor::view(table + u64::from(offset) * 4)? {
-                View::Shader(r, _) | View::Unordered(r, ..) => r,
-                _ => return None,
-            };
+            match crate::descriptor::view(table + u64::from(offset) * 4)? {
+                View::Shader(r, _) | View::Unordered(r, ..) => Some(r),
+                _ => None,
+            }
+        };
+        // (KLBF_EYES_FIX) The water mirrors the sky truly: its images are left alone.
+        if role == Role::WaterResolve {
+            if let Some(r) = resource(ResourceType::Srv, REFLECT) {
+                crate::ambient::note_water(r);
+            }
+            return false;
+        }
+        if role == Role::Reflect && resource(ResourceType::Uav, REFLECT).is_some_and(crate::ambient::is_water) {
+            return false;
+        }
+        let Some(heap) = (self.heaps[0] != 0).then(|| crate::descriptor::heap(self.heaps[0] as This).host()).flatten()
+        else {
+            return false;
+        };
+        let entry = |kind: ResourceType, (slot, offset): (u8, u32)| {
+            let resource = resource(kind, (slot, offset))?;
             let start = match self.ambient_tables.iter().find(|m| m.0 == slot) {
                 Some(m) => m.1,
                 None => self.user_value(true, slot, RootType::Table, 0),
@@ -4463,11 +4478,13 @@ impl State {
             Role::Resolve => LIGHT,
             Role::Radiance => RADIANCE,
             Role::Air => AIR,
+            Role::Reflect => REFLECT,
+            Role::WaterResolve => return false,
         };
         let image = entry(ResourceType::Uav, at);
         let depth = match role {
             Role::Resolve => entry(ResourceType::Srv, DEPTH),
-            Role::Radiance | Role::Air => image,
+            Role::Radiance | Role::Air | Role::Reflect | Role::WaterResolve => image,
         };
         let (Some((of, image)), Some((seen, depth))) = (image, depth) else {
             once!(?role, "no stand-in for the indirect light: other tables");
@@ -6149,8 +6166,9 @@ impl State {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
             // (KLBF_NIGHT_LIGHTS, after eikkapine/victory-amd) The stand-in after indirect
             // dispatches too, as after direct ones.
-            if crate::ambient::night_lights()
-                && let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
+            // (KLBF_EYES_FIX) And for the reflections' `CS_RayMiss`, which runs as one.
+            if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
+                && (crate::ambient::night_lights() || matches!(role, crate::ambient::Role::Reflect | crate::ambient::Role::WaterResolve))
                 && crate::ambient::on()
                 && self.ambient(list, p, role)
             {

@@ -6,6 +6,10 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## Unreleased
+
+- Eyes that glow white in dark rooms (and glossy floors mirroring a white sky indoors): `KLBF_EYES_FIX=1` (off) holds reflection rays that missed to the light around each point instead of the open sky, on indirect dispatches too; water left alone. Lead by zzz (after avatarmanz); hold point and water exclusion after kyokyotosh. Thanks!
+
 ## v26.11.3 (27 Nov 2026)
 
 - The launcher starts from "KLBF Lab.cmd" instead of "KLBF Lab.vbs": Windows Defender's cloud check flagged the .vbs (a script starting a hidden PowerShell) as a trojan, a false positive. An existing desktop shortcut is repaired automatically.
