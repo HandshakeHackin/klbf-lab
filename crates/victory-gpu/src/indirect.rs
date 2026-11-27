@@ -61,7 +61,10 @@ RWByteAddressBuffer dst_args : register(u0);
 // The list's work so far (vertex instances, threads): past the budget,
 // records run empty.
 RWByteAddressBuffer budget : register(u1);
-static const uint BUDGET = 1u << 27;
+#ifndef BUDGET_SHIFT
+#define BUDGET_SHIFT 27
+#endif
+static const uint BUDGET = 1u << BUDGET_SHIFT;
 // The vertices or indices an instance from which a draw record runs empty.
 static const uint MOST_DRAW = 1u << 23;
 // Groups of one dispatch; more run empty.
@@ -301,12 +304,29 @@ fn rest() -> u32 {
     u32::from(std::env::var("VICTORY_INDIRECT_REST").is_ok_and(|v| v == "1"))
 }
 
+/// (KLBF Lab, `KLBF_TREE_FIX=1`; off: 2^27 as before) Each host list's budget, as a power of two:
+/// 2^30 with the switch. Trees and plants flickered: the title draws its vegetation with thousands of
+/// instanced indirect records a list, and at 2^27 vertex instances the clamps ran valid records empty
+/// in normal play. Which ones changed from frame to frame (the groups of a clamp race for the budget),
+/// so clumps of foliage blinked in and out. 2^30 is still a hang guard: a list that spends it all on
+/// garbage is a few tenths of a second of card time, under the 2 s device-removal limit.
+/// Rewritten from trustno1-coder/VIctory-NVIDIA 96fc904 (by exotiquee).
+pub(crate) fn budget_shift() -> u32 {
+    static SHIFT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *SHIFT.get_or_init(|| budget_shift_for(std::env::var_os("KLBF_TREE_FIX").as_deref()))
+}
+
+fn budget_shift_for(switch: Option<&std::ffi::OsStr>) -> u32 {
+    if switch.is_some_and(|v| v == "1") { 30 } else { 27 }
+}
+
 /// The clamp compiled from `source` (ours, or in the benchmark the one it
 /// replaced).
 fn make_from(device: &ID3D12Device, source: &str) -> windows::core::Result<Clamp> {
     #[cfg(feature = "diagnostics")]
     let batched = source == batch::SOURCE;
-    let source = &format!("#define WIDEST {}u\n#define REST {}\n{source}", widest(amd(device)), rest());
+    let source =
+        &format!("#define WIDEST {}u\n#define REST {}\n#define BUDGET_SHIFT {}\n{source}", widest(amd(device)), rest(), budget_shift());
     let mut code: Option<ID3DBlob> = None;
     let mut errors: Option<ID3DBlob> = None;
     // SAFETY: the source and names live through the call; out pointers ours.
@@ -636,6 +656,24 @@ pub(crate) mod tests {
     use windows::Win32::Graphics::Dxgi::*;
     use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
     use windows::core::Interface;
+
+    /// (`KLBF_TREE_FIX`) Opt-in: 2^27 unless the switch is 1, and both clamps take their budget
+    /// from the define `make_from` gives them.
+    #[test]
+    fn the_tree_fix_raises_the_list_budget_only_when_asked() {
+        use std::ffi::OsStr;
+        assert_eq!(budget_shift_for(None), 27);
+        assert_eq!(budget_shift_for(Some(OsStr::new("0"))), 27);
+        assert_eq!(budget_shift_for(Some(OsStr::new(""))), 27);
+        assert_eq!(budget_shift_for(Some(OsStr::new("1"))), 30);
+        for source in [SOURCE, batch::SOURCE] {
+            for line in ["#ifndef BUDGET_SHIFT", "#define BUDGET_SHIFT 27", "static const uint BUDGET = 1u << BUDGET_SHIFT;"] {
+                assert!(source.contains(line), "{line}");
+            }
+        }
+        // A full budget plus the largest record (2^26) still fits in the clamps' 32-bit words.
+        assert!((1u64 << budget_shift_for(Some(OsStr::new("1")))) + (1 << 26) < 1 << 32);
+    }
 
     const WORKER_CS: &str = r#"
 #define RS "UAV(u0)"
