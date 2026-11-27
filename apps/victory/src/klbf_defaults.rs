@@ -69,7 +69,7 @@ pub fn apply() {
     if std::env::var_os("KLBF_DEFAULTS").is_some_and(|v| v == "0") || std::env::var_os("KLBF_LAUNCHER").is_some() {
         return;
     }
-    let mut set = |k: &str, v: &str| {
+    let set = |k: &str, v: &str| {
         if std::env::var_os(k).is_none() {
             // SAFETY: first thing in `main`, before any other thread exists.
             unsafe { std::env::set_var(k, v) };
@@ -136,7 +136,8 @@ mod tests {
     /// play.ps1 marks its starts, so the built-in settings never replace its own.
     #[test]
     fn our_launcher_says_so() {
-        assert!(include_str!("../../../play.ps1").contains("KLBF_LAUNCHER = 'play.ps1'"));
+        let script = include_str!("../../../play.ps1");
+        assert!(script.lines().any(|l| l.split_whitespace().collect::<Vec<_>>() == ["KLBF_LAUNCHER", "=", "'play.ps1'"]));
     }
 
     /// The list stays the same as `play.ps1`'s `$set`: every name there with a fixed value is here.
