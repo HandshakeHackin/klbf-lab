@@ -174,6 +174,46 @@ fn vram_now() -> (u64, u64) {
     }
 }
 
+/// (27/11) Live figures after the run's time in the window title, once a second: frames per second over the last
+/// second, the process's RAM, the whole CPU's use and the card's busy share (input is locked, so they cannot sway
+/// the run). Empty on the first call.
+fn live_figures() -> String {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    static PREV: Mutex<Option<(Instant, usize, u64, u64, [u64; 2])>> = Mutex::new(None);
+    static GPU: AtomicU64 = AtomicU64::new(u64::MAX);
+    let ft = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    let (mut idle, mut kernel, mut user) = (FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 }, FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 }, FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 });
+    // SAFETY: three FILETIMEs of ours.
+    unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+    let (idle, all) = (ft(idle), ft(kernel) + ft(user));
+    let now = Instant::now();
+    let frames = run().ms.len();
+    let busy = [0, 1].map(|i| crate::host::CARD_BUSY_US[i].load(Ordering::Relaxed));
+    let mut prev = PREV.lock().unwrap_or_else(|e| e.into_inner());
+    let out = match *prev {
+        Some((t, f, i0, a0, b0)) => {
+            let secs = now.duration_since(t).as_secs_f64().max(0.001);
+            let cpu = if all > a0 { 100.0 * (1.0 - idle.saturating_sub(i0) as f64 / (all - a0) as f64) } else { 0.0 };
+            if busy[1] > b0[1] {
+                GPU.store((100 * busy[0].saturating_sub(b0[0]) / (busy[1] - b0[1])).min(100), Ordering::Relaxed);
+            }
+            let gpu = GPU.load(Ordering::Relaxed);
+            format!(
+                " \u{b7} {:.0} FPS \u{b7} RAM {:.1} GB \u{b7} CPU {:.0} %{}",
+                frames.saturating_sub(f) as f64 / secs,
+                ram_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
+                cpu.clamp(0.0, 100.0),
+                if gpu == u64::MAX { String::new() } else { format!(" \u{b7} GPU {gpu} %") }
+            )
+        }
+        None => String::new(),
+    };
+    let next = if busy[1] > prev.map_or(0, |p| p.4[1]) { busy } else { prev.map_or(busy, |p| p.4) };
+    *prev = Some((now, frames, idle, all, next));
+    out
+}
+
 /// One sample of RAM and card memory for the peaks, while the run is measured.
 fn sample_peaks() {
     if run().phase == Phase::Running {
@@ -1306,7 +1346,8 @@ fn thread(game: HWND, adapter: Option<IDXGIAdapter3>) {
                 // Set every second (a caption thread of the host may have put its own back).
                 if holds_title() && IsWindow(game) != 0 {
                     // "· compiling N shaders" after it while pipelines are being made (none at 0).
-                    let text = crate::shell::compiling(title_text(started), " \u{b7} ", crate::pipeline::making());
+                    let live = if started.is_some() { live_figures() } else { String::new() };
+                    let text = crate::shell::compiling(title_text(started) + &live, " \u{b7} ", crate::pipeline::making());
                     set_title(game, &mut title_buf, &text);
                 }
                 // Placed from the game window's own rectangle, read every time (it may sit on
