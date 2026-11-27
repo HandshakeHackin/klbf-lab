@@ -123,6 +123,8 @@ if (-not $explicit) {
         if (-not $picked) { exit 0 }
         $choice = $picked.choice; $menuAction = $picked.action
         Save-KlbfSettings $choice $settingsFile
+        # (27/11) Updated: the settings window again, from the new files of this folder
+        if ($menuAction -eq 'updated') { & $PSCommandPath -Setup @passOn; exit $LASTEXITCODE }
         # (27/11) Once, after the first setup: a desktop shortcut for this build
         if ($menuAction -eq 'play') {
             try { $null = Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $PSScriptRoot $Victory) { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } } catch {}

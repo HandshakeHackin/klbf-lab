@@ -4,7 +4,7 @@
 #
 #   .\scripts\package-release.ps1 -Tag v1.0.0 -Victory target\diag\victory.exe -Out dist
 #
-# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.vbs", klbf-lab.ico, README.txt, LICENSE and
+# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.vbs", klbf-lab.ico, README.txt, LICENSE, VERSION and
 # SHA256SUMS.txt, at its root (Windows' "Extract All" makes the folder).
 param(
     [Parameter(Mandatory)][string]$Tag,
@@ -49,6 +49,9 @@ upscaler is used; start again online to get it.
 Nothing of the game is included: KLBF Lab only runs your own copy. KLBF Lab itself: see LICENSE.
 Source and help: https://github.com/PastiiJay/klbf-lab
 "@
+
+# The version the launcher shows and compares with GitHub's latest release (Get-KlbfVersion)
+Set-Content -LiteralPath (Join-Path $stage 'VERSION') -Value $Tag -Encoding ascii
 
 # Every file's hash, sha256sum style (sha256sum -c SHA256SUMS.txt checks them)
 $files = Get-ChildItem -LiteralPath $stage -File | Sort-Object Name

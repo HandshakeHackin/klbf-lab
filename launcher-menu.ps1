@@ -199,7 +199,8 @@ function Install-KlbfComponent([ValidateSet('agility', 'ffx')][string]$Name, [st
             } }
     }[$Name]
     $dst = Join-Path $BuildDir $c.dir
-    $have = { param($rel) Test-Path -LiteralPath (Join-Path $dst (Split-Path -Leaf $rel)) }
+    # (27/11) Checked by hash, not only there: a newer launcher with other component versions fetches them again
+    $have = { param($rel) $p = Join-Path $dst (Split-Path -Leaf $rel); (Test-Path -LiteralPath $p) -and (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash -eq $c.files[$rel] }
     if (@($c.files.Keys | Where-Object { -not (& $have $_) }).Count -eq 0) { return $true }
     if ($CheckOnly) { return $false }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "klbf-$Name-$([guid]::NewGuid().ToString('N'))"
@@ -223,6 +224,127 @@ function Install-KlbfComponent([ValidateSet('agility', 'ffx')][string]$Name, [st
         Copy-Item -LiteralPath $lic -Destination (Join-Path $dst $c.license[1]) -Force
         $true
     } catch { $false } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# (27/11) Updates. This build's version: the VERSION file of the release zip ('' in a source checkout, which
+# is never updated).
+function Get-KlbfVersion([string]$BuildDir = $PSScriptRoot) {
+    $f = Join-Path $BuildDir 'VERSION'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { (Get-Content -LiteralPath $f -TotalCount 1).Trim() } else { '' }
+}
+
+# The latest GitHub release when it is newer than $Current: @{ tag; page; zip; sha } (sha from the release
+# notes, '' if absent), else $null (offline, rate limit, not newer, no version). $Url: a local JSON for tests.
+function Get-KlbfUpdate([string]$Current, [string]$Url = $(if ($env:KLBF_UPDATE_URL) { $env:KLBF_UPDATE_URL } else { 'https://api.github.com/repos/PastiiJay/klbf-lab/releases/latest' })) {
+    $ver = { param($t) if ($t -match '^v(\d+\.\d+\.\d+)$') { [version]$Matches[1] } }
+    $have = & $ver $Current
+    if (-not $have) { return $null }
+    try {
+        $r = if ($Url -notmatch '^https?://') { Get-Content -LiteralPath $Url -Raw | ConvertFrom-Json } else {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            Invoke-RestMethod -UseBasicParsing -TimeoutSec 10 -Uri $Url }
+    } catch { return $null }
+    $new = & $ver ([string]$r.tag_name)
+    $asset = @($r.assets | Where-Object { $_.name -like 'KLBF-Lab-*-win64.zip' })[0]
+    if (-not $new -or $new -le $have -or -not $asset) { return $null }
+    @{ tag = [string]$r.tag_name; page = [string]$r.html_url; zip = [string]$asset.browser_download_url
+        sha = $(if ([string]$r.body -match 'SHA-256 of the zip: ([0-9a-fA-F]{64})') { $Matches[1].ToLower() } else { '' }) }
+}
+
+# SHA256SUMS.txt of a folder: name -> hash (plain names only, no folders), empty without the file.
+function Read-KlbfSums([string]$Dir) {
+    $h = @{}
+    $f = Join-Path $Dir 'SHA256SUMS.txt'
+    if (Test-Path -LiteralPath $f) {
+        foreach ($l in Get-Content -LiteralPath $f) { if ($l -match '^([0-9a-fA-F]{64}) \*?([^\\/:*?"<>|]+)$') { $h[$Matches[2]] = $Matches[1].ToLower() } }
+    }
+    $h
+}
+
+# '' when every file of $Dir is listed in its SHA256SUMS.txt with the right hash and every listed file is
+# there; else what is wrong.
+function Test-KlbfSums([string]$Dir) {
+    $sums = Read-KlbfSums $Dir
+    if (-not $sums.Count) { return 'SHA256SUMS.txt is missing or empty' }
+    foreach ($i in Get-ChildItem -LiteralPath $Dir -Force | Where-Object Name -ne 'SHA256SUMS.txt') {
+        if ($i.PSIsContainer -or -not $sums.ContainsKey($i.Name)) { return "$($i.Name) is not listed in SHA256SUMS.txt" }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $i.FullName).Hash.ToLower() -ne $sums[$i.Name]) { return "$($i.Name) does not match SHA256SUMS.txt" }
+    }
+    foreach ($n in $sums.Keys) { if (-not (Test-Path -LiteralPath (Join-Path $Dir $n) -PathType Leaf)) { return "$n is missing" } }
+    ''
+}
+
+# Whether a program of the build folder runs (the game is victory.exe).
+function Test-KlbfRunning([string]$BuildDir) {
+    $d = [IO.Path]::GetFullPath($BuildDir).TrimEnd('\') + '\'
+    [bool](Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and $_.Path.StartsWith($d, [StringComparison]::OrdinalIgnoreCase) } catch { $false } })
+}
+
+# The checked new files ($Stage) into the build folder: the files of the old and new SHA256SUMS.txt go to
+# "<folder>.previous" (kept until the next update), the new ones move in; any failure puts everything back
+# and throws. Other files stay (bench-results, D3D12, ffx, game-folder.txt).
+function Switch-KlbfBuild([string]$Stage, [string]$BuildDir) {
+    $prev = "$($BuildDir.TrimEnd('\')).previous"
+    if (Test-Path -LiteralPath $prev) { Remove-Item -LiteralPath $prev -Recurse -Force }
+    New-Item -ItemType Directory -Path $prev | Out-Null
+    $new = @(@((Read-KlbfSums $Stage).Keys) + 'SHA256SUMS.txt')
+    $old = @(@((Read-KlbfSums $BuildDir).Keys) + $new | Sort-Object -Unique | Where-Object { Test-Path -LiteralPath (Join-Path $BuildDir $_) -PathType Leaf })
+    $out = New-Object Collections.ArrayList; $in = New-Object Collections.ArrayList
+    try {
+        foreach ($n in $old) { Move-Item -LiteralPath (Join-Path $BuildDir $n) -Destination (Join-Path $prev $n) -ErrorAction Stop; [void]$out.Add($n) }
+        foreach ($n in $new) { Move-Item -LiteralPath (Join-Path $Stage $n) -Destination (Join-Path $BuildDir $n) -ErrorAction Stop; [void]$in.Add($n) }
+    } catch {
+        $e = $_
+        foreach ($n in $in) { Move-Item -LiteralPath (Join-Path $BuildDir $n) -Destination (Join-Path $Stage $n) -Force -ErrorAction SilentlyContinue }
+        foreach ($n in $out) { Move-Item -LiteralPath (Join-Path $prev $n) -Destination (Join-Path $BuildDir $n) -Force -ErrorAction SilentlyContinue }
+        throw $e
+    }
+}
+
+# The Update button: the release zip downloaded, checked against the release notes' SHA-256 and each file
+# against its SHA256SUMS.txt and VERSION, then switched in (Switch-KlbfBuild). Never touches Saved Games.
+# @{ ok; message }.
+function Install-KlbfUpdate($Update, [string]$BuildDir) {
+    $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
+    $no = { param($m) @{ ok = $false; message = "Update not installed: $m" } }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "klbf-update-$([guid]::NewGuid().ToString('N'))"
+    $stage = "$($BuildDir.TrimEnd('\')).new"
+    try {
+        if ($Update.sha -notmatch '^[0-9a-f]{64}$') { return & $no 'the release notes give no SHA-256 for the zip.' }
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $zip = Join-Path $tmp 'update.zip'
+        try {
+            if ($Update.zip -notmatch '^https?://') { Copy-Item -LiteralPath $Update.zip -Destination $zip }
+            else {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+                Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 -Uri $Update.zip -OutFile $zip
+            }
+        } catch { return & $no 'the download failed (offline?). Nothing was changed.' }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower() -ne $Update.sha) { return & $no 'the downloaded zip does not match the SHA-256 in the release notes. Nothing was changed.' }
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+        Expand-Archive -LiteralPath $zip -DestinationPath $stage
+        $bad = Test-KlbfSums $stage
+        if ($bad) { return & $no "$bad. Nothing was changed." }
+        if ((Get-KlbfVersion $stage) -ne $Update.tag) { return & $no "the zip's VERSION is not $($Update.tag). Nothing was changed." }
+        if (Test-KlbfRunning $BuildDir) { return & $no 'the game is running. Close it, then click Update again.' }
+        try { Switch-KlbfBuild $stage $BuildDir } catch { return & $no "a file could not be replaced ($($_.Exception.Message)). The previous version was put back." }
+        @{ ok = $true; message = "Updated to $($Update.tag) $([char]0x2014) shaders will be prepared again" }
+    } catch { & $no "$($_.Exception.Message). Nothing was changed." }
+    finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# The update line beside the version: "Update available: v0.28.0 - Update   What's new" (two links).
+function Set-KlbfUpdateLine($c, $Update) {
+    $c.updateInfo = $Update
+    $t = "Update available: $($Update.tag) $([char]0x2014) "
+    $c.update.Text = "${t}Update   What's new"
+    $c.update.Links.Clear()
+    [void]$c.update.Links.Add($t.Length, 6, 'update')
+    [void]$c.update.Links.Add($t.Length + 9, 10, 'notes')
+    $c.update.Visible = $true
 }
 
 # Desktop\KLBF Lab.lnk (the Desktop known folder) from a spec; $Path for tests.
@@ -972,6 +1094,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $logo.SizeMode = 'Zoom'
         [void](& $add $f $logo 16 12 48 48)
     }
+    $c.version = Get-KlbfVersion
     $title = & $label $f 'KLBF Lab' 74 10 200 30
     $title.Font = New-KlbfFont 16 'Bold'
     $sub = & $label $f 'How do you want to play?' 76 40 220 20
@@ -1156,8 +1279,16 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.prepare = & $btn $f 'Prepare shaders' (& $col 0) 806 156 36
     $c.bench = & $btn $f 'Run benchmark' (& $col 1) 806 156 36
     $c.bug = & $btn $f 'Report a bug' (& $col 2) 806 156 36
-    $c.bugNote = & $label $f '' (& $col 0) 852 322 44
+    $c.bugNote = & $label $f '' (& $col 0) 848 322 35
     $c.bugNote.ForeColor = $soft
+    # (27/11) Bottom left, opposite Play: the version (small, grey), and the update line when Show-KlbfMenu's
+    # check finds a newer release (Set-KlbfUpdateLine)
+    $c.versionLabel = & $label $f $(if ($c.version) { $c.version } else { 'dev' }) 16 884 56 18
+    $c.versionLabel.ForeColor = $soft; $c.versionLabel.Font = New-KlbfFont 8
+    $c.update = New-Object System.Windows.Forms.LinkLabel; $c.update.Visible = $false; $c.update.Font = New-KlbfFont 8
+    $c.update.ForeColor = Get-KlbfColor $script:KlbfTheme.text; $c.update.LinkColor = Get-KlbfColor 0xA78BFA
+    $c.update.ActiveLinkColor = Get-KlbfColor $script:KlbfTheme.text
+    [void](& $add $f $c.update 72 884 274 18)
     $c.play = & $btn $f 'Play' (& $col 2) 850 156 44
     Set-KlbfButton $c.play $true
     $c.play.Font = New-KlbfFont 12 'Bold'
@@ -1430,6 +1561,48 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
     $info = @{ victory = $Victory; data = $Data; game = $Game; cache = $Cache; windows = $(if ($os) { "$($os.Caption) (build $($os.BuildNumber))" } else { '' }) }
     $m = New-KlbfMenuForm $Choice (Get-KlbfHardware) $ShaderStatus $info
     $m.c.tabs.SelectedIndex = $Tab
+    # (27/11) Just updated (the older launcher set it before starting these new files)
+    if ($env:KLBF_UPDATED) { $ShaderStatus = $env:KLBF_UPDATED; $m.c.status.Text = $ShaderStatus; $env:KLBF_UPDATED = $null }
+    # (27/11) Updates: GitHub's latest release asked in a runspace (never blocking; offline or rate-limited:
+    # nothing shown); a newer one puts the update line in the header. Installed only on its Update link.
+    $dir = if ($Victory) { Split-Path -Parent $Victory } else { '' }
+    if ($dir -and $m.c.version) {
+        $defs = (('Get-KlbfVersion', 'Get-KlbfUpdate', 'Read-KlbfSums', 'Test-KlbfSums', 'Test-KlbfRunning', 'Switch-KlbfBuild', 'Install-KlbfUpdate') |
+            ForEach-Object { "function $_ {$((Get-Item "function:$_").ScriptBlock)}" }) -join "`n"
+        $run = { param($script, $a, $b) $p = [powershell]::Create(); $null = $p.AddScript("param(`$a, `$b)`n$defs`n$script").AddArgument($a).AddArgument($b); @{ ps = $p; job = $p.BeginInvoke() } }.GetNewClosure()
+        $c = $m.c; $fLine = ${function:Set-KlbfUpdateLine}; $fGameOk = ${function:Test-KlbfGameFolder}
+        # Never closed while the files are being replaced
+        $c.form.add_FormClosing({ param($s, $e) if ($c.updating -and $c.form.Tag -ne 'updated') { $e.Cancel = $true } }.GetNewClosure())
+        $check = & $run 'Get-KlbfUpdate $a' $c.version $null
+        $uTick = New-Object System.Windows.Forms.Timer; $uTick.Interval = 500
+        $uTick.add_Tick({
+            if (-not $check.job.IsCompleted) { return }
+            $uTick.Stop()
+            $u = try { @($check.ps.EndInvoke($check.job))[0] } catch { $null }
+            if ($u -and $u.tag) { & $fLine $c $u }
+        }.GetNewClosure())
+        $uTick.Start()
+        $c.update.add_LinkClicked({
+            param($s, $e)
+            $u = $c.updateInfo
+            if ($e.Link.LinkData -eq 'notes') { & $c.openUrl $u.page; return }
+            $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } }
+            if (-not (& $ask "Update KLBF Lab to $($u.tag)?`r`nThe zip is downloaded from GitHub and checked; your saves and settings are not touched. This window then opens again.")) { return }
+            $c.update.Enabled = $false; $c.play.Enabled = $false; $c.updating = $true
+            $c.status.Text = "Downloading $($u.tag)$([char]0x2026)"
+            $inst = & $run 'Install-KlbfUpdate $a $b' $u $dir
+            $iTick = New-Object System.Windows.Forms.Timer; $iTick.Interval = 500
+            $iTick.add_Tick({
+                if (-not $inst.job.IsCompleted) { return }
+                $iTick.Stop(); $c.updating = $false
+                $r = try { @($inst.ps.EndInvoke($inst.job))[0] } catch { @{ ok = $false; message = "Update not installed: $_" } }
+                if ($r.ok) { $env:KLBF_UPDATED = $r.message; $c.form.Tag = 'updated'; $c.form.Close(); return }
+                $c.status.Text = $r.message; $c.update.Enabled = $true; $c.play.Enabled = & $fGameOk $c.gamePath
+                [void][System.Windows.Forms.MessageBox]::Show($r.message, 'KLBF Lab', 'OK', 'Warning')
+            }.GetNewClosure())
+            $iTick.Start()
+        }.GetNewClosure())
+    }
     # (27/11) A first start from the release zip: the official components fetched while the window is open,
     # on the status line, in a runspace of this process (no window). Play waits for nothing: play.ps1 checks.
     $dir = if ($Victory) { Split-Path -Parent $Victory } else { '' }
