@@ -64,6 +64,26 @@ try {
     $play = Get-KlbfSwitches (Get-KlbfDefaults); $bench = Get-KlbfBenchSwitches (Get-KlbfDefaults) 'someone'
     Check 'the bench translates as Play does (same settings but -Bench)' ((@($bench.Keys | Where-Object { $_ -notin 'Bench', 'BenchPlayer' }) -join ',') -eq (@($play.Keys) -join ','))
 
+    # (27/11) A failed start is never silent: play.ps1 stopped early (no game folder) writes launcher-error.txt
+    # with what helps, says it, exits 3, and has left the mark the .vbs reads
+    $empty = Join-Path $t 'empty-build'; New-Item -ItemType Directory -Path $empty | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repo 'play.ps1'), (Join-Path $repo 'launcher-menu.ps1') -Destination $empty
+    $startMark = Join-Path $env:TEMP 'klbf-lab-started.txt'
+    Remove-Item -LiteralPath $startMark -ErrorAction SilentlyContinue
+    $env:KLBF_NO_DIALOG = '1'; $env:KLBF_OLD_HOMES = Join-Path $t 'no-older-home'; $env:KLBF_HOME = Join-Path $t 'failhome'; $env:KLBF_LAUNCHER_DIR = Join-Path $t 'faillauncher'
+    $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $empty 'play.ps1') -NoMenu -NoPrecompile 2>&1
+    $rc = $LASTEXITCODE
+    $env:KLBF_NO_DIALOG = $null
+    $errFile = Join-Path $env:KLBF_HOME 'logs\launcher-error.txt'
+    Check 'failed start: exit code 3' ($rc -eq 3)
+    Check 'failed start: launcher-error.txt written' (Test-Path -LiteralPath $errFile)
+    $errText = if (Test-Path -LiteralPath $errFile) { Get-Content -LiteralPath $errFile -Raw } else { '' }
+    Check 'failed start: the error, PowerShell, policy, language mode, internet mark' ($errText -match 'Say where your dump is' -and $errText -match 'PowerShell: 5\.1' -and $errText -match 'Execution policy: ' -and $errText -match 'Language mode: FullLanguage' -and $errText -match 'internet mark: none')
+    Check 'failed start: no user profile path' (-not $errText.Contains($env:USERPROFILE))
+    Check 'started mark for the .vbs' (Test-Path -LiteralPath $startMark)
+    Check 'the .vbs waits and has the fallback steps' ((Get-KlbfVbsText) -match ', 0, True\)' -and (Get-KlbfVbsText) -match 'KLBF Lab\.cmd' -and (Get-KlbfVbsText) -match 'rc <> 3')
+    $env:KLBF_HOME = Join-Path $t 'home'
+
     # The first-run shortcut offer: a yes makes it and says so; a failure is said and asked again; a no is remembered
     $env:KLBF_LAUNCHER_DIR = Join-Path $t 'launcher'
     $mark = Join-Path $env:KLBF_LAUNCHER_DIR 'shortcut-asked.txt'

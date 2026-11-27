@@ -89,6 +89,51 @@ param(
     [switch]$SkipShaderCheck
 )
 $ErrorActionPreference = 'Stop'
+# (27/11) Started hidden (the .vbs, the .cmd, the shortcut), a failure showed nothing: any error that stops
+# this script is written to Saved Games\KLBF Lab\logs\launcher-error.txt with what helps to understand it
+# (PowerShell's version, execution policy, language mode, files still carrying the internet mark), and shown
+# in a message box in front of everything. Self-contained: it works even if launcher-menu.ps1 does not load.
+# Exit code 3: said already (the .vbs then says nothing more). KLBF_NO_DIALOG=1: no box (tests).
+trap {
+    $err = $_
+    $file = ''
+    try {
+        $home_ = if ($env:KLBF_HOME) { $env:KLBF_HOME } else { Join-Path $env:USERPROFILE 'Saved Games\KLBF Lab' }
+        $dir = Join-Path $home_ 'logs'
+        $marked = @(Get-ChildItem -LiteralPath $PSScriptRoot -File -ErrorAction SilentlyContinue | Where-Object { Get-Item -LiteralPath $_.FullName -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue } | ForEach-Object { $_.Name })
+        $policy = try { "$(Get-ExecutionPolicy) (this process: $(Get-ExecutionPolicy -Scope Process))" } catch { 'unknown' }
+        $text = @(
+            "KLBF Lab could not start ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+            "Error: $err"
+            "Where: $($err.InvocationInfo.ScriptName):$($err.InvocationInfo.ScriptLineNumber)"
+            "PowerShell: $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+            "Execution policy: $policy"
+            "Language mode: $($ExecutionContext.SessionState.LanguageMode)"
+            "Files with the internet mark: $(if ($marked) { $marked -join ', ' } else { 'none' })"
+            "Windows: $([Environment]::OSVersion.Version)"
+            "Folder: $PSScriptRoot"
+        ) -join "`r`n"
+        if ($env:USERPROFILE) { $text = $text.Replace($env:USERPROFILE, '%USERPROFILE%') }
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $file = Join-Path $dir 'launcher-error.txt'
+        Set-Content -LiteralPath $file -Value $text -Encoding utf8
+    } catch {}
+    $msg = "KLBF Lab could not start:`r`n`r`n$err`r`n`r`n" + $(if ($file) { "Details: $($file.Replace($env:USERPROFILE, '%USERPROFILE%'))`r`n(attach it to a bug report)" } else { '' })
+    Write-Host $msg
+    if ($env:KLBF_NO_DIALOG -ne '1') {
+        $shown = $false
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            # DefaultDesktopOnly: in front of every window, even from a hidden process
+            $null = [System.Windows.Forms.MessageBox]::Show($msg, 'KLBF Lab', 'OK', 'Error', 'Button1', 'DefaultDesktopOnly'); $shown = $true
+        } catch {}
+        # Constrained language (AppLocker, WDAC) allows no WinForms: Windows' own popup (16 error, 4096 on top)
+        if (-not $shown) { try { $null = (New-Object -ComObject WScript.Shell).Popup($msg, 0, 'KLBF Lab', 4112) } catch {} }
+    }
+    exit 3
+}
+# (27/11) Read by the .vbs: PowerShell reached this script (if it then fails, the box above says why)
+try { Set-Content -LiteralPath (Join-Path $env:TEMP 'klbf-lab-started.txt') -Value $PID -Encoding ascii } catch {}
 . (Join-Path $PSScriptRoot 'launcher-menu.ps1')
 if (-not $env:KLBF_LAUNCHER_DIR) { $null = Set-KlbfAppId }
 # (27/11) This folder's files without the internet mark of an extracted zip (silent)

@@ -182,12 +182,23 @@ function Unblock-KlbfFolder([string]$Dir) {
     try { Get-ChildItem -LiteralPath $Dir -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch {}
 }
 
-# The starter script: the folder from its own place, PowerShell hidden (window style 0), not waited for.
+# The starter script: the folder from its own place, PowerShell hidden (window style 0). (27/11) It waits for
+# PowerShell (no window: harmless) and, when PowerShell could not start or never reached play.ps1 (the mark
+# play.ps1 writes first in %TEMP%), says so with the fallback steps; play.ps1's own failures it leaves to
+# play.ps1's box (exit code 3).
 function Get-KlbfVbsText {
     @(
         "' KLBF Lab: starts play.ps1 of this folder with no console window (the desktop shortcut runs this)."
-        'Dim d: d = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)'
-        'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & d & "\play.ps1"" -Victory """ & d & "\victory.exe"" -Setup", 0, False'
+        'Dim sh, fs, d, mark, rc'
+        'Set sh = CreateObject("WScript.Shell"): Set fs = CreateObject("Scripting.FileSystemObject")'
+        'd = fs.GetParentFolderName(WScript.ScriptFullName)'
+        'mark = sh.ExpandEnvironmentStrings("%TEMP%") & "\klbf-lab-started.txt"'
+        'If fs.FileExists(mark) Then fs.DeleteFile mark, True'
+        'On Error Resume Next'
+        'rc = sh.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & d & "\play.ps1"" -Victory """ & d & "\victory.exe"" -Setup", 0, True)'
+        'If Err.Number <> 0 Or (rc <> 0 And rc <> 3 And Not fs.FileExists(mark)) Then'
+        '    MsgBox "KLBF Lab could not start PowerShell (error " & Err.Number & ", code " & rc & ")." & vbCrLf & vbCrLf & "Try:" & vbCrLf & "1. Right-click the zip, Properties, tick Unblock, OK, then extract it again." & vbCrLf & "2. Double-click KLBF Lab.cmd in this folder." & vbCrLf & "3. Or right-click play.ps1, Run with PowerShell.", vbCritical + vbSystemModal, "KLBF Lab"'
+        'End If'
     ) -join "`r`n"
 }
 

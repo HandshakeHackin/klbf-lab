@@ -49,6 +49,8 @@ If it doesn't start (nothing happens after double-clicking "KLBF Lab.vbs"):
 1. Right-click the zip, Properties, tick "Unblock", OK, then extract it again.
 2. Double-click "KLBF Lab.cmd" (the same start, without VBScript).
 3. Or right-click play.ps1, "Run with PowerShell".
+When the launcher itself fails, a message says why, and the details are in
+Saved Games\KLBF Lab\logs\launcher-error.txt (attach it to a bug report).
 
 The first start downloads two official components once, into this folder, each file checked:
 Microsoft's DirectX 12 Agility SDK (from Microsoft's NuGet) and AMD FSR (AMD FidelityFX SDK v2.4.0,
