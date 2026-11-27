@@ -2,9 +2,9 @@
 //! (`victory.exe run <game> --execute`: AmericasLauncher, i95 and others). They then get what
 //! `play.ps1` gives, not the base's defaults.
 //!
-//! Applied only when the start is bare: `play.ps1` sets `VICTORY_GAME_DIR` and its own set, which
-//! stays as it is. A setting already in the environment is never replaced. `KLBF_DEFAULTS=0`
-//! applies none. Keep this list the same as `play.ps1`'s `$set` (cache and save folders left to
+//! Applied only when the start is not our launcher's: `play.ps1` sets `KLBF_LAUNCHER` and its own set,
+//! which stays as it is (a launcher setting `VICTORY_GAME_DIR` still gets them). A setting already in the
+//! environment is never replaced. `KLBF_DEFAULTS=0` applies none. Keep this list the same as `play.ps1`'s `$set` (cache and save folders left to
 //! the executable's own defaults).
 
 /// `play.ps1`'s standing set, as of op-amd-v12.
@@ -66,7 +66,7 @@ const SET: &[(&str, &str)] = &[
 
 /// Sets the launcher's settings for a bare start. Call first in `main`, before any thread.
 pub fn apply() {
-    if std::env::var_os("KLBF_DEFAULTS").is_some_and(|v| v == "0") || std::env::var_os("VICTORY_GAME_DIR").is_some() {
+    if std::env::var_os("KLBF_DEFAULTS").is_some_and(|v| v == "0") || std::env::var_os("KLBF_LAUNCHER").is_some() {
         return;
     }
     let mut set = |k: &str, v: &str| {
@@ -82,11 +82,56 @@ pub fn apply() {
     if std::env::var_os("VICTORY_BVH_BUILDER").is_none_or(|v| v != "1") {
         set("VICTORY_PROBE_RAYS", "1");
     }
+    // (27/11) The universal setting (launcher-menu.ps1's Get-KlbfUniversal): Profile X (no --console
+    // series-s), output 3840x2160, AMD FSR Ultra Performance when its DLL is found, no frame generation.
+    if std::env::var_os("VICTORY_OUTPUT").is_none() {
+        set("KLBF_X_OUTPUT", "3840x2160");
+    }
+    if std::env::var_os("KLBF_X_FSR").is_none_or(|v| v == "1")
+        && let Some(dll) = fsr_dll(std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent)) {
+        set("VICTORY_FSR_DLL", &dll.to_string_lossy());
+        set("KLBF_X_FSR", "1");
+        set("KLBF_X_FSR_QUALITY", "ultraperformance");
+    }
     set("KLBF_DEFAULTS_APPLIED", "1");
+}
+
+const FSR_DLL: &str = "amd_fidelityfx_upscaler_dx12.dll";
+
+/// The PC FSR DLL: the caller's `VICTORY_FSR_DLL`, else beside the executable, else play.ps1's default
+/// `-FfxDir`. `None`: the title keeps its built-in upscaler.
+fn fsr_dll(exe_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("VICTORY_FSR_DLL").filter(|v| !v.is_empty()) {
+        return Some(p.into());
+    }
+    let ffx_dir = std::path::Path::new(r"D:\KLBF-Lab\ffx-4.1.2");
+    exe_dir.map(|d| d.join(FSR_DLL)).into_iter().chain([ffx_dir.join(FSR_DLL)]).find(|p| p.is_file())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fsr_only_where_its_dll_is() {
+        let dir = std::env::temp_dir().join(format!("klbf-fsr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: the only test of this crate touching VICTORY_FSR_DLL.
+        unsafe { std::env::remove_var("VICTORY_FSR_DLL") };
+        let none = super::fsr_dll(Some(&dir));
+        assert!(none.is_none() || none.unwrap().starts_with(r"D:\KLBF-Lab"), "no DLL beside the exe");
+        std::fs::write(dir.join(super::FSR_DLL), b"").unwrap();
+        assert_eq!(super::fsr_dll(Some(&dir)), Some(dir.join(super::FSR_DLL)));
+        unsafe { std::env::set_var("VICTORY_FSR_DLL", r"C:\mine.dll") };
+        assert_eq!(super::fsr_dll(Some(&dir)), Some(r"C:\mine.dll".into()), "the caller's own wins");
+        unsafe { std::env::remove_var("VICTORY_FSR_DLL") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// play.ps1 marks its starts, so the built-in settings never replace its own.
+    #[test]
+    fn our_launcher_says_so() {
+        assert!(include_str!("../../../play.ps1").contains("KLBF_LAUNCHER = 'play.ps1'"));
+    }
+
     /// The list stays the same as `play.ps1`'s `$set`: every name there with a fixed value is here.
     #[test]
     fn same_as_the_launcher() {

@@ -184,6 +184,8 @@ $set = [ordered]@{
     VICTORY_GAME_DIR  = $Game
     VICTORY_CACHE_DIR = $Cache
     VICTORY_DATA_DIR  = $Data
+    # (27/11) The exe keeps its menu bar, F10 / F11 and leaves its built-in settings to this set
+    KLBF_LAUNCHER     = 'play.ps1'
 
     # The standing set of this fork's runs (some names come from its older tree and are ignored here)
     VICTORY_JOIN_COPIES = '1'; VICTORY_REFRESH_ONCE = '1'; VICTORY_CARD_REHASH_RUNS = '1'; VICTORY_BACK_OWN_VIEW = '1'
