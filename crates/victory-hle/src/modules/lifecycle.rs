@@ -513,6 +513,10 @@ extern "system" fn window_proc(
         }
         return 0;
     }
+    // KLBF Lab: keyboard and mouse (a click takes the mouse for the camera, F9 lets it go).
+    if let Some(result) = super::gameinput::kbm_message(hwnd, message, wparam, lparam) {
+        return result;
+    }
     // KLBF Lab: F8, F10, F11.
     if victory_gpu::klbf_keys::on_message(message, wparam, lparam) {
         return 0;
