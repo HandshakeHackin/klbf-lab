@@ -57,6 +57,25 @@ pub(crate) fn keep_on_fast_cores(what: &str) {
     ask(what, 1);
 }
 
+/// `KLBF_PRIORITY=1` (off): the process at high priority, the threads a frame waits for
+/// above normal and the one that drops retired objects below normal. After
+/// eikkapine/victory-amd (GPL-3.0), rewritten.
+pub(crate) fn klbf_priority() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_PRIORITY").is_some_and(|v| v == "1"))
+}
+
+/// The calling thread at `level` (a `THREAD_PRIORITY_*`) when [`klbf_priority`] is on.
+pub(crate) fn priority_if_asked(what: &str, level: i32) {
+    if !klbf_priority() {
+        return;
+    }
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
+    // SAFETY: the calling thread's own priority.
+    let set = unsafe { SetThreadPriority(GetCurrentThread(), level) } != 0;
+    tracing::info!(what, level, set, "thread priority (KLBF_PRIORITY=1)");
+}
+
 /// [`keep_on_fast_cores`] for one of the threads a submission's preparing or
 /// a landing shares its work with.
 pub(crate) fn keep_helper_on_fast_cores(what: &str) {

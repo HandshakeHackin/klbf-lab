@@ -155,6 +155,36 @@ fn next_tick(kind: u32) -> (u64, Duration) {
     )
 }
 
+/// `KLBF_FPS_CAP=<fps>` (unset: none): `1/fps` at least between two frame starts.
+fn fps_cap() -> Option<Duration> {
+    static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        let fps: f64 = std::env::var("KLBF_FPS_CAP").ok()?.trim().parse().ok()?;
+        (fps > 0.0 && fps <= 1000.0).then(|| Duration::from_secs_f64(1.0 / fps))
+    })
+}
+
+/// (`KLBF_FPS_CAP`) Paces frame starts on the title's own thread, at its origin wait, never
+/// on the submitting thread: each start is at least the cap after the one before, measured
+/// from that start, so a slow frame is not made up for by a burst after it. After
+/// eikkapine/victory-amd (GPL-3.0), rewritten.
+fn pace_start() {
+    let Some(gap) = fps_cap() else { return };
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = last.map(|t| t + gap) {
+        // Sleep to 1.5 ms before, then yield: the system's sleep is coarse.
+        while let Some(left) = at.checked_duration_since(std::time::Instant::now()) {
+            if left > Duration::from_micros(1500) {
+                std::thread::sleep(left - Duration::from_micros(1500));
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+    *last = Some(std::time::Instant::now());
+}
+
 /// Device method: blocks until the next tick (or the time-out); an origin
 /// wait then hands out the new frame's token. Other events keep the token
 /// the title passes. Ticks are absolute (start plus whole intervals), so
@@ -200,6 +230,9 @@ pub(crate) extern "system" fn wait(
         use crate::copystat::{C, add};
         add(C::PaceWaits, 1);
         add(C::PaceUs, wait.min(limit).as_micros() as u64);
+    }
+    if origin && hr == S_OK {
+        pace_start();
     }
     // A frame begun on a time-out takes no tick: its flip still does.
     if origin && (hr == S_OK || flags & TOKEN_ON_TIMEOUT != 0) {

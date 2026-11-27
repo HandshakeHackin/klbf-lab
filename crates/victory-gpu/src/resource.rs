@@ -1379,7 +1379,12 @@ fn mip_drop_min_size() -> u64 {
 
 #[cfg(windows)]
 fn mip_drop_base(desc: &ResourceDesc) -> u32 {
-    mip_drop_base_with(desc, texture_mip_drop(), mip_drop_min_size())
+    let dropped = mip_drop_base_with(desc, texture_mip_drop(), mip_drop_min_size());
+    // (`KLBF_TEX_CAP`) Left out the way the mip drop leaves levels out.
+    match tex_cap(desc) {
+        0 => dropped,
+        cap => dropped.max(base_level(desc, cap.min(u32::from(desc.mip_levels).saturating_sub(2)))),
+    }
 }
 
 #[cfg(windows)]
@@ -1409,6 +1414,45 @@ pub(crate) fn read_from(layout: &victory_formats::texture::Layout, first: u32) -
     }
     let first = first.min(layout.first_tail_mip).min(layout.mips.len() as u32 - 1);
     if layout.bytes_from(first) < layout.size { first } else { 0 }
+}
+
+/// `KLBF_TEX_CAP` (unset: off): the largest side of a new host copy of a streamed 2D
+/// texture, its biggest levels left out above it (as `VICTORY_TEXTURE_MIP_DROP` does). `1`: by the share of the card's memory
+/// budget in use, none under 80 %, 2048 to 90 %, 1024 to 95 %, then 512; `<px>` (64 or
+/// more): that side always. After eikkapine/victory-amd (GPL-3.0), rewritten.
+#[cfg(windows)]
+fn tex_cap(desc: &ResourceDesc) -> u32 {
+    static SET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let set = *SET.get_or_init(|| std::env::var("KLBF_TEX_CAP").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0));
+    let side = match set {
+        0 => return 0,
+        1 => {
+            // The share in use, looked at again at most ten times a second.
+            static AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let tenth = crate::host::now_ms() / 100 + 1;
+            let mut seen = AT.load(std::sync::atomic::Ordering::Relaxed);
+            if seen >> 8 != tenth {
+                let pct = crate::host::host()
+                    .and_then(|h| h.video_memory())
+                    .filter(|m| m[0] > 0)
+                    .map_or(0, |m| (u128::from(m[1]) * 100 / u128::from(m[0])).min(255) as u64);
+                seen = (tenth << 8) | pct;
+                AT.store(seen, std::sync::atomic::Ordering::Relaxed);
+            }
+            match seen & 0xff {
+                0..80 => return 0,
+                80..90 => 2048,
+                90..95 => 1024,
+                _ => 512,
+            }
+        }
+        px => px.max(64),
+    };
+    let mut skip = 0;
+    while skip + 1 < u32::from(desc.mip_levels) && (desc.width >> skip > side || u64::from(desc.height) >> skip > side) {
+        skip += 1;
+    }
+    skip
 }
 
 /// The level a host copy begins at for views that start at `first`: one the

@@ -6147,6 +6147,16 @@ impl State {
         // back (`crate::indirect`).
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            // (KLBF_NIGHT_LIGHTS, after eikkapine/victory-amd) The stand-in after indirect
+            // dispatches too, as after direct ones.
+            if crate::ambient::night_lights()
+                && let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
+                && crate::ambient::on()
+                && self.ambient(list, p, role)
+            {
+                self.host_pipeline = 0;
+                self.host_roots[1] = 0;
+            }
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
