@@ -11,9 +11,13 @@
 //!
 //! The transforms themselves are not computed: the hardware takes impulse
 //! responses already in its own partitioned frequency-domain layout, which
-//! is not known. Outputs are silence, so reverb returns are dry.
-// shortcut: no convolution or block transform; outputs are zeros. Needs the
-// coprocessor's impulse response and spectrum layouts to do better.
+//! is not known. A convolution passes its input through unchanged (voices
+//! filtered through one, such as a phone line, stay audible; idea from
+//! zzz); other transforms output silence. `KLBF_PHONE_SILENT=1` makes
+//! convolutions silent again.
+// shortcut: no convolution or block transform; convolution is a passthrough,
+// the rest are zeros. Needs the coprocessor's impulse response and spectrum
+// layouts to do better.
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
@@ -59,6 +63,7 @@ pub struct Status {
 
 pub struct Stream {
     dsp: *mut Dsp,
+    kind: u32,
     frames: u32,
     channels: u32,
     status: Box<Status>,
@@ -166,6 +171,7 @@ pub extern "system" fn XDspActivate(
     }
     let new = Box::new(Stream {
         dsp,
+        kind: desc.kind,
         frames: desc.frames,
         channels: desc.channels,
         status: Box::new(Status {
@@ -195,7 +201,13 @@ pub extern "system" fn XDspDeactivate(stream: *mut Stream) -> HRESULT {
     S_OK
 }
 
-/// Completes the command at once: its output block is silence.
+fn phone_silent() -> bool {
+    static SILENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SILENT.get_or_init(|| std::env::var("KLBF_PHONE_SILENT").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Completes the command at once: a convolution's output block is its input
+/// block, any other output block is silence.
 pub extern "system" fn XDspSubmitCommand(
     stream: *mut Stream,
     command: *const Command,
@@ -208,8 +220,16 @@ pub extern "system" fn XDspSubmitCommand(
     let (stream, command) = unsafe { (&mut *stream, &*command) };
     if !command.output.is_null() {
         let samples = (stream.frames * stream.channels) as usize;
-        // SAFETY: the title's output buffer holds one block of the stream.
-        unsafe { std::ptr::write_bytes(command.output, 0, samples) };
+        let pass = stream.kind == CONVOLUTION && !command.input.is_null() && !phone_silent();
+        // SAFETY: the title's input and output buffers each hold one block of
+        // the stream (same frames and channels); `copy` allows them to overlap.
+        unsafe {
+            if pass {
+                std::ptr::copy(command.input, command.output, samples);
+            } else {
+                std::ptr::write_bytes(command.output, 0, samples);
+            }
+        }
     }
     let status = &mut *stream.status;
     let next = status.submitted.wrapping_add(1);
@@ -284,6 +304,14 @@ mod tests {
         // SAFETY: the stream's status block.
         let (completed, result) = unsafe { ((*status).completed, (*status).result) };
         assert_eq!((completed, result), (ticket, S_OK));
+        // A convolution passes its input through.
+        assert!(output.iter().all(|&s| s == 0.5));
+        // No input: silence.
+        let command = Command {
+            input: std::ptr::null(),
+            ..command
+        };
+        assert_eq!(XDspSubmitCommand(stream, &command, &mut ticket), S_OK);
         assert!(output.iter().all(|&s| s == 0.0));
         assert_eq!(XDspDeactivate(stream), S_OK);
 
@@ -308,6 +336,16 @@ mod tests {
             XDspActivate(dsp, &transform, &mut status, &mut stream),
             S_OK
         );
+        // Other transforms still output silence.
+        let mut output = vec![1f32; 0x400];
+        let command = Command {
+            gains: [1.0, 1.0],
+            input: input.as_ptr(),
+            output: output.as_mut_ptr(),
+            reserved: 0,
+        };
+        assert_eq!(XDspSubmitCommand(stream, &command, &mut ticket), S_OK);
+        assert!(output.iter().all(|&s| s == 0.0));
         assert_eq!(XDspDeactivate(stream), S_OK);
         assert_eq!(XDspDisconnect(dsp), S_OK);
     }

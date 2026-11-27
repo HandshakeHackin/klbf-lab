@@ -6,6 +6,10 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## Unreleased
+
+- Phone calls in game are no longer silent: the audio DSP's convolution streams pass their input through instead of outputting silence (idea from zzz, thanks). `KLBF_PHONE_SILENT=1` restores the old silent output.
+
 ## v26.11.3 (27 Nov 2026)
 
 - The launcher starts from "KLBF Lab.cmd" instead of "KLBF Lab.vbs": Windows Defender's cloud check flagged the .vbs (a script starting a hidden PowerShell) as a trojan, a false positive. An existing desktop shortcut is repaired automatically.
