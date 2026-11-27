@@ -95,7 +95,9 @@ if (-not $explicit) {
     $settingsFile = Join-Path (Get-KlbfLauncherDir) 'settings.json'
     $choice = Read-KlbfSettings $settingsFile
     $ask = -not $NoMenu -and -not $PrintEnv -and ($Setup -or -not $choice -or (Test-KlbfShift))
-    if (-not $choice) { $choice = Get-KlbfDefaults }
+    # (27/11) No settings yet: what this PC's hardware calls for (the owner's setting on an RDNA 4 16 GB card),
+    # or the owner's setting if the hardware cannot be read
+    if (-not $choice) { $choice = try { Get-KlbfRecommended (Get-KlbfHardware) } catch { Get-KlbfDefaults } }
     if ($ask) {
         # One line on the shaders: prepared for this build or not (the window's choices do not change them).
         $status = ''
@@ -105,7 +107,8 @@ if (-not $explicit) {
             $ready = (Test-Path -LiteralPath $m) -and ((Get-Content -LiteralPath $m -TotalCount 1) -eq (Get-KlbfShaderStamp $v $Build '1' ''))
             $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared for this build yet (a few minutes; Play offers it).' }
         } catch {}
-        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\data' })
+        $known = if ($Game) { $Game } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt')) { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt') -TotalCount 1).Trim() } else { '' }
+        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }) $known $Cache
         if (-not $picked) { exit 0 }
         $choice = $picked.choice; $menuAction = $picked.action
         Save-KlbfSettings $choice $settingsFile
@@ -113,6 +116,8 @@ if (-not $explicit) {
     # "Run benchmark": the player's settings and -Bench (-BenchPlayer from the bench window)
     $switches = if ($menuAction -eq 'bench') { Get-KlbfBenchSwitches $choice $picked.benchPlayer } else { Get-KlbfSwitches $choice }
     foreach ($kv in $switches.GetEnumerator()) { Set-Variable -Name $kv.Key -Value $kv.Value }
+    # The game folder chosen in the window, unless -Game says another
+    if (-not $PSBoundParameters.ContainsKey('Game') -and $choice.game) { $Game = $choice.game }
 }
 if ($Tout) { $FsrX = [switch]$true; $FrameGen = [switch]$true; $Hooks = [switch]$true; $TexTrim = [switch]$true }
 $root = $PSScriptRoot
@@ -146,10 +151,22 @@ if (-not (Test-Path -LiteralPath (Join-Path $agility 'D3D12Core.dll'))) {
 if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
 if (-not $Data) { $Data = Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }
 New-Item -ItemType Directory -Force -Path $Cache, $Data | Out-Null
+# (27/11) A bench from the window loads the save picked there: the run gets a copy of the data folder in which
+# that save is the only one (Continue can load nothing else), and the player's own saves are not opened.
+$benchLabel = ''
+if ($menuAction -eq 'bench' -and $picked.benchSave) {
+    try {
+        $zip = Backup-KlbfSaves (Get-KlbfSavesRoot $Data)
+        if ($zip) { Write-Host "Saves backed up: $zip" }
+    } catch { Write-Warning "Saves not backed up: $_" }
+    $benchLabel = Get-KlbfSaveLabel $picked.benchSave
+    $Data = New-KlbfBenchData $Data $picked.benchSave
+    Write-Host "KLBF Lab Bench: save $benchLabel, alone in a copy of your data ($Data)"
+}
 
 # Settings left in this window by an earlier start go: only what is below counts.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -ne 'VICTORY_HALF_VIEWS' -and $_.Name -ne 'VICTORY_AUTO_INPUT' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
-Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM', 'KLBF_BENCH_SAVE' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 
 $set = [ordered]@{
     VICTORY_GAME_DIR  = $Game
@@ -237,6 +254,7 @@ if ($Bench) {
     Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing until the card shows. Your card is saved in bench-results beside victory.exe;'
     Write-Host 'post it with the form: https://github.com/PastiiJay/klbf-lab/issues/new?template=bench-bm-v1.yml'
 }
+if ($benchLabel) { $set.KLBF_BENCH_SAVE = $benchLabel }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 if ($PrintEnv) {
@@ -305,10 +323,10 @@ if ($Bench) {
 }
 
 # (27/11) Every save backed up before the game starts (KLBF-Lab\save-backups, the last 10 kept)
-try {
+if (-not $benchLabel) { try {
     $savedZip = Backup-KlbfSaves (Get-KlbfSavesRoot $Data)
     if ($savedZip) { Write-Host "Saves backed up: $savedZip" }
-} catch { Write-Warning "Saves not backed up: $_" }
+} catch { Write-Warning "Saves not backed up: $_" } }
 Write-Host ("KLBF Lab, Profile {0}, {1} build, ray tracing {2}, memory hooks {3}" -f $(if ($Fsr) { 'S' } else { 'X' }), $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
 if ($FsrX) { Write-Host "AMD FSR (Profile X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
 if ($FrameGen) { Write-Host 'AMD frame generation: on (two frames shown per real one; more latency at a low base frame rate)' }

@@ -932,6 +932,9 @@ struct Card {
     set: Settings,
     from: String,
     player: String,
+    /// (27/11) The save the run loaded, as the launcher's Saves tab names it ("#2 <in-game name>"); empty
+    /// when not given (`KLBF_BENCH_SAVE`).
+    save: String,
     blocked: u64,
     /// "RAM peak 20.8 GB · VRAM 10.0 / 15.6 GB · card busy 57 %".
     used: String,
@@ -939,6 +942,11 @@ struct Card {
     /// "KLBF-Bench-BM-v1-YYYYMMDD-HHMM-<serial>": the PNG, JSON and text files' name.
     file_stem: String,
     png_name: String,
+}
+
+/// `KLBF_BENCH_SAVE`: the save the launcher isolated for the run (no control characters, 64 at most).
+fn bench_save() -> String {
+    std::env::var("KLBF_BENCH_SAVE").unwrap_or_default().chars().filter(|c| !c.is_control()).take(64).collect::<String>().trim().into()
 }
 
 fn player() -> String {
@@ -984,6 +992,7 @@ fn finish(early: Option<&'static str>) {
         set,
         from: format!("{PROJECT} @ {SHA}{declared}"),
         player: player(),
+        save: bench_save(),
         blocked: BLOCKED.load(Ordering::Relaxed),
         used: String::new(),
         share: String::new(),
@@ -1281,6 +1290,10 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
     if let (J::O(m), true) = (&mut doc, x.fade > 0) {
         m.insert("fade_frames", J::I(x.fade));
     }
+    // (27/11) Only when the launcher named the save: results without it keep their bytes and serial.
+    if let (J::O(m), false) = (&mut doc, c.save.is_empty()) {
+        m.insert("bench_save", J::S(c.save.clone()));
+    }
     doc
 }
 
@@ -1296,7 +1309,7 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         format!("Result:     {} \u{2013} {}", c.stamp.word(), c.reason),
         format!("Serial:     {}", c.serial),
         format!("Date:       {}", c.date_iso),
-        format!("From:       {} \u{b7} player: {}", c.from, c.player),
+        format!("From:       {} \u{b7} player: {}{}", c.from, c.player, if c.save.is_empty() { String::new() } else { format!(" \u{b7} save {}", c.save) }),
         format!("Machine:    {}", c.sys.line()),
         format!("Settings:   {}", c.set.line()),
         format!("Duration:   {} / {} ({})", mmss(c.elapsed), target(), x.why),
@@ -2238,7 +2251,8 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
         pen.text(ARIAL_BOLD, size, line, 600.0, top + 17.0 * i as f32, false, 360.0, ink);
     }
     // The player stays above the rule under it (at 312).
-    pen.text(ARIAL, 15.0, &format!("player: {}", c.player), 600.0, 300.0, false, 360.0, ink);
+    let save = if c.save.is_empty() { String::new() } else { format!(" \u{b7} save {}", c.save) };
+    pen.text(ARIAL, 15.0, &format!("player: {}{save}", c.player), 600.0, 300.0, false, 360.0, ink);
     // The settings: a small block in the left panel, right of the stamp.
     for (i, line) in c.set.lines().iter().enumerate() {
         pen.text(ARIAL, 13.0, line, 180.0, 490.0 + 18.0 * i as f32, false, 290.0, ink);
@@ -2470,6 +2484,7 @@ mod tests {
             },
             from: String::new(),
             player: "anonymous".into(),
+            save: String::new(),
             blocked: 0,
             used: String::new(),
             share: String::new(),
@@ -2628,6 +2643,18 @@ mod tests {
         r.frame(false, at(54), Vec::new);
         assert_eq!((r.black_frames(), r.fade), (54, 0));
         assert_eq!(verdict(false, full, &s, r.black_frames(), false).0, Stamp::Invalid);
+    }
+
+    #[test]
+    fn bench_save_only_when_named() {
+        let mut card = sample_card();
+        let extra = Extra { black: 0, fade: 0, removed: false, compiled: [3, 7], vram: (9000 << 20, 15000 << 20), ram: 12345 << 20, peaks: (13000 << 20, 9500 << 20), why: "5:00 reached" };
+        let J::O(plain) = result_json(&card, &extra, &[60.0]) else { unreachable!() };
+        assert!(!plain.contains_key("bench_save"));
+        card.save = "#2 Night at home".into();
+        let J::O(named) = result_json(&card, &extra, &[60.0]) else { unreachable!() };
+        assert_eq!(named.get("bench_save").map(J::canonical).as_deref(), Some("\"#2 Night at home\""));
+        assert_eq!(named.len(), plain.len() + 1);
     }
 
     #[test]

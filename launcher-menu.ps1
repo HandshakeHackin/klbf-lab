@@ -15,7 +15,7 @@ function Get-KlbfLauncherDir {
 # The owner's setting: Profile X, FSR 4 Performance, 3840x2160, frame generation, hooks and texture trim
 # (= -Tout -FsrQuality performance -Output 3840x2160).
 function Get-KlbfDefaults {
-    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true }
+    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = '' }
 }
 
 # Any object (a parsed JSON) over the defaults: unknown or invalid values keep the default.
@@ -28,7 +28,23 @@ function ConvertTo-KlbfChoice($o) {
     if ($o.output -in $script:KlbfModes) { $c.output = [string]$o.output }
     if ($o.frameGen -is [bool]) { $c.frameGen = $o.frameGen }
     if ($o.advanced -is [bool]) { $c.advanced = $o.advanced }
+    if ($o.game -is [string]) { $c.game = $o.game }
     $c
+}
+
+# Whether $Path is a game folder play.ps1 can start: it has game_scarlett_master.exe.
+function Test-KlbfGameFolder([string]$Path) {
+    [bool]($Path -and (Test-Path -LiteralPath (Join-Path $Path 'game_scarlett_master.exe') -PathType Leaf))
+}
+
+# Room on the drive of the cache. 10 GB measured 27/11: a full shader and pipeline cache 7.2 GB, saves and
+# logs 11 MB, 10 save backups under 0.2 GB, plus margin for the cache to grow.
+$script:KlbfSpaceGB = 10
+function Get-KlbfSpace([string]$Cache) {
+    if (-not $Cache) { $Cache = Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }
+    $root = [IO.Path]::GetPathRoot($Cache)
+    $free = try { [math]::Floor((New-Object IO.DriveInfo($root)).AvailableFreeSpace / 1GB) } catch { -1 }
+    @{ drive = $root.TrimEnd('\'); needGB = $script:KlbfSpaceGB; freeGB = $free; ok = $free -ge $script:KlbfSpaceGB }
 }
 
 # The saved choice, or $null without a file (first run). A damaged file gives the defaults.
@@ -158,12 +174,14 @@ function Get-KlbfVerdicts($Hw) {
     )
 }
 
-# The settings for this PC: RDNA 4 with 16 GB -> the owner's default; under 12 GB -> Profile S; else
-# Profile X, FSR 4 Performance, output = the screen if it is one of the title's modes, else 2560x1440.
+# The settings for this PC (27/11): Profile X only for RDNA 3 and 4 with 16 GB or more (RDNA 4: the owner's
+# default; RDNA 3: output = the screen if it is one of the title's modes, else 2560x1440). Everything else,
+# RDNA 2 and any card under 16 GB included, Profile S (a 12 GB RX 6750 XT ran 25 min stable on it).
 function Get-KlbfRecommended($Hw) {
     $c = Get-KlbfDefaults
-    if ($Hw.vramGB -lt 12) { $c.profile = 'S'; return $c }
-    if ((Get-KlbfGpuKind $Hw.gpu).gen -eq 'RDNA 4' -and $Hw.vramGB -ge 16) { return $c }
+    $gen = (Get-KlbfGpuKind $Hw.gpu).gen
+    if ($gen -notin 'RDNA 3', 'RDNA 4' -or $Hw.vramGB -lt 16) { $c.profile = 'S'; return $c }
+    if ($gen -eq 'RDNA 4') { return $c }
     $c.output = if ($Hw.screen -in $script:KlbfModes) { $Hw.screen } else { '2560x1440' }
     $c
 }
@@ -389,22 +407,45 @@ function Get-KlbfBenchSwitches($Choice, [string]$Player) {
     $s
 }
 
-# The bench window: the guide, a GitHub login box, Start bench / Cancel. The login, or $null.
-function Show-KlbfBenchGuide {
+# The data folder of a bench run (27/11): a copy of $Data in which the chosen save is the only save, so
+# Continue can only load that one; the player's own saves are never opened by the run. Rebuilt each run.
+function New-KlbfBenchData([string]$Data, $Save, [string]$Dest = (Join-Path (Split-Path -Parent (Get-KlbfLauncherDir)) 'bench-data')) {
+    if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Recurse -Force }
+    Copy-Item -LiteralPath $Data -Destination $Dest -Recurse
+    $root = Get-KlbfSavesRoot $Dest
+    foreach ($s in (Get-KlbfSaves $root)) {
+        if ((Split-Path -Leaf $s.dir) -ne (Split-Path -Leaf $Save.dir)) { Remove-Item -LiteralPath $s.dir -Recurse -Force }
+    }
+    $Dest
+}
+
+# How the card names a save: "#2 <in-game name>" (the Saves tab's number), "Autosave <name>".
+function Get-KlbfSaveLabel($Save) {
+    if ($Save.auto) { "Autosave $($Save.title)" } else { '#' + ($Save.slot -replace '^Slot ', '') + " $($Save.title)" }
+}
+
+# The bench window: the guide, the save to load (the most recent by default), a GitHub login box,
+# Start bench / Cancel. @{ player; save } or $null.
+function Show-KlbfBenchGuide($Saves) {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'KLBF Lab Bench'; Set-KlbfTheme $f; $f.FormBorderStyle = 'FixedDialog'
     $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.StartPosition = 'CenterParent'
-    $f.ClientSize = New-Object System.Drawing.Size(520, 420)
+    $f.ClientSize = New-Object System.Drawing.Size(520, 456)
     $t = New-Object System.Windows.Forms.Label; $t.Text = Get-KlbfBenchGuide; $t.SetBounds(16, 12, 488, 300)
+    $sl = New-Object System.Windows.Forms.Label; $sl.Text = 'Save the bench loads:'; $sl.SetBounds(16, 358, 200, 20)
+    $pick = New-Object System.Windows.Forms.ComboBox; $pick.DropDownStyle = 'DropDownList'; $pick.ForeColor = [System.Drawing.Color]::Black; $pick.SetBounds(216, 355, 288, 24)
+    foreach ($s in $Saves) { [void]$pick.Items.Add("$($s.slot): $($s.title)") }
+    if ($Saves) { $pick.SelectedIndex = [array]::IndexOf(@($Saves), (@($Saves) | Sort-Object date -Descending | Select-Object -First 1)) }
     $l = New-Object System.Windows.Forms.Label; $l.Text = 'Your GitHub login (on the card; empty: anonymous):'; $l.SetBounds(16, 322, 300, 20)
     $box = New-Object System.Windows.Forms.TextBox; $box.SetBounds(316, 319, 188, 24)
     $box.BackColor = Get-KlbfColor $script:KlbfTheme.field; $box.ForeColor = Get-KlbfColor $script:KlbfTheme.text
-    $go = New-Object System.Windows.Forms.Button; $go.Text = 'Start bench'; $go.DialogResult = 'OK'; $go.SetBounds(296, 366, 100, 34)
-    $no = New-Object System.Windows.Forms.Button; $no.Text = 'Cancel'; $no.DialogResult = 'Cancel'; $no.SetBounds(404, 366, 100, 34)
+    $go = New-Object System.Windows.Forms.Button; $go.Text = 'Start bench'; $go.DialogResult = 'OK'; $go.SetBounds(296, 404, 100, 34)
+    $no = New-Object System.Windows.Forms.Button; $no.Text = 'Cancel'; $no.DialogResult = 'Cancel'; $no.SetBounds(404, 404, 100, 34)
+    $go.Enabled = [bool]$Saves
     Set-KlbfButton $go $true; Set-KlbfButton $no
-    $f.Controls.AddRange(@($t, $l, $box, $go, $no)); $f.AcceptButton = $go; $f.CancelButton = $no
-    if ($f.ShowDialog() -eq 'OK') { $box.Text } else { $null }
+    $f.Controls.AddRange(@($t, $l, $box, $sl, $pick, $go, $no)); $f.AcceptButton = $go; $f.CancelButton = $no
+    if ($f.ShowDialog() -eq 'OK') { @{ player = $box.Text; save = @($Saves)[$pick.SelectedIndex] } } else { $null }
 }
 
 # The setup window, not shown: @{ form; c (its controls) }. $Hardware: Get-KlbfHardware's; $Info: @{ victory;
@@ -418,10 +459,10 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     Set-KlbfTheme $f
     $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
     $f.StartPosition = 'CenterScreen'
-    $f.ClientSize = New-Object System.Drawing.Size(520, 790)
+    $f.ClientSize = New-Object System.Drawing.Size(520, 884)
     $soft = Get-KlbfColor $script:KlbfTheme.soft
     $back = Get-KlbfColor $script:KlbfTheme.back
-    $c = @{ info = $Info; hw = $Hardware; openUrl = { param($u) Start-Process $u }; clipboard = { param($t) [System.Windows.Forms.Clipboard]::SetText($t) } }
+    $c = @{ recommended = (Get-KlbfRecommended $Hardware); info = $Info; hw = $Hardware; openUrl = { param($u) Start-Process $u }; clipboard = { param($t) [System.Windows.Forms.Clipboard]::SetText($t) } }
     $add = { param($parent, $ctl, $x, $y, $w, $h) $ctl.SetBounds($x, $y, $w, $h); $parent.Controls.Add($ctl); $ctl }
     $label = { param($parent, $text, $x, $y, $w, $h = 20) $l = New-Object System.Windows.Forms.Label; $l.Text = $text; & $add $parent $l $x $y $w $h }
     $radio = { param($parent, $text, $x, $y, $w) $r = New-Object System.Windows.Forms.RadioButton; $r.Text = $text; & $add $parent $r $x $y $w 22 }
@@ -454,14 +495,27 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     [void](& $add $f $rule 16 70 488 2)
 
     $tabs = New-Object System.Windows.Forms.TabControl
-    [void](& $add $f $tabs 12 80 496 572)
+    [void](& $add $f $tabs 12 80 496 672)
     $c.tabs = $tabs
     $page = New-Object System.Windows.Forms.TabPage; $page.Text = 'Play'; $page.BackColor = $back; $page.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $savesPage = New-Object System.Windows.Forms.TabPage; $savesPage.Text = 'Saves'; $savesPage.BackColor = $back; $savesPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $tabs.TabPages.AddRange(@($page, $savesPage))
 
     # Your PC: what was found, a verdict per line (green: fine, amber: works with less, red: not supported)
-    $g = & $group $page 'Your PC' 4 140
+    # Game folder: where the player's copy is; checked, and the room the cache needs on its drive
+    $g = & $group $page 'Game folder' 4 96
+    $c.game = New-Object System.Windows.Forms.TextBox; $c.game.ReadOnly = $true
+    $c.game.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.game.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    [void](& $add $g $c.game 12 22 340 24)
+    $c.browse = & $btn $g "Browse$([char]0x2026)" 360 20 108
+    $c.gameDot = & $label $g ([string][char]0x25CF) 12 50 18
+    $c.gameText = & $white (& $label $g '' 30 50 444)
+    $c.spaceDot = & $label $g ([string][char]0x25CF) 12 70 18
+    $c.space = Get-KlbfSpace $Info.cache
+    $c.spaceText = & $white (& $label $g ('About {0} GB needed on {1} (cache, logs, backups); {2} GB free' -f $c.space.needGB, $c.space.drive, $c.space.freeGB) 30 70 450)
+    $c.spaceDot.ForeColor = Get-KlbfColor $(if ($c.space.ok) { 0x22C55E } else { 0xF59E0B })
+
+    $g = & $group $page 'Your PC' 104 140
     $c.pc = @{}
     $y = 20
     foreach ($v in (Get-KlbfVerdicts $Hardware)) {
@@ -470,16 +524,18 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.pc[$v.what] = & $white (& $label $g ('{0}: {1}' -f $v.what, $v.text) 30 $y 444)
         $y += 20
     }
-    $c.recommended = Get-KlbfRecommended $Hardware
     $c.recommend = & $btn $g 'Recommended settings for this PC' 12 ($y + 4) 260
 
-    $g = & $group $page 'Profile' 148 52
-    $c.profX = & $white (& $radio $g 'Profile X (recommended)' 12 20 220)
-    $c.profS = & $white (& $radio $g 'Profile S' 250 20 220)
+    $g = & $group $page 'Profile' 248 52
+    # "(recommended for your PC)" on what Get-KlbfRecommended picks for this hardware
+    $mark = { param($text, $on) if ($on) { "$text (recommended for your PC)" } else { $text } }
+    $rec = $c.recommended
+    $c.profX = & $white (& $radio $g (& $mark 'Profile X' ($rec.profile -eq 'X')) 12 20 270)
+    $c.profS = & $white (& $radio $g (& $mark 'Profile S' ($rec.profile -eq 'S')) 286 20 190)
 
-    $g = & $group $page 'Upscaler' 204 96
-    $c.upFsr = & $white (& $radio $g 'AMD FSR 4 (recommended)' 12 20 220)
-    $c.upTitle = & $white (& $radio $g "The title's own upscaler" 250 20 226)
+    $g = & $group $page 'Upscaler' 304 96
+    $c.upFsr = & $white (& $radio $g (& $mark 'AMD FSR 4' ($rec.upscaler -eq 'fsr')) 12 20 270)
+    $c.upTitle = & $white (& $radio $g "The title's own upscaler" 286 20 190)
     [void](& $white (& $label $g 'FSR preset:' 12 46 120))
     $p = New-Object System.Windows.Forms.Panel
     [void](& $add $g $p 8 64 466 26)
@@ -489,13 +545,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.presets[$k] = & $white (& $radio $p $script:KlbfPresets[$k] $at[$k][0] 2 $at[$k][1])
     }
 
-    $g = & $group $page 'Output resolution' 304 78
+    $g = & $group $page 'Output resolution' 404 78
     $c.output = & $combo $g 12 22 140
     foreach ($m in $script:KlbfModes) { [void]$c.output.Items.Add($m) }
     $c.screen = & $white (& $label $g "Your screen: $Screen" 170 25 300)
     $c.outputNote = & $white (& $label $g '' 12 52 460)
 
-    $g = & $group $page 'Options' 386 74
+    $g = & $group $page 'Options' 486 74
     $c.fg = New-Object System.Windows.Forms.CheckBox
     $c.fg.Text = 'Frame generation (FG x2)'
     [void](& $white (& $add $g $c.fg 12 20 460 22))
@@ -503,7 +559,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.adv.Text = 'Advanced: memory hooks and texture trim (faster, uses less RAM)'
     [void](& $white (& $add $g $c.adv 12 44 462 22))
 
-    $g = & $group $page 'Saved profiles' 464 60
+    $g = & $group $page 'Saved profiles' 564 60
     $c.saved = & $combo $g 12 24 196
     foreach ($n in (Get-KlbfPresetNames)) { [void]$c.saved.Items.Add($n) }
     if ($c.saved.Items.Count) { $c.saved.SelectedIndex = 0 }
@@ -530,20 +586,24 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.copy = & $btn $g 'Copy' 380 24 88
     $c.savesNote = & $white (& $label $savesPage '' 6 436 480 60)
 
-    # Under the tabs: shaders, Play, Prepare shaders, bench, bug report
-    $c.status = & $label $f $ShaderStatus 16 658 488 22
+    # Under the tabs: the shaders' line, then a 3-column grid (156 px columns, 10 px apart): grey buttons on
+    # the first row (room for more), Play alone in the right column of the second, violet.
+    $c.status = & $label $f $ShaderStatus 16 758 488 22
     $c.status.ForeColor = $soft
-    $c.play = & $btn $f 'Play' 320 684 184 44
+    $col = { param($i) 16 + 166 * $i }
+    $c.prepare = & $btn $f 'Prepare shaders' (& $col 0) 784 156 36
+    $c.bench = & $btn $f 'Run benchmark' (& $col 1) 784 156 36
+    $c.bug = & $btn $f 'Report a bug' (& $col 2) 784 156 36
+    $c.bugNote = & $label $f '' (& $col 0) 830 322 44
+    $c.bugNote.ForeColor = $soft
+    $c.play = & $btn $f 'Play' (& $col 2) 828 156 44
     Set-KlbfButton $c.play $true
     $c.play.Font = New-KlbfFont 12 'Bold'
-    $c.prepare = & $btn $f 'Prepare shaders' 16 684 184 44
-    $c.bench = & $btn $f 'Run benchmark' 16 738 184 34
-    $c.bug = & $btn $f 'Report a bug' 210 738 140 34
-    $c.bugNote = & $label $f '' 356 734 150 44
-    $c.bugNote.ForeColor = $soft
+
     $f.AcceptButton = $c.play
 
     $c.form = $f
+    $c.game.Text = $(if ($Choice.game) { $Choice.game } else { [string]$Info.game })
     Set-KlbfFormChoice $c $Choice
     Update-KlbfSavesTab $c
     # A closure sees variables, not this file's functions: they go in as variables.
@@ -586,9 +646,16 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         & $c.openUrl "$repo/issues/new"
     }.GetNewClosure())
     $c.bench.add_Click({
-        $player = if ($c.benchGuide) { & $c.benchGuide } else { & $fGuide }
-        if ($null -eq $player) { return }
-        $c.benchPlayer = $player; $c.form.Tag = 'bench'; $c.form.Close()
+        $r = if ($c.benchGuide) { & $c.benchGuide $c.saves } else { & $fGuide $c.saves }
+        if ($null -eq $r) { return }
+        $c.benchPlayer = $r.player; $c.benchSave = $r.save; $c.form.Tag = 'bench'; $c.form.Close()
+    }.GetNewClosure())
+    $c.browse.add_Click({
+        $d = New-Object System.Windows.Forms.FolderBrowserDialog
+        $d.Description = 'The folder of your copy of the game (the one with game_scarlett_master.exe)'
+        if ($c.game.Text) { $d.SelectedPath = $c.game.Text }
+        $picked = if ($c.pickFolder) { & $c.pickFolder } elseif ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }
+        if ($picked) { $c.game.Text = $picked; & $fUpdate $c }
     }.GetNewClosure())
     $c.backup.add_Click({
         $z = & $fBackup $c.savesRoot
@@ -634,6 +701,7 @@ function Update-KlbfSavesTab($c) {
 }
 
 function Set-KlbfFormChoice($c, $Choice) {
+    if ($Choice.game) { $c.game.Text = $Choice.game }
     $c.profX.Checked = $Choice.profile -ne 'S'; $c.profS.Checked = $Choice.profile -eq 'S'
     $c.upFsr.Checked = $Choice.upscaler -ne 'title'; $c.upTitle.Checked = $Choice.upscaler -eq 'title'
     $c.presets[$Choice.preset].Checked = $true
@@ -650,6 +718,7 @@ function Get-KlbfFormChoice($c) {
         output = [string]$c.output.SelectedItem
         frameGen = [bool]$c.fg.Checked
         advanced = [bool]$c.adv.Checked
+        game = [string]$c.game.Text
     })
 }
 
@@ -662,16 +731,21 @@ function Update-KlbfForm($c) {
     $c.output.Enabled = -not $s
     $c.outputNote.Text = $(if ($s) { 'Profile S: the title sets its own render size and output.' } else { '' })
     $c.fg.Enabled = $fsr
+    # Play, bench and shaders need the game files
+    $ok = Test-KlbfGameFolder $c.game.Text
+    $c.gameDot.ForeColor = Get-KlbfColor $(if ($ok) { 0x22C55E } else { 0xEF4444 })
+    $c.gameText.Text = if ($ok) { 'Game files found' } elseif ($c.game.Text) { 'This folder does not contain the game files' } else { 'Choose the folder where your copy of the game is installed (Browse...)' }
+    foreach ($b in $c.play, $c.bench, $c.prepare) { $b.Enabled = $ok }
 }
 
-# Shows the window: @{ action = 'play'|'prepare'|'bench'; choice; benchPlayer } or $null if closed.
-function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '', [string]$Data = '') {
+# Shows the window: @{ action = 'play'|'prepare'|'bench'; choice; benchPlayer; benchSave } or $null if closed.
+function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '', [string]$Data = '', [string]$Game = '', [string]$Cache = '') {
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-    $info = @{ victory = $Victory; data = $Data; windows = $(if ($os) { "$($os.Caption) (build $($os.BuildNumber))" } else { '' }) }
+    $info = @{ victory = $Victory; data = $Data; game = $Game; cache = $Cache; windows = $(if ($os) { "$($os.Caption) (build $($os.BuildNumber))" } else { '' }) }
     $m = New-KlbfMenuForm $Choice (Get-KlbfHardware) $ShaderStatus $info
     [void]$m.form.ShowDialog()
     if (-not $m.form.Tag) { return $null }
-    @{ action = [string]$m.form.Tag; choice = Get-KlbfFormChoice $m.c; benchPlayer = $m.c.benchPlayer }
+    @{ action = [string]$m.form.Tag; choice = Get-KlbfFormChoice $m.c; benchPlayer = $m.c.benchPlayer; benchSave = $m.c.benchSave }
 }
 
 # "You changed how the game is rendered..." with Prepare now / Later: $true for Prepare now.
