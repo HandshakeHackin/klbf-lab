@@ -9,7 +9,14 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
 ## v26.11.4 (27 Nov 2026)
 
 Thanks to the testers whose reports led to this release: Neffffffff, Domi, INGLIP, deydey103, Solar, pacoravan,
-Dominic, MalarkZA and Aphantasiac.
+Dominic, MalarkZA, Aphantasiac, KingKaom and wilsonwilsonlg.
+
+### Stability
+- The game no longer ends with "write to 0x0 at +0x2215c35" (or "+0x23cf683") a minute or two in, during the
+  opening movies: that was the title's own hang watchdog, set off while shaders were still being built. It is
+  now off; `KLBF_TITLE_WATCHDOG=1` keeps it. Thanks to KingKaom (#69) and wilsonwilsonlg (#116).
+- crashes.log now names a refused graphics memory reservation (the cause behind the stop at +0x19f4f58).
+  Thanks to Aphantasiac (#136).
 
 ### Download
 - Download KLBF-Lab.zip: everything is inside a "KLBF Lab" folder when you extract it.
