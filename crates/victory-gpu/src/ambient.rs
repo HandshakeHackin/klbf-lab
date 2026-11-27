@@ -164,7 +164,7 @@ const SOURCE: &str = r#"
 cbuffer Set : register(b0) {
     float level; float constant; float strength; float radius;
     float near; float tan_y; uint width; uint height;
-    float follow; float most; float air; float keep;
+    float follow; float most; float air; float own;
 };
 Texture2D<float> depth : register(t0);
 // Cells: the light they send out (then, at CELLS, the slow mean), from
@@ -348,7 +348,7 @@ void raise(uint3 at : SV_DispatchThreadID) {
     found = clamp(found, 0.2 * all, 2.5 * all);
     found = lerp(found, cells[CELLS].rgb, 0.2) * level * open;
     // Willy/Neptune-VE leftover=off: do not blend with uninitialized resolve memory (fixes magenta/purple skin).
-    if (keep > 0.0) {
+    if (own > 0.0) {
         // (KLBF_NIGHT_LIGHTS, after eikkapine/victory-amd) The title's own light where it is
         // brighter (lamps, headlights), up to `most` times the estimate; magenta (green far
         // under red and blue) is old probe memory, not light.
