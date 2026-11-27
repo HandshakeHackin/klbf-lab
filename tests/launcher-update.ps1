@@ -110,7 +110,22 @@ try {
     Check "good update installed ($($r.message))" ($r.ok -and $r.message -eq "Updated to v26.11.2 $([char]0x2014) shaders will be prepared again")
     Check 'new files in place, all match SHA256SUMS.txt' ((& { $now = Get-Sums $b; -not @($staged.Keys | Where-Object { $now[$_] -ne $staged[$_] }) }) -and (Get-KlbfVersion $b) -eq 'v26.11.2' -and (Get-Content (Join-Path $b 'victory.exe')) -eq 'fake victory v26.11.2')
     Check 'bench-results, D3D12 and game-folder.txt kept' ((Get-Content (Join-Path $b 'bench-results\card.txt')) -eq 'my card' -and (Test-Path (Join-Path $b 'D3D12\D3D12Core.dll')) -and (Test-Path (Join-Path $b 'game-folder.txt')))
-    Check 'old files in <folder>.previous, no .new left' ((Get-Content (Join-Path "$b.previous" 'victory.exe')) -eq 'fake victory v26.11.1' -and -not (Test-Path "$b.new"))
+    Check 'old files inside the folder (.previous-v26.11.1), nothing beside it' ((Get-Content (Join-Path $b '.previous-v26.11.1\victory.exe')) -eq 'fake victory v26.11.1' -and -not (Test-Path "$b.previous") -and -not (Test-Path "$b.new") -and -not (Test-Path (Join-Path $b '.new-v26.11.2')))
+
+    # (27/11) The Update link's tick, as the window runs it: a finished install closes the window to reopen it
+    # (its closure held nothing before: "The property 'updating' cannot be found")
+    Add-Type -AssemblyName System.Windows.Forms
+    $form = New-Object System.Windows.Forms.Form
+    $cc = @{ form = $form; updating = $true; status = New-Object System.Windows.Forms.Label; update = New-Object System.Windows.Forms.LinkLabel; play = New-Object System.Windows.Forms.Button; gamePath = ''; quiet = $true }
+    $done = { param($ok) $p = [powershell]::Create(); $null = $p.AddScript("@{ ok = `$$ok; message = 'Updated to v26.11.2' }"); $j = $p.BeginInvoke(); $null = $j.AsyncWaitHandle.WaitOne(10000); @{ ps = $p; job = $j } }
+    $timer = New-Object System.Windows.Forms.Timer
+    $tick = Get-KlbfUpdateTick $cc (& $done 'true') $timer { $true }
+    $err = try { & $tick; '' } catch { "$_" }
+    Check "update tick: no error, window closes to reopen ($err)" (-not $err -and -not $cc.updating -and $form.Tag -eq 'updated')
+    $form2 = New-Object System.Windows.Forms.Form; $cc.form = $form2; $cc.updating = $true
+    $err = try { & (Get-KlbfUpdateTick $cc (& $done 'false') $timer { $true }); '' } catch { "$_" }
+    Check "update tick, failed install: said, window stays ($err)" (-not $err -and -not $cc.updating -and $form2.Tag -ne 'updated' -and $cc.status.Text -eq 'Updated to v26.11.2' -and $cc.update.Enabled)
+    $env:KLBF_UPDATED = $null
 
     # Components checked by hash: a file of another version is fetched again
     Check 'component with another hash is not "there"' (-not (Install-KlbfComponent agility $b -CheckOnly))

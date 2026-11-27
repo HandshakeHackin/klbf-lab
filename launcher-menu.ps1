@@ -329,7 +329,8 @@ function Test-KlbfRunning([string]$BuildDir) {
 # "<folder>.previous" (kept until the next update), the new ones move in; any failure puts everything back
 # and throws. Other files stay (bench-results, D3D12, ffx, game-folder.txt).
 function Switch-KlbfBuild([string]$Stage, [string]$BuildDir) {
-    $prev = "$($BuildDir.TrimEnd('\')).previous"
+    # (27/11) Inside the build folder, never beside it: a zip extracted loose on the Desktop made Desktop.previous
+    $prev = Join-Path $BuildDir ".previous-$(if (Get-KlbfVersion $BuildDir) { Get-KlbfVersion $BuildDir } else { 'build' })"
     if (Test-Path -LiteralPath $prev) { Remove-Item -LiteralPath $prev -Recurse -Force }
     New-Item -ItemType Directory -Path $prev | Out-Null
     $new = @(@((Read-KlbfSums $Stage).Keys) + 'SHA256SUMS.txt')
@@ -353,7 +354,7 @@ function Install-KlbfUpdate($Update, [string]$BuildDir) {
     $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
     $no = { param($m) @{ ok = $false; message = "Update not installed: $m" } }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "klbf-update-$([guid]::NewGuid().ToString('N'))"
-    $stage = "$($BuildDir.TrimEnd('\')).new"
+    $stage = Join-Path $BuildDir ".new-$($Update.tag)"
     try {
         if ($Update.sha -notmatch '^[0-9a-f]{64}$') { return & $no 'the release notes give no SHA-256 for the zip.' }
         New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -379,6 +380,20 @@ function Install-KlbfUpdate($Update, [string]$BuildDir) {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+# (27/11) The Update link's timer tick: when the install ($Inst, a runspace job) has ended, the window closes
+# to reopen on the new files, or says why not. Made here, not inside the link's handler: a closure made in a
+# closure did not hold the handler's variables ($c was $null, "The property 'updating' cannot be found").
+function Get-KlbfUpdateTick($c, $Inst, $Timer, $GameOk) {
+    {
+        if (-not $Inst.job.IsCompleted) { return }
+        $Timer.Stop(); $c.updating = $false
+        $r = try { @($Inst.ps.EndInvoke($Inst.job))[0] } catch { @{ ok = $false; message = "Update not installed: $_" } }
+        if ($r.ok) { $env:KLBF_UPDATED = $r.message; $c.form.Tag = 'updated'; $c.form.Close(); return }
+        $c.status.Text = $r.message; $c.update.Enabled = $true; $c.play.Enabled = & $GameOk $c.gamePath
+        if (-not $c.quiet) { [void][System.Windows.Forms.MessageBox]::Show($r.message, 'KLBF Lab', 'OK', 'Warning') }
+    }.GetNewClosure()
 }
 
 # The update line beside the version: "Update available: v26.11.2 - Update   What's new" (two links).
@@ -1691,7 +1706,7 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
         $defs = (('Get-KlbfVersion', 'Get-KlbfUpdateCheck', 'Get-KlbfUpdate', 'Read-KlbfSums', 'Test-KlbfSums', 'Test-KlbfRunning', 'Switch-KlbfBuild', 'Install-KlbfUpdate') |
             ForEach-Object { "function $_ {$((Get-Item "function:$_").ScriptBlock)}" }) -join "`n"
         $run = { param($script, $a, $b) $p = [powershell]::Create(); $null = $p.AddScript("param(`$a, `$b)`n$defs`n$script").AddArgument($a).AddArgument($b); @{ ps = $p; job = $p.BeginInvoke() } }.GetNewClosure()
-        $c = $m.c; $fLine = ${function:Set-KlbfUpdateLine}; $fGameOk = ${function:Test-KlbfGameFolder}; $fVer = ${function:Get-KlbfVersionLine}
+        $c = $m.c; $fLine = ${function:Set-KlbfUpdateLine}; $fGameOk = ${function:Test-KlbfGameFolder}; $fVer = ${function:Get-KlbfVersionLine}; $fTick = ${function:Get-KlbfUpdateTick}
         # Never closed while the files are being replaced
         $c.form.add_FormClosing({ param($s, $e) if ($c.updating -and $c.form.Tag -ne 'updated') { $e.Cancel = $true } }.GetNewClosure())
         $check = & $run 'Get-KlbfUpdateCheck $a' $c.version $null
@@ -1716,14 +1731,7 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
             $c.status.Text = "Downloading $($u.tag)$([char]0x2026)"
             $inst = & $run 'Install-KlbfUpdate $a $b' $u $dir
             $iTick = New-Object System.Windows.Forms.Timer; $iTick.Interval = 500
-            $iTick.add_Tick({
-                if (-not $inst.job.IsCompleted) { return }
-                $iTick.Stop(); $c.updating = $false
-                $r = try { @($inst.ps.EndInvoke($inst.job))[0] } catch { @{ ok = $false; message = "Update not installed: $_" } }
-                if ($r.ok) { $env:KLBF_UPDATED = $r.message; $c.form.Tag = 'updated'; $c.form.Close(); return }
-                $c.status.Text = $r.message; $c.update.Enabled = $true; $c.play.Enabled = & $fGameOk $c.gamePath
-                [void][System.Windows.Forms.MessageBox]::Show($r.message, 'KLBF Lab', 'OK', 'Warning')
-            }.GetNewClosure())
+            $iTick.add_Tick((& $fTick $c $inst $iTick $fGameOk))
             $iTick.Start()
         }.GetNewClosure())
     }
