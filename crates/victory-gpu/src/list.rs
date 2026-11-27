@@ -320,7 +320,7 @@ pub(crate) fn trim_idle() {
             return;
         }
         let gone = idle.0.split_off(IDLE_WHEN_TIGHT);
-        idle.1 -= gone.iter().map(|Idle(_, bytes)| bytes).sum::<u64>();
+        idle.1 -= gone.iter().map(|Idle(_, bytes, _)| bytes).sum::<u64>();
         gone
     };
     // (Outside the lock: freeing lists takes the graphics kernel's time.)
