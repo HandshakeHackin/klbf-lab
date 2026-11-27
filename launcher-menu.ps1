@@ -245,6 +245,8 @@ function Set-KlbfShortcut($Spec, $Ask, [string]$Path = (Join-Path ([Environment]
 function Invoke-KlbfShortcutOffer($Spec, $Ask, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
     $mark = Join-Path (Get-KlbfLauncherDir) 'shortcut-asked.txt'
     if (Test-Path -LiteralPath $mark) { return '' }
+    # (27/11) a shortcut already made (by hand or the Quick tab): no question
+    if (Test-Path -LiteralPath $Path) { return '' }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $mark) | Out-Null
     $yes = & $Ask 'Create a desktop shortcut for KLBF Lab?'
     Set-Content -LiteralPath $mark -Value $(if ($yes) { 'yes' } else { 'no' }) -Encoding utf8
