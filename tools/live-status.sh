@@ -4,7 +4,7 @@
 cd /c/GTAVI/Tools/victory-data/bench
 r=${1:-$(ls -td run-*/ | head -1 | tr -d /)}
 L=$(tail -c 6000000 $r/stdout.txt | sed -E 's/\x1b\[[0-9;]*m//g')
-cap=$(tail -1 $r/captions.txt | cut -d'|' -f4-6)
+cap=$(tail -1 $r/captions.txt | cut -d'|' -f4-7)
 echo "run $r - now:$cap"
 echo "$L" | grep -a "framelog: usual frame" | tail -1 | awk '{for(i=1;i<=NF;i++){if($i=="long):"){f=$(i+1)+0} if($i=="preparing"){p=$(i+1)+0} if($i=="card"&&$(i-1)=="the"&&$(i-2)=="for"){w=$(i+1)+0} if($i=="work"&&$(i-1)=="at"){s=$(i+1)+0} if($i=="idle"&&$(i-1)=="card:"){id=$(i+1)+0} if($i=="lists"&&$(i-1)=="other"){g=$(i+1)+0} if($i=="draws"&&$(i-1)+0>0){d=$(i-1)+0} if($i=="uploads,"){u=$(i-1)+0} if($i=="remapping:"){rc=$(i+1)+0; rm=$(i+3)+0}}
   printf "  frame %.0f ms (%.1f fps) at %d draws\n", f, 1000/f, d

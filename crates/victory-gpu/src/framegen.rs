@@ -537,6 +537,23 @@ pub fn before_present() {
     configure(api, &fg, frame, PREPARED.load(Ordering::Acquire) == frame + 1);
 }
 
+/// (27/11) Frames shown per second over the last second (real and generated), 0 before a second
+/// was measured or when the swap chain gives no present count; the window's caption.
+static SHOWN_FPS: AtomicU64 = AtomicU64::new(0);
+/// (27/11) Frames shown per real frame since the start, 0 if not known: the bench card's
+/// "(FG N)". ponytail: since the start, not since the run's start; the loading screens count too.
+static SHOWN_RATIO: AtomicU64 = AtomicU64::new(0);
+
+/// [`SHOWN_FPS`] (0: not known).
+pub fn shown_fps() -> f64 {
+    f64::from_bits(SHOWN_FPS.load(Ordering::Relaxed))
+}
+
+/// [`SHOWN_RATIO`] (0: not known).
+pub fn shown_ratio() -> f64 {
+    f64::from_bits(SHOWN_RATIO.load(Ordering::Relaxed))
+}
+
 /// After a present through the frame generation swap chain, given the swap
 /// chain's count of presents (real and generated): once a second, the real
 /// frame rate and the one shown.
@@ -555,9 +572,14 @@ pub fn after_present(presented: Option<u32>) {
         return;
     }
     let seconds = elapsed.as_secs_f64();
+    let shown = (presented.saturating_sub(presented_then)) as f64 / seconds;
+    SHOWN_FPS.store(shown.to_bits(), Ordering::Relaxed);
+    if presented > 0 {
+        SHOWN_RATIO.store((f64::from(presented) / real as f64).to_bits(), Ordering::Relaxed);
+    }
     tracing::info!(
         real = (real - real_then) as f64 / seconds,
-        presented = (presented.saturating_sub(presented_then)) as f64 / seconds,
+        presented = shown,
         "frames rendered and frames shown (KLBF_FRAMEGEN=1: the extra ones are generated)"
     );
     *since = Some((std::time::Instant::now(), real, presented));

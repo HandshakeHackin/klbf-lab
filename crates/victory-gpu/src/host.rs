@@ -10356,9 +10356,8 @@ impl Meter {
             };
             meter_lines(lines);
         }
-        // (ours) The caption the player sees, as PastiiJay/klbf-lab's: "KLBF Lab · F FPS · M ms", then
-        // (27/11) what the bench card shows but the time (`klbf_bench::caption`)
-        // (was "Scarlett | <game> | F FPS | M ms | D draws", which tools/*.sh split at '|').
+        // (ours) The caption the player sees (`klbf_bench::caption`, 27/11): "KLBF Lab | F FPS [(FG n)] | 1% L |
+        // M ms | D draws | <profile and upscaler> | VRAM | RAM", fields at ' | ' as tools/*.sh split them.
         // Setting the text waits for the window's thread (a title thread,
         // which may not pump for a while), so a thread of ours does it and
         // presenting never waits; it takes the newest text when free.

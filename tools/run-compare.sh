@@ -5,7 +5,7 @@
 cd /c/GTAVI/Tools/victory-data/bench
 for r in "$@"; do
   [ -f $r/plain.txt ] || sed -E 's/\x1b\[[0-9;]*m//g' $r/stdout.txt > $r/plain.txt
-  scene=$(awk -F'|' '{t=$1+0; for(i=1;i<=NF;i++) if($i~/draws/){d=$i+0}; if(d>1000){print t; exit}}' $r/captions.txt)
+  scene=$(awk -F'|' '{t=$1+0; for(i=1;i<=NF;i++) if($i~/draws/){d=$i+0; if($i~/k draws/)d*=1000}; if(d>1000){print t; exit}}' $r/captions.txt)
   echo "== $r (scene at ${scene:-?} s; $(cat $r/watch.txt 2>/dev/null))"
   grep -a "usual frame" $r/plain.txt | awk '{for(i=1;i<=NF;i++){if($i=="long):"){f=$(i+1)+0} if($i=="draws"&&$(i-1)+0>0){d=$(i-1)+0}} b=(d<1000)?"a <1k":(d<2500)?"b 1-2.5k":(d<4000)?"c 2.5-4k":"d >4k"; print b "\t" f}' | sort -k1,1 -k3,3n | awk -F'\t' '{if($1!=p){if(p!="")printf "   draws %-9s median %3.0f ms (n=%d)\n",substr(p,3),v[int((n+1)/2)],n; n=0; p=$1} v[++n]=$2} END{if(p!="")printf "   draws %-9s median %3.0f ms (n=%d)\n",substr(p,3),v[int((n+1)/2)],n}'
   grep -a "frame times:" $r/plain.txt | awk '{for(i=1;i<=NF;i++){if($i=="frames"&&$(i+1)=="in"){fr+=$(i-1)} if($i=="long"){lg+=$(i-1)} if($i=="longest"){x=$(i+1)+0; if(x>mx)mx=x; if(x>=500)h5++}}} END{printf "   hitches: %d long frames of %d (%.1f %%); 5-s periods with a frame over 500 ms: %d; worst %d ms\n", lg, fr, (fr?100*lg/fr:0), h5, mx}'

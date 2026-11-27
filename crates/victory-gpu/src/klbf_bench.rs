@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Graphics::Dxgi::{DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter3};
+use windows::Win32::Graphics::Dxgi::{DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter3};
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -192,6 +192,17 @@ fn vram_now() -> (u64, u64) {
     }
 }
 
+/// (27/11) The card's memory this process uses in system RAM (DXGI's non-local segment), bytes; 0: not known.
+fn shared_now() -> u64 {
+    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+    let adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // SAFETY: a plain query filling our struct.
+    match adapter.map(|a| unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut info) }) {
+        Some(Ok(())) => info.CurrentUsage,
+        _ => 0,
+    }
+}
+
 // (27/11) What the frame is drawn at and shown on: the card's resolution line, the JSON's sizes and
 // the caption's. The window's size and frame generation come from the swap chain ([`start`]), the
 // FSR sizes from each upscale the FidelityFX redirect sends to the PC DLL ([`note_upscale`]).
@@ -270,12 +281,18 @@ impl Shown {
     /// "FSR 4 Quality 960p → 1440p", "FSR 4 Native AA 1440p", "Title upscaler 960p → 1440p", "Native 1440p";
     /// empty before the first present.
     fn label(&self) -> String {
+        self.label_in(false)
+    }
+
+    /// [`label`](Self::label), the sizes in parentheses for the caption: "FSR 4 Performance (1080p → 4K)".
+    fn label_in(&self, paren: bool) -> String {
         if self.output[1] == 0 {
             return String::new();
         }
         let out = rows(self.output[1]);
         let from = |name: &str| match self.render[1] {
             0 => format!("{name} {out}"),
+            r if paren => format!("{name} ({} \u{2192} {out})", rows(r)),
             r => format!("{name} {} \u{2192} {out}", rows(r)),
         };
         match self.upscaler {
@@ -306,9 +323,9 @@ impl Shown {
     }
 }
 
-/// "Series S" or "Series X".
+/// "Profile S" or "Profile X" (27/11: no console brand on screen).
 fn profile_name() -> &'static str {
-    if profile() == "S" { "Series S" } else { "Series X" }
+    if profile() == "S" { "Profile S" } else { "Profile X" }
 }
 
 /// The title's own upscaler's scale: Series X's `KLBF_X_RENDER_SCALE` (victory-loader's
@@ -403,56 +420,61 @@ fn shown() -> Shown {
     Shown { output, render, upscaler, fsr: String::new(), fg, screen }
 }
 
-/// (27/11) The window's caption outside a run, refreshed once a second: what the card shows but the time,
-/// "KLBF Lab · 16 FPS · 62 ms · 1% 9 · 9.8k draws · Series X FSR 4 Quality 960p → 1440p · FG · screen
-/// 2560x1440 · VRAM 11.6/14.0 GB · RAM 15.2 GB [· compiling N shaders]". `low1`: the 1 % low of the last
-/// second's frames, fps (0: not known).
+/// (27/11) The window's caption outside a run, refreshed once a second (owner layout): "KLBF Lab | 14 FPS (FG 28)
+/// | 1% 8 | 60 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 +
+/// 6.3 shared) [| compiling N shaders]". `low1`: the 1 % low of the last second's frames, fps (0: not known).
 pub(crate) fn caption(fps: f64, low1: f64, draws: f64, making: u64) -> String {
     let (used, budget) = vram_now();
-    caption_text(fps, low1, draws, profile_name(), &shown(), [used, budget, ram_bytes()], making)
+    caption_text(fps, low1, draws, profile_name(), &shown(), crate::framegen::shown_fps(), [used, budget, ram_bytes(), shared_now()], making)
 }
 
-/// [`caption`]'s text; `mem`: card memory used and budget, the process's working set, bytes. Over 160
-/// characters, the screen goes first.
-fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, mem: [u64; 3], making: u64) -> String {
+/// The frames shown per second with frame generation on: `measured` (the swap chain's count, 0: not
+/// known), else twice `fps` (FG x2). 0 with it off.
+fn fg_fps(fg: bool, fps: f64, measured: f64) -> f64 {
+    match (fg, measured > 0.0) {
+        (false, _) => 0.0,
+        (true, true) => measured,
+        (true, false) => fps * 2.0,
+    }
+}
+
+/// [`caption`]'s text; `shown_fps`: [`fg_fps`]'s measured; `mem`: card memory used and budget, the
+/// process's working set, the card's memory in system RAM (0: not known), bytes. No screen size (on the card).
+#[allow(clippy::too_many_arguments)]
+fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown_fps: f64, mem: [u64; 4], making: u64) -> String {
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let mut parts = vec![crate::shell::caption(fps)];
+    let fg = if fps > 0.0 { fg_fps(s.fg, fps, shown_fps) } else { 0.0 };
+    let mut parts = vec!["KLBF Lab".to_owned(), if fg > 0.0 { format!("{fps:.0} FPS (FG {fg:.0})") } else { format!("{fps:.0} FPS") }];
     if low1 > 0.0 {
         parts.push(format!("1% {low1:.0}"));
     }
+    parts.push(if fps > 0.0 { format!("{:.0} ms", 1000.0 / fps) } else { "\u{2013} ms".into() });
     if draws >= 1000.0 {
         parts.push(format!("{:.1}k draws", draws / 1000.0));
     } else if draws > 0.0 {
         parts.push(format!("{draws:.0} draws"));
     }
-    let label = s.label();
+    let label = s.label_in(true);
     if !label.is_empty() {
         parts.push(format!("{profile} {label}"));
-    }
-    if s.fg {
-        // (27/11) "FG x2": one generated frame per real one; AMD's multi-frame would read "MFG x3".
-        parts.push("FG x2".into());
-    }
-    let screen = (s.screen[1] > 0).then(|| parts.len());
-    if screen.is_some() {
-        parts.push(format!("screen {}", wxh(s.screen)));
     }
     if mem[1] > 0 {
         parts.push(format!("VRAM {:.1}/{:.1} GB", mem[0] as f64 / GB, mem[1] as f64 / GB));
     }
+    // RAM last: the working set plus the card's memory in system RAM, then each ("RAM 21.5 GB (15.2 + 6.3 shared)").
+    let (ram, shared) = (mem[2] as f64 / GB, mem[3] as f64 / GB);
+    let mut detail = String::new();
     if mem[2] > 0 {
-        parts.push(format!("RAM {:.1} GB", mem[2] as f64 / GB));
+        parts.push(format!("RAM {:.1} GB", ram + shared));
+        if mem[3] > 0 {
+            detail = format!(" ({ram:.1} + {shared:.1} shared)");
+        }
     }
     // The title's window is ANSI: "→" showed as "?" there (27/11), so the caption says "->".
-    let text = |p: &[String]| crate::shell::compiling(p.join(" \u{b7} ").replace('\u{2192}', "->"), " \u{b7} ", making);
-    let full = text(&parts);
-    match screen {
-        Some(i) if full.chars().count() > 160 => {
-            parts.remove(i);
-            text(&parts)
-        }
-        _ => full,
-    }
+    let text = |detail: &str| crate::shell::compiling(parts.join(" | ").replace('\u{2192}', "->") + detail, " | ", making);
+    // Over 160 characters (while compiling), the RAM's detail goes.
+    let full = text(&detail);
+    if full.chars().count() > 160 { text("") } else { full }
 }
 
 /// (27/11) Live figures after the run's time in the window title, once a second: frames per second over the last
@@ -768,6 +790,9 @@ struct Settings {
     dropped_pct: f64,
     /// (27/11) Sizes, upscaler, frame generation and screen at the end of the run.
     shown: Shown,
+    /// Frames shown per real one with frame generation since the start (`framegen::shown_ratio`, 0: not
+    /// known): the card's "(FG N)". Not in the result's JSON (its serial and checker stay as they are).
+    fg_ratio: f64,
 }
 
 impl Settings {
@@ -783,13 +808,19 @@ impl Settings {
             draws_per_frame: if frames > 0 { drawn as f64 / frames as f64 } else { 0.0 },
             dropped_pct: if asked > 0 { asked.saturating_sub(drawn) as f64 * 100.0 / asked as f64 } else { 0.0 },
             shown: shown(),
+            fg_ratio: crate::framegen::shown_ratio(),
         }
     }
 
-    /// "Series X · FSR 4 Quality 960p → 1440p" (the upscaler alone before anything was presented).
+    /// The frames shown per second with frame generation for a real `fps` (0: off).
+    fn fg_fps(&self, fps: f64) -> f64 {
+        fg_fps(self.shown.fg, fps, fps * self.fg_ratio)
+    }
+
+    /// "Profile X · FSR 4 Quality 960p → 1440p" (the upscaler alone before anything was presented).
     fn display(&self) -> String {
         let label = self.shown.label();
-        let series = if self.profile == "S" { "Series S" } else { "Series X" };
+        let series = if self.profile == "S" { "Profile S" } else { "Profile X" };
         format!("{series} \u{b7} {}", if label.is_empty() { self.upscaler } else { &label })
     }
 
@@ -1207,8 +1238,12 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         format!("Settings:   {}", c.set.line()),
         format!("Duration:   {} / {} ({})", mmss(c.elapsed), target(), x.why),
         format!(
-            "FPS:        avg {:.1} \u{b7} median {:.1} \u{b7} 1% low {:.1} \u{b7} 5% low {:.1} \u{b7} min {:.1} \u{b7} max {:.1} (1 s windows)",
-            s.avg, s.median, s.low1, s.low5, s.min, s.max
+            "FPS:        avg {:.1} \u{b7} median {:.1} \u{b7} 1% low {:.1} \u{b7} 5% low {:.1} \u{b7} min {:.1} \u{b7} max {:.1} (1 s windows){}",
+            s.avg, s.median, s.low1, s.low5, s.min, s.max,
+            match c.set.fg_fps(s.avg) {
+                fg if fg > 0.0 => format!(" \u{b7} shown with frame generation: avg {fg:.1}"),
+                _ => String::new(),
+            }
         ),
         format!("Time >= 12 fps: {:.1} %", s.pct12),
         format!("Freezes (>200 ms): {} (longest frame {:.0} ms)", s.freezes, s.longest_ms),
@@ -2148,6 +2183,11 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     pen.text(ARIAL, 13.0, &c.used, 180.0, 490.0 + 18.0 * 4.0, false, 290.0, ink);
     // The average, big, and the four tiles.
     pen.text(IMPACT, 64.0, &format!("{:.1}", c.s.avg), 535.0, 380.0, false, 135.0, ink);
+    // (27/11) With frame generation, the frames shown after "FPS average": "30 FPS (FG 60)".
+    let fg = c.set.fg_fps(c.s.avg);
+    if fg > 0.0 {
+        pen.text(ARIAL_BOLD, 16.0, &format!("(FG {fg:.0})"), 748.0, 372.0, false, 200.0, ink);
+    }
     let tiles = [format!("{:.1}", c.s.median), format!("{:.1}", c.s.low1), format!("{:.1}", c.s.max), format!("{:.0} %", c.s.pct12)];
     for (i, value) in tiles.iter().enumerate() {
         pen.text(IMPACT, 28.0, value, 535.0 + 108.0 * i as f32 + 50.0, 434.0, true, 92.0, ink);
@@ -2276,29 +2316,42 @@ mod tests {
         let mut set = sample_card().set;
         set.profile = "X";
         let lines = set.lines();
-        assert_eq!(lines[0], "Series X \u{b7} FSR 4 Quality 960p \u{2192} 1440p");
+        assert_eq!(lines[0], "Profile X \u{b7} FSR 4 Quality 960p \u{2192} 1440p");
         assert_eq!(lines[1], "frame generation x2 \u{b7} screen 2560x1440");
         set.shown = Shown::default();
-        assert_eq!(set.lines()[0], "Series X \u{b7} FSR", "before the first present: the upscaler alone");
-        assert!(sample_card().set.line().starts_with("Series S \u{b7} FSR 4 Quality 960p \u{2192} 1440p \u{b7} frame generation x2 \u{b7} screen 2560x1440 \u{b7} "));
+        assert_eq!(set.lines()[0], "Profile X \u{b7} FSR", "before the first present: the upscaler alone");
+        assert!(sample_card().set.line().starts_with("Profile S \u{b7} FSR 4 Quality 960p \u{2192} 1440p \u{b7} frame generation x2 \u{b7} screen 2560x1440 \u{b7} "));
     }
 
     #[test]
     fn window_caption() {
         const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-        let mem = [(11.6 * GB) as u64, (14.0 * GB) as u64, (15.2 * GB) as u64];
-        let full = "KLBF Lab \u{b7} 16 FPS \u{b7} 63 ms \u{b7} 1% 9 \u{b7} 9.8k draws \u{b7} Series X FSR 4 Quality 960p -> 1440p \u{b7} FG x2 \u{b7} screen 2560x1440 \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB";
-        assert_eq!(caption_text(15.9, 9.4, 9_800.0, "Series X", &sample_shown(), mem, 0), full);
-        // Compiling: over 160 characters, so the screen goes.
-        let compiling = caption_text(15.9, 9.4, 9_800.0, "Series X", &sample_shown(), mem, 12_345);
-        assert_eq!(compiling, full.replace(" \u{b7} screen 2560x1440", "") + " \u{b7} compiling 12345 shaders");
+        let mem = [(11.6 * GB) as u64, (14.0 * GB) as u64, (15.2 * GB) as u64, (6.3 * GB) as u64];
+        let x4 = Shown { output: [3840, 2160], render: [1920, 1080], ..sample_shown() };
+        // the owner layout; frame generation with no count from the swap chain: twice the real rate.
+        let full = "KLBF Lab | 14 FPS (FG 28) | 1% 8 | 71 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 + 6.3 shared)";
+        assert_eq!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 0), full);
+        // The swap chain's measured count when there is one.
+        assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 26.6, mem, 0).starts_with("KLBF Lab | 14 FPS (FG 27) | 1% 8 |"));
+        let compiling = caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 12_345);
+        assert_eq!(compiling, full.replace(" (15.2 + 6.3 shared)", "") + " | compiling 12345 shaders", "over 160: the RAM's detail goes");
         assert!(compiling.chars().count() <= 160);
+        assert!(!compiling.contains("Series") && !compiling.contains("screen") && !compiling.contains("FG x2"));
         // Nothing known yet but the frame rate.
-        assert_eq!(caption_text(0.0, 0.0, 0.0, "Series S", &Shown::default(), [0; 3], 1), "KLBF Lab \u{b7} 0 FPS \u{b7} \u{2013} ms \u{b7} compiling 1 shader");
+        assert_eq!(caption_text(0.0, 0.0, 0.0, "Profile S", &Shown::default(), 0.0, [0; 4], 1), "KLBF Lab | 0 FPS | \u{2013} ms | compiling 1 shader");
+        // No frame generation, the title's upscaler, shared memory not known.
+        let title = Shown { upscaler: Upscaler::Title, render: [2560, 1440], output: [3840, 2160], fg: false, ..sample_shown() };
         assert_eq!(
-            caption_text(30.0, 25.0, 812.0, "Series S", &Shown { upscaler: Upscaler::Title, render: [1280, 720], output: [1920, 1080], fg: false, screen: [0; 2], ..sample_shown() }, mem, 0),
-            "KLBF Lab \u{b7} 30 FPS \u{b7} 33 ms \u{b7} 1% 25 \u{b7} 812 draws \u{b7} Series S Title upscaler 720p -> 1080p \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB"
+            caption_text(30.0, 25.0, 812.0, "Profile X", &title, 0.0, [mem[0], mem[1], mem[2], 0], 0),
+            "KLBF Lab | 30 FPS | 1% 25 | 33 ms | 812 draws | Profile X Title upscaler (1440p -> 4K) | VRAM 11.6/14.0 GB | RAM 15.2 GB"
         );
+        let native = Shown { upscaler: Upscaler::Native, fg: false, output: [3840, 2160], ..sample_shown() };
+        assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &native, 0.0, [0; 4], 0).ends_with("| Profile X Native 4K"));
+        assert_eq!(fg_fps(false, 30.0, 61.0), 0.0);
+        let mut set = sample_card().set;
+        assert_eq!(set.fg_fps(30.0), 60.0, "no measured ratio: x2");
+        set.fg_ratio = 1.9;
+        assert!((set.fg_fps(30.0) - 57.0).abs() < 1e-9);
     }
 
     #[test]
@@ -2349,6 +2402,7 @@ mod tests {
                 draws_per_frame: 4321.5,
                 dropped_pct: 0.25,
                 shown: sample_shown(),
+                fg_ratio: 0.0,
             },
             from: String::new(),
             player: "anonymous".into(),

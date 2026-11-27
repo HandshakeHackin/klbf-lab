@@ -413,6 +413,10 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                 continue;
             };
             let jobs = sources(&data);
+            // (27/11) The total first, for the launcher's progress bar (then a line per 1000 done).
+            if !jobs.is_empty() {
+                println!("{} shaders found in {}", jobs.len(), entry.path().display());
+            }
             let next = AtomicUsize::new(0);
             std::thread::scope(|s| {
                 for _ in 0..threads.min(jobs.len()) {
