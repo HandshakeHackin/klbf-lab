@@ -167,6 +167,17 @@ fn ram_bytes() -> u64 {
     c.WorkingSetSize as u64
 }
 
+/// The private part of the working set, bytes: what Task Manager's default memory column shows (the rest is
+/// shared, mostly the title's memory mapped as sections).
+fn ram_private_bytes() -> u64 {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX2};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut c = PROCESS_MEMORY_COUNTERS_EX2 { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32, ..Default::default() };
+    // SAFETY: our own process and a sized structure (the EX2 layout, Windows 10 21H2 and later; zeros before).
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), (&raw mut c).cast(), c.cb) };
+    c.PrivateWorkingSetSize as u64
+}
+
 /// Highest working set and highest card-memory use seen during the measured run (once a second), bytes.
 static PEAK: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
@@ -206,12 +217,15 @@ fn live_figures() -> String {
                 GPU.store((100 * busy[0].saturating_sub(b0[0]) / (busy[1] - b0[1])).min(100), Ordering::Relaxed);
             }
             let gpu = GPU.load(Ordering::Relaxed);
+            let (ram, private) = (ram_bytes(), ram_private_bytes());
             format!(
-                " | {:.0} FPS{} | CPU usage {:.0} % | RAM {:.1} GB incl. shared | VRAM usage {:.1} GB",
+                " | {:.0} FPS{} | CPU usage {:.0} % | Memory usage {:.1} GB [private {:.1} GB, shared {:.1} GB] | VRAM usage {:.1} GB",
                 frames.saturating_sub(f) as f64 / secs,
                 if gpu == u64::MAX { String::new() } else { format!(" | GPU usage {gpu} %") },
                 cpu.clamp(0.0, 100.0),
-                ram_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
+                ram as f64 / (1024.0 * 1024.0 * 1024.0),
+                private as f64 / (1024.0 * 1024.0 * 1024.0),
+                ram.saturating_sub(private) as f64 / (1024.0 * 1024.0 * 1024.0),
                 vram_now().0 as f64 / (1024.0 * 1024.0 * 1024.0)
             )
         }
