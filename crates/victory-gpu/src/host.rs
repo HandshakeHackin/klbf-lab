@@ -10682,7 +10682,8 @@ impl Host {
                     list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                     let taken = crate::klbf_keys::read_back(&self.device, list, &back);
                     list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST)]);
-                    taken
+                    // (27/11) Never silent: why there is no picture, in the log and the caption.
+                    taken.map_err(|why| crate::klbf_keys::report(Err(why))).ok()
                 })
                 .flatten();
             #[cfg(feature = "diagnostics")]
@@ -10722,6 +10723,13 @@ impl Host {
             p.panel.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
+            // (KLBF Lab, 27/11) F8's white flash, fading out over the frames after a screenshot (drawn after
+            // the picture was read: not in it).
+            if let Some(alpha) = crate::klbf_keys::flash_alpha() {
+                list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
+                crate::klbf_keys::draw_flash(self, list, &back, format, (width, height), alpha);
+                list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST)]);
+            }
             if composed {
                 list.ResourceBarrier(&[transition(
                     &back,

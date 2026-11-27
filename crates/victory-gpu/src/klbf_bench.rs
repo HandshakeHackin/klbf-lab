@@ -246,6 +246,19 @@ fn vram_now() -> (u64, u64) {
     }
 }
 
+/// (27/11) The card's memory as installed, bytes (DXGI's dedicated video memory); 0: not known.
+fn vram_installed() -> u64 {
+    let adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // SAFETY: a plain query.
+    adapter.and_then(|a| unsafe { a.GetDesc().ok() }).map_or(0, |d| d.DedicatedVideoMemory as u64)
+}
+
+/// (27/11) A card's memory as it is sold, whole GB: a 16 GB card reports 15.9 GiB ("16"). The budget
+/// DXGI gives (12.1 GB on a 16 GB card) read as the card's size to players: it is only in the JSON.
+fn marketed_gb(bytes: f64) -> u64 {
+    (bytes / (1024.0 * 1024.0 * 1024.0)).round() as u64
+}
+
 /// (27/11) The card's memory this process uses in system RAM (DXGI's non-local segment), bytes; 0: not known.
 fn shared_now() -> u64 {
     let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
@@ -510,12 +523,12 @@ fn shown() -> Shown {
 }
 
 /// (27/11) The window's caption outside a run, refreshed once a second (owner layout): "KLBF Lab | 28 FPS (base 14)
-/// | 1% 8 | 60 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 +
+/// | 1% 8 | 60 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/16 GB | RAM 21.5 GB (15.2 +
 /// 6.3 shared) [| compiling N shaders]". `low1`: the 1 % low of the last second's frames, fps (0: not known).
 pub(crate) fn caption(fps: f64, low1: f64, draws: f64, making: u64) -> String {
-    let (used, budget) = vram_now();
+    let used = vram_now().0;
     let tail = if crate::klbf_keys::launcher() { "" } else { NOT_OURS };
-    let text = caption_text(fps, low1, draws, profile_name(), &shown(), crate::framegen::shown_fps(), [used, budget, ram_bytes(), shared_now()], making, tail);
+    let text = caption_text(fps, low1, draws, profile_name(), &shown(), crate::framegen::shown_fps(), [used, vram_installed(), ram_bytes(), shared_now()], making, tail);
     LAST_CAPTION.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&text);
     text
 }
@@ -534,7 +547,7 @@ fn fg_fps(fg: bool, fps: f64, measured: f64) -> f64 {
 /// (27/11) The caption's end when another launcher started the game (no `KLBF_LAUNCHER`).
 const NOT_OURS: &str = " | Full settings: github.com/PastiiJay/klbf-lab";
 
-/// [`caption`]'s text; `tail`: put at its very end ([`NOT_OURS`] or empty); `shown_fps`: [`fg_fps`]'s measured; `mem`: card memory used and budget, the
+/// [`caption`]'s text; `tail`: put at its very end ([`NOT_OURS`] or empty); `shown_fps`: [`fg_fps`]'s measured; `mem`: card memory used and installed, the
 /// process's working set, the card's memory in system RAM (0: not known), bytes. No screen size (on the card).
 #[allow(clippy::too_many_arguments)]
 fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown_fps: f64, mem: [u64; 4], making: u64, tail: &str) -> String {
@@ -555,7 +568,7 @@ fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown
         parts.push(format!("{profile} {label}"));
     }
     if mem[1] > 0 {
-        parts.push(format!("VRAM {:.1}/{:.1} GB", mem[0] as f64 / GB, mem[1] as f64 / GB));
+        parts.push(format!("VRAM {:.1}/{} GB", mem[0] as f64 / GB, marketed_gb(mem[1] as f64)));
     }
     // RAM last: the working set plus the card's memory in system RAM, then each ("RAM 21.5 GB (15.2 + 6.3 shared)").
     let (ram, shared) = (mem[2] as f64 / GB, mem[3] as f64 / GB);
@@ -1058,7 +1071,7 @@ struct Card {
     /// name (the card is public); empty when not given (`KLBF_BENCH_SAVE`).
     save: String,
     blocked: u64,
-    /// "RAM peak 20.8 GB · VRAM 10.0 / 15.6 GB · card busy 57 %".
+    /// "RAM peak 20.8 GB · VRAM 10.0 / 16 GB · card busy 57 %".
     used: String,
     share: String,
     /// "KLBF-Bench-BM-v1-YYYYMMDD-HHMM-<serial>": the PNG, JSON and text files' name.
@@ -1156,10 +1169,10 @@ fn finish(early: Option<&'static str>) {
     let busy = [0, 1].map(|i| crate::host::CARD_BUSY_US[i].load(Ordering::Relaxed).saturating_sub(BUSY_BASE[i].load(Ordering::Relaxed)));
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
     card.used = format!(
-        "peak RAM {:.1} GB \u{b7} peak VRAM {:.1} / {:.1} GB{}",
+        "peak RAM {:.1} GB \u{b7} peak VRAM {:.1} / {} GB{}",
         peak_ram as f64 / GB,
         peak_vram as f64 / GB,
-        vram.1 as f64 / GB,
+        marketed_gb(card.sys.vram_gb * GB),
         if busy[1] > 0 { format!(" \u{b7} card busy {:.0} %", 100.0 * busy[0] as f64 / busy[1] as f64) } else { String::new() }
     );
     let mut doc = result_json(&card, &extra, &window_fps(&ms));
@@ -1489,7 +1502,7 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         format!("Black frames: {} (fades left out: {}) \u{b7} device removed: {}", x.black, x.fade, if x.removed { "yes" } else { "no" }),
         format!("Inputs blocked: {}", c.blocked),
         format!("Compiled during the run: {} shaders, {} pipelines", x.compiled[0], x.compiled[1]),
-        format!("At the end: VRAM {:.0} / {:.0} MB \u{b7} RAM {:.0} MB", x.vram.0 as f64 / MB, x.vram.1 as f64 / MB, x.ram as f64 / MB),
+        format!("At the end: VRAM {:.0} MB of {} GB \u{b7} RAM {:.0} MB", x.vram.0 as f64 / MB, marketed_gb(c.sys.vram_gb * 1024.0 * MB), x.ram as f64 / MB),
         format!("Peaks during the run: RAM {:.0} MB \u{b7} VRAM {:.0} MB", x.peaks.0 as f64 / MB, x.peaks.1 as f64 / MB),
         String::new(),
         "Share:".into(),
@@ -2505,7 +2518,7 @@ pub(crate) fn shot_stats() -> String {
 }
 
 /// The watermark's line from a caption: frames per second, profile and upscaler, VRAM and RAM, at " · "
-/// ("34 FPS (base 17) · Profile X FSR 4 Performance (1080p -> 4K) · VRAM 11.6/14.0 GB · RAM 21.5 GB").
+/// ("34 FPS (base 17) · Profile X FSR 4 Performance (1080p -> 4K) · VRAM 11.6/16 GB · RAM 21.5 GB").
 /// No 1% low, frame time, draws, RAM detail or shaders being compiled.
 fn watermark_stats(caption: &str) -> String {
     caption
@@ -2536,20 +2549,16 @@ fn shots_dir() -> Option<PathBuf> {
     }
 }
 
-/// Writes `rgb` (`w` x `h`) with the watermark as `KLBF-Lab-<date>_<time>.png` in [`shots_dir`].
-pub(crate) fn save_screenshot(w: usize, h: usize, rgb: &[u8], stats: &str) {
-    let Some(dir) = shots_dir() else {
-        tracing::warn!("KLBF Lab: screenshot not saved (no Pictures folder)");
-        return;
-    };
+/// Writes `rgb` (`w` x `h`) with the watermark as `KLBF-Lab-<date>_<time>.png` in [`shots_dir`]: the
+/// file's name, or why it was not written (`klbf_keys::report` says it).
+pub(crate) fn save_screenshot(w: usize, h: usize, rgb: &[u8], stats: &str) -> Result<String, String> {
+    let dir = shots_dir().ok_or("no Pictures folder")?;
     let t = local_time();
     let name = format!("KLBF-Lab-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.png", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
     let png = screenshot_png(w, h, rgb, stats);
-    match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&name), png)) {
-        // The file's name only in the log (it is posted).
-        Ok(()) => tracing::info!("KLBF Lab: screenshot saved ({name})"),
-        Err(e) => tracing::warn!(error = %e, "KLBF Lab: screenshot not saved"),
-    }
+    // The folder is not named (it holds the user's name; the log is posted).
+    std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&name), png)).map_err(|e| format!("not written to the screenshots folder ({e})"))?;
+    Ok(name)
 }
 
 /// Our flask (the icon's 64 x 64 picture), straight RGBA.
@@ -2696,8 +2705,8 @@ mod tests {
 
     #[test]
     fn the_watermark_says_the_captions_figures_only() {
-        let caption = "KLBF Lab | 34 FPS (base 17) | 1% 8 | 59 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 + 6.3 shared) | compiling 12 shaders";
-        assert_eq!(watermark_stats(caption), "34 FPS (base 17) \u{b7} Profile X FSR 4 Performance (1080p -> 4K) \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 21.5 GB");
+        let caption = "KLBF Lab | 34 FPS (base 17) | 1% 8 | 59 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/16 GB | RAM 21.5 GB (15.2 + 6.3 shared) | compiling 12 shaders";
+        assert_eq!(watermark_stats(caption), "34 FPS (base 17) \u{b7} Profile X FSR 4 Performance (1080p -> 4K) \u{b7} VRAM 11.6/16 GB \u{b7} RAM 21.5 GB");
         assert_eq!(watermark_stats("KLBF Lab | 0 FPS | \u{2013} ms"), "0 FPS");
         assert_eq!(watermark_stats(""), "");
     }
@@ -2718,12 +2727,22 @@ mod tests {
     }
 
     #[test]
+    fn card_memory_as_sold() {
+        const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+        assert_eq!(marketed_gb(15.92 * GB), 16);
+        assert_eq!(marketed_gb(11.98 * GB), 12);
+        assert_eq!(marketed_gb(7.98 * GB), 8);
+        assert_eq!(marketed_gb(0.0), 0);
+    }
+
+    #[test]
     fn window_caption() {
         const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-        let mem = [(11.6 * GB) as u64, (14.0 * GB) as u64, (15.2 * GB) as u64, (6.3 * GB) as u64];
+        // A 16 GB card reports 15.92 GiB installed: "16", never DXGI's budget.
+        let mem = [(11.6 * GB) as u64, (15.92 * GB) as u64, (15.2 * GB) as u64, (6.3 * GB) as u64];
         let x4 = Shown { output: [3840, 2160], render: [1920, 1080], ..sample_shown() };
         // the owner layout; frame generation with no count from the swap chain: twice the real rate.
-        let full = "KLBF Lab | 28 FPS (base 14) | 1% 8 | 71 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 + 6.3 shared)";
+        let full = "KLBF Lab | 28 FPS (base 14) | 1% 8 | 71 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/16 GB | RAM 21.5 GB (15.2 + 6.3 shared)";
         assert_eq!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 0, ""), full);
         // The swap chain's measured count when there is one.
         assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 26.6, mem, 0, "").starts_with("KLBF Lab | 27 FPS (base 14) | 1% 8 |"));
@@ -2737,7 +2756,7 @@ mod tests {
         let title = Shown { upscaler: Upscaler::Title, render: [2560, 1440], output: [3840, 2160], fg: false, ..sample_shown() };
         assert_eq!(
             caption_text(30.0, 25.0, 812.0, "Profile X", &title, 0.0, [mem[0], mem[1], mem[2], 0], 0, ""),
-            "KLBF Lab | 30 FPS | 1% 25 | 33 ms | 812 draws | Profile X Title upscaler (1440p -> 4K) | VRAM 11.6/14.0 GB | RAM 15.2 GB"
+            "KLBF Lab | 30 FPS | 1% 25 | 33 ms | 812 draws | Profile X Title upscaler (1440p -> 4K) | VRAM 11.6/16 GB | RAM 15.2 GB"
         );
         let native = Shown { upscaler: Upscaler::Native, fg: false, output: [3840, 2160], ..sample_shown() };
         assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &native, 0.0, [0; 4], 0, "").ends_with("| Profile X Native 4K"));
@@ -2873,7 +2892,7 @@ mod tests {
         card.png_name = "bench-results/KLBF-Bench-BM-v1-20261126-2104-3b8db536.png".into();
         card.from = "PastiiJay/klbf-lab @ abc1234".into();
         card.date = "26 Nov 2026 21:04".into();
-        card.used = "peak RAM 18.5 GB · peak VRAM 12.2 / 13.4 GB · card busy 66 %".into();
+        card.used = "peak RAM 18.5 GB · peak VRAM 12.2 / 16 GB · card busy 66 %".into();
         card.date_short = "26.11.26".into();
         card.set.draws_per_frame = 8731.0;
         card.set.launch = sample_launch();

@@ -6,9 +6,15 @@
 //! procedure), so a short tap is never missed between two frames. During a bench run none of them acts
 //! (F10 is the bench's: it stops the run). Started by another launcher (no `KLBF_LAUNCHER`,
 //! [`launcher`]), nobody restarts the game: F10 / F11 are the title's (F8 stays).
+//!
+//! (27/11) F8 says how it went: a short white flash over the game (drawn on the presented image after
+//! it was read, so not in the PNG) and "Screenshot saved" in the caption, or "Screenshot failed:
+//! <reason>" in the caption and the log. The keys reach us only while the game window has the keyboard
+//! focus (`lifecycle::come_forward` takes it at the start).
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -105,12 +111,177 @@ const HINTS: &str = "F8 Screenshot \u{b7} F10 Settings \u{b7} F11 Restart";
 /// in the caption's font; the caption alone when they do not fit, during a bench, or without our
 /// launcher (`KLBF_LAUNCHER`: F10 and F11 need it). Measured at each call (the window may have changed size).
 pub(crate) fn with_hints(hwnd: usize, caption: String) -> String {
-    if std::env::var_os("KLBF_LAUNCHER").is_none() || crate::klbf_bench::active() {
+    if crate::klbf_bench::active() {
+        return caption;
+    }
+    // (27/11) F8's outcome, for a few seconds, in place of the hints (with any launcher).
+    if let Some(notice) = notice_now() {
+        return format!("{caption}  \u{2014}  {notice}");
+    }
+    if std::env::var_os("KLBF_LAUNCHER").is_none() {
         return caption;
     }
     match measure(hwnd, &caption).and_then(|([c, h, room], sp)| spaces(c, h, sp, room)) {
         Some(n) => format!("{caption}{}{HINTS}", " ".repeat(n)),
         None => caption,
+    }
+}
+
+/// How long the caption says F8's outcome.
+const NOTICE_FOR: Duration = Duration::from_secs(4);
+
+/// F8's outcome and when it came.
+static NOTICE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+/// The outcome still to be shown, if any.
+fn notice_now() -> Option<String> {
+    let notice = NOTICE.lock().unwrap_or_else(|e| e.into_inner());
+    notice.as_ref().filter(|(_, at)| at.elapsed() < NOTICE_FOR).map(|(text, _)| text.clone())
+}
+
+/// What the caption says after F8: "Screenshot saved", or "Screenshot failed: <reason>".
+fn outcome(result: &Result<String, String>) -> String {
+    match result {
+        Ok(_) => "Screenshot saved".into(),
+        Err(why) => format!("Screenshot failed: {why}"),
+    }
+}
+
+/// F8's outcome: in the log (a failure as a warning, with its reason) and in the caption.
+pub(crate) fn report(result: Result<String, String>) {
+    match &result {
+        // The file's name only in the log (it is posted).
+        Ok(name) => tracing::info!("KLBF Lab: screenshot saved ({name})"),
+        Err(why) => tracing::warn!("KLBF Lab: screenshot failed: {why}"),
+    }
+    *NOTICE.lock().unwrap_or_else(|e| e.into_inner()) = Some((outcome(&result), Instant::now()));
+}
+
+/// (27/11) The white flash's strength at its first frame, and how long it fades out after it.
+const FLASH_ALPHA: f32 = 0.85;
+const FLASH_FOR: Duration = Duration::from_millis(120);
+
+/// The flash asked for: when it was first drawn (`None`: not yet).
+static FLASH: Mutex<Option<Option<Instant>>> = Mutex::new(None);
+
+/// A white flash over the next frames (a screenshot was taken).
+fn flash() {
+    *FLASH.lock().unwrap_or_else(|e| e.into_inner()) = Some(None);
+}
+
+/// The flash's opacity for the frame being presented, `None` when there is none. Its first frame is always
+/// drawn at full strength (at 15 fps a frame lasts longer than the whole fade), then it fades by time.
+pub(crate) fn flash_alpha() -> Option<f32> {
+    let mut flash = FLASH.lock().unwrap_or_else(|e| e.into_inner());
+    let alpha = fade(flash.as_ref().copied()?.map(|at| at.elapsed()));
+    match alpha {
+        Some(_) if matches!(*flash, Some(None)) => *flash = Some(Some(Instant::now())),
+        None => *flash = None,
+        _ => {}
+    }
+    alpha
+}
+
+/// The opacity `since` the flash's first frame (`None`: this is it).
+fn fade(since: Option<Duration>) -> Option<f32> {
+    match since {
+        None => Some(FLASH_ALPHA),
+        Some(t) if t < FLASH_FOR => Some(FLASH_ALPHA * (1.0 - t.as_secs_f32() / FLASH_FOR.as_secs_f32())),
+        Some(_) => None,
+    }
+}
+
+const FLASH_SOURCE: &str = r#"
+#define RS "RootConstants(num32BitConstants=1, b0)"
+cbuffer C : register(b0) { float alpha; };
+[RootSignature(RS)]
+float4 vs(uint id : SV_VertexID) : SV_Position {
+    float2 uv = float2((id << 1) & 2, id & 2);
+    return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+[RootSignature(RS)]
+float4 ps() : SV_Target { return float4(1, 1, 1, alpha); }
+"#;
+
+/// The flash's pipeline for one render target format.
+struct FlashPipeline(DXGI_FORMAT, ID3D12RootSignature, ID3D12PipelineState);
+// SAFETY: D3D12 objects are free-threaded.
+unsafe impl Send for FlashPipeline {}
+
+fn flash_pipeline(device: &ID3D12Device, format: DXGI_FORMAT) -> windows::core::Result<FlashPipeline> {
+    use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+    use windows::Win32::Graphics::Direct3D::ID3DBlob;
+    use windows::core::{PCSTR, s};
+    let compile = |entry: PCSTR, target: PCSTR| -> windows::core::Result<ID3DBlob> {
+        let mut code: Option<ID3DBlob> = None;
+        // SAFETY: the source and names live through the call; the out pointer is ours.
+        unsafe { D3DCompile(FLASH_SOURCE.as_ptr().cast(), FLASH_SOURCE.len(), s!("flash"), None, None, entry, target, 0, 0, &mut code, None)? };
+        code.ok_or_else(windows::core::Error::empty)
+    };
+    let (vs, ps) = (compile(s!("vs"), s!("vs_5_1"))?, compile(s!("ps"), s!("ps_5_1"))?);
+    // SAFETY: the blobs' own bytes, alive through the calls.
+    unsafe {
+        let bytes = |b: &ID3DBlob| std::slice::from_raw_parts(b.GetBufferPointer().cast::<u8>(), b.GetBufferSize());
+        let code = |b: &ID3DBlob| D3D12_SHADER_BYTECODE { pShaderBytecode: b.GetBufferPointer(), BytecodeLength: b.GetBufferSize() };
+        let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes(&vs))?;
+        let mut desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
+            pRootSignature: std::mem::transmute_copy(&root),
+            VS: code(&vs),
+            PS: code(&ps),
+            SampleMask: u32::MAX,
+            RasterizerState: D3D12_RASTERIZER_DESC { FillMode: D3D12_FILL_MODE_SOLID, CullMode: D3D12_CULL_MODE_NONE, ..Default::default() },
+            PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+            NumRenderTargets: 1,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            ..Default::default()
+        };
+        desc.RTVFormats[0] = format;
+        desc.BlendState.RenderTarget[0] = D3D12_RENDER_TARGET_BLEND_DESC {
+            BlendEnable: true.into(),
+            LogicOpEnable: false.into(),
+            SrcBlend: D3D12_BLEND_SRC_ALPHA,
+            DestBlend: D3D12_BLEND_INV_SRC_ALPHA,
+            BlendOp: D3D12_BLEND_OP_ADD,
+            SrcBlendAlpha: D3D12_BLEND_ZERO,
+            DestBlendAlpha: D3D12_BLEND_ONE,
+            BlendOpAlpha: D3D12_BLEND_OP_ADD,
+            LogicOp: D3D12_LOGIC_OP_NOOP,
+            RenderTargetWriteMask: D3D12_COLOR_WRITE_ENABLE_ALL.0 as u8,
+        };
+        let pso = device.CreateGraphicsPipelineState(&desc)?;
+        Ok(FlashPipeline(format, root, pso))
+    }
+}
+
+/// Records the flash at `alpha` over `back` (`format`, `width` x `height`, in the render target state).
+/// A pipeline that cannot be made is said once and the frame shown without the flash.
+pub(crate) fn draw_flash(host: &crate::host::Host, list: &ID3D12GraphicsCommandList, back: &ID3D12Resource, format: DXGI_FORMAT, (width, height): (u32, u32), alpha: f32) {
+    static PIPELINE: Mutex<Option<FlashPipeline>> = Mutex::new(None);
+    let mut pipeline = PIPELINE.lock().unwrap_or_else(|e| e.into_inner());
+    if pipeline.as_ref().is_none_or(|p| p.0 != format) {
+        match flash_pipeline(&host.device, format) {
+            Ok(p) => *pipeline = Some(p),
+            Err(e) => {
+                static SAID: AtomicBool = AtomicBool::new(false);
+                if !SAID.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(error = %e, "KLBF Lab: screenshot flash not drawn");
+                }
+                return;
+            }
+        }
+    }
+    let Some(FlashPipeline(_, root, pso)) = pipeline.as_ref() else { return };
+    let rtv = host.rtv(Some(back), None);
+    // SAFETY: an open list; our live back buffer in the render target state.
+    unsafe {
+        list.OMSetRenderTargets(1, Some(&rtv), false, None);
+        list.SetGraphicsRootSignature(root);
+        list.SetPipelineState(pso);
+        list.SetGraphicsRoot32BitConstant(0, alpha.to_bits(), 0);
+        list.IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list.RSSetViewports(&[D3D12_VIEWPORT { Width: width as f32, Height: height as f32, MaxDepth: 1.0, ..Default::default() }]);
+        list.RSSetScissorRects(&[windows::Win32::Foundation::RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 }]);
+        list.DrawInstanced(3, 1, 0, 0);
     }
 }
 
@@ -181,8 +352,8 @@ pub(crate) struct Shot(ID3D12Resource, D3D12_PLACED_SUBRESOURCE_FOOTPRINT);
 // SAFETY: a D3D12 resource is free-threaded; the copy into it has finished before it is sent.
 unsafe impl Send for Shot {}
 
-/// Records a copy of `back` (in the copy-source state) into a new readback buffer.
-pub(crate) fn read_back(device: &ID3D12Device, list: &ID3D12GraphicsCommandList, back: &ID3D12Resource) -> Option<Shot> {
+/// Records a copy of `back` (in the copy-source state) into a new readback buffer; why not, when it cannot.
+pub(crate) fn read_back(device: &ID3D12Device, list: &ID3D12GraphicsCommandList, back: &ID3D12Resource) -> Result<Shot, String> {
     let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
     let mut total = 0;
     // SAFETY: a live texture; outputs for one subresource.
@@ -201,8 +372,10 @@ pub(crate) fn read_back(device: &ID3D12Device, list: &ID3D12GraphicsCommandList,
     let mut buffer: Option<ID3D12Resource> = None;
     // SAFETY: plain creation; an open list; locations naming live resources.
     unsafe {
-        device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut buffer).ok()?;
-        let buffer = buffer?;
+        device
+            .CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, None, &mut buffer)
+            .map_err(|e| format!("no memory to read the picture ({e})"))?;
+        let buffer = buffer.ok_or("no memory to read the picture")?;
         let to = D3D12_TEXTURE_COPY_LOCATION {
             pResource: std::mem::transmute_copy(&buffer),
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
@@ -214,7 +387,7 @@ pub(crate) fn read_back(device: &ID3D12Device, list: &ID3D12GraphicsCommandList,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
         };
         list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
-        Some(Shot(buffer, footprint))
+        Ok(Shot(buffer, footprint))
     }
 }
 
@@ -227,21 +400,22 @@ pub(crate) fn save(shot: Shot, stats: String) {
         let mut data = std::ptr::null_mut();
         // SAFETY: the copy has finished; the mapping spans the footprint's rows.
         let rgb = unsafe {
-            if buffer.Map(0, None, Some(&mut data)).is_err() {
-                return;
+            if let Err(e) = buffer.Map(0, None, Some(&mut data)) {
+                return report(Err(format!("the picture could not be read ({e})")));
             }
             let rows = std::slice::from_raw_parts(data.cast::<u8>(), f.RowPitch as usize * f.Height as usize);
             let rgb = to_rgb(f.Format, f.Width as usize, f.Height as usize, f.RowPitch as usize, rows);
             buffer.Unmap(0, None);
             rgb
         };
-        match rgb {
-            Some(rgb) => crate::klbf_bench::save_screenshot(f.Width as usize, f.Height as usize, &rgb, &stats),
-            None => tracing::warn!(format = f.Format.0, "KLBF Lab: screenshot not saved (the picture's format is not read yet)"),
-        }
+        let Some(rgb) = rgb else {
+            return report(Err(format!("picture format {} not supported", f.Format.0)));
+        };
+        flash();
+        report(crate::klbf_bench::save_screenshot(f.Width as usize, f.Height as usize, &rgb, &stats));
     });
     if let Err(e) = spawned {
-        tracing::warn!(error = %e, "KLBF Lab: screenshot not saved");
+        report(Err(format!("no thread to save it ({e})")));
     }
 }
 
@@ -299,6 +473,25 @@ mod tests {
         assert!(acts(Action::Screenshot, false), "F8 always");
         assert!(!acts(Action::Settings, false) && !acts(Action::Restart, false));
         assert!(acts(Action::Settings, true) && acts(Action::Restart, true));
+    }
+
+    /// (27/11) F8 always says how it went, and the flash fades out after its first frame.
+    #[test]
+    fn a_screenshot_says_how_it_went() {
+        assert_eq!(outcome(&Ok("KLBF-Lab-x.png".into())), "Screenshot saved");
+        assert_eq!(outcome(&Err("disk full".into())), "Screenshot failed: disk full");
+        report(Err("disk full".into()));
+        assert_eq!(notice_now().as_deref(), Some("Screenshot failed: disk full"));
+        assert_eq!(fade(None), Some(FLASH_ALPHA), "the first frame always at full strength");
+        let half = fade(Some(FLASH_FOR / 2)).unwrap();
+        assert!((half - FLASH_ALPHA / 2.0).abs() < 0.01);
+        assert_eq!(fade(Some(FLASH_FOR)), None, "gone after 120 ms");
+        assert_eq!(flash_alpha(), None, "no flash asked");
+        flash();
+        assert_eq!(flash_alpha(), Some(FLASH_ALPHA));
+        std::thread::sleep(FLASH_FOR);
+        assert_eq!(flash_alpha(), None);
+        assert_eq!(flash_alpha(), None, "once");
     }
 
     #[test]
