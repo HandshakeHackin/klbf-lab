@@ -169,6 +169,7 @@ struct Api {
     configure: Call,
     dispatch: Call,
     destroy: Call,
+    query: Call,
 }
 
 /// What the frame generation context is made with, learnt from the upscale
@@ -259,10 +260,33 @@ fn api() -> Option<&'static Api> {
                 configure: std::mem::transmute::<_, Call>(get(b"ffxConfigure\0")?),
                 dispatch: std::mem::transmute::<_, Call>(get(b"ffxDispatch\0")?),
                 destroy: std::mem::transmute::<_, Call>(get(b"ffxDestroyContext\0")?),
+                query: std::mem::transmute::<_, Call>(get(b"ffxQuery\0")?),
             })
         }
     })
     .as_ref()
+}
+
+/// (27/11) The frame generation provider the SDK picked (`ffxQueryGetProviderVersion`, type 5): FSR 3.1
+/// frame generation outside RDNA 4, ML frame generation 4.0 on it. Logged once per context.
+fn log_provider(api: &Api) {
+    #[repr(C)]
+    struct ProviderVersion {
+        ty: u64,
+        next: *mut std::ffi::c_void,
+        id: u64,
+        name: *const std::ffi::c_char,
+    }
+    let mut q = ProviderVersion { ty: 5, next: std::ptr::null_mut(), id: 0, name: std::ptr::null() };
+    // SAFETY: the SDK's call on a context it made, with a description of ours that outlives it.
+    let r = unsafe { (api.query)(CONTEXT.as_ptr(), (&raw mut q).cast::<Header>()) };
+    if r == OK && !q.name.is_null() {
+        // SAFETY: a NUL-terminated name the SDK keeps.
+        let name = unsafe { std::ffi::CStr::from_ptr(q.name) }.to_string_lossy();
+        tracing::info!("frame generation: {name}");
+    } else {
+        tracing::info!(r, "frame generation: no provider version");
+    }
 }
 
 /// The upscale context's flags and largest render size, for the frame
@@ -482,6 +506,7 @@ fn create(api: &Api, fg: &Framegen) -> bool {
         CONTEXT.store(std::ptr::null_mut(), Ordering::Release);
         return false;
     }
+    log_provider(api);
     tracing::info!(
         display = ?fg.display,
         render = ?fg.max_render,

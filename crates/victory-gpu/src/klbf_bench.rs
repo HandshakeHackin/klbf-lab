@@ -353,8 +353,12 @@ impl Shown {
             Upscaler::Native => format!("Native {out}"),
             Upscaler::Title => from("Title upscaler"),
             Upscaler::Fsr => {
-                let name = match self.fsr.split('.').next() {
-                    Some(major) if !major.is_empty() => format!("FSR {major}"),
+                // "FSR 4"; below 4, major.minor ("FSR 3.1": the provider the DLL picks outside RDNA 4)
+                let mut parts = self.fsr.split('.');
+                let name = match (parts.next(), parts.next()) {
+                    (Some("4") | Some("5"), _) => format!("FSR {}", &self.fsr[..1]),
+                    (Some(major), Some(minor)) if !major.is_empty() => format!("FSR {major}.{minor}"),
+                    (Some(major), None) if !major.is_empty() => format!("FSR {major}"),
                     _ => "FSR".into(),
                 };
                 match self.preset() {
@@ -391,6 +395,35 @@ fn title_scale() -> f32 {
         asked.filter(|_| profile() == "X").unwrap_or(2.0 / 3.0)
     });
     *S
+}
+
+/// (27/11) The upscaler provider the PC DLL picked for this card, as its `ffxQueryGetProviderVersion`
+/// names it ("3.1.6": FSR 3.1 outside RDNA 4); empty until a context is made.
+static PROVIDER: Mutex<String> = Mutex::new(String::new());
+
+/// The FidelityFX upscaler's provider version, from victory-hle's `ffxCreateContext` (its name, "FSR 3.1.6"
+/// or "4.1.2"): logged once, kept for the caption and the card, and written to the cache folder as
+/// `klbf-upscaler.txt` for the launcher ("what ran last time").
+pub fn note_provider(name: &str) {
+    let version: String = name.chars().skip_while(|c| !c.is_ascii_digit()).collect();
+    let version = version.trim().to_owned();
+    if version.is_empty() {
+        return;
+    }
+    let mut p = PROVIDER.lock().unwrap_or_else(|e| e.into_inner());
+    if *p != version {
+        tracing::info!("upscaler: AMD FSR {version} (provider {name:?})");
+        if let Some(dir) = std::env::var_os("VICTORY_CACHE_DIR") {
+            let _ = std::fs::write(std::path::Path::new(&dir).join("klbf-upscaler.txt"), format!("AMD FSR {version}"));
+        }
+        *p = version;
+    }
+}
+
+/// The FSR version shown: the provider that ran, else the DLL's file version.
+fn fsr_shown() -> String {
+    let p = PROVIDER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if p.is_empty() { fsr_version().into() } else { p }
 }
 
 /// The PC FSR DLL's (`VICTORY_FSR_DLL`) file version, "4.1.2"; empty without it. Read once, from its
@@ -464,7 +497,7 @@ fn shown() -> Shown {
             output: if upscaled[1] > 0 { upscaled } else { output },
             render: unpack(UPSCALE[0].load(Ordering::Relaxed)),
             upscaler: Upscaler::Fsr,
-            fsr: fsr_version().into(),
+            fsr: fsr_shown(),
             fg,
             screen,
         };
@@ -2381,6 +2414,8 @@ mod tests {
         assert_eq!(at([1920, 1080], [3840, 2160]), "FSR 4 Performance 1080p \u{2192} 4K");
         assert_eq!(at([1280, 720], [3840, 2160]), "FSR 4 Ultra Performance 720p \u{2192} 4K");
         assert_eq!(at([2000, 1000], [3840, 2160]), "FSR 4 1000p \u{2192} 4K", "no preset at 2.16x");
+        // Outside RDNA 4 the DLL picks FSR 3.1 (its provider version, 27/11)
+        assert_eq!(Shown { fsr: "3.1.6".into(), ..sample_shown() }.label(), "FSR 3.1 Quality 960p \u{2192} 1440p");
         assert_eq!(Shown { fsr: String::new(), render: [0; 2], ..sample_shown() }.label(), "FSR 1440p");
         assert_eq!(Shown { upscaler: Upscaler::Title, render: [2560, 1440], output: [3840, 2160], ..sample_shown() }.label(), "Title upscaler 1440p \u{2192} 4K");
         assert_eq!(Shown { upscaler: Upscaler::Native, ..sample_shown() }.label(), "Native 1440p");

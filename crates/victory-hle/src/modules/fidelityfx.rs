@@ -257,8 +257,36 @@ extern "system" fn ffxCreateContext(context: *mut *mut c_void, desc: *mut u8, _a
     let code = unsafe { (api.create)(context, desc, std::ptr::null()) };
     drop(patches);
     tracing::info!(code, "ffxCreateContext on the host DLL");
+    if code == 0
+        && let Some(name) = provider_version(api.query, context)
+    {
+        victory_gpu::klbf_bench::note_provider(&name);
+    }
     code
 }
+
+/// `ffxQueryGetProviderVersion` (`FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION`, 5): the version name of
+/// the provider the DLL picked for `context` (27/11: outside RDNA 4 it falls back to FSR 3.1).
+fn provider_version(query: Header, context: *mut *mut c_void) -> Option<String> {
+    #[repr(C)]
+    struct ProviderVersion {
+        ty: u64,
+        next: *mut c_void,
+        id: u64,
+        name: *const std::ffi::c_char,
+    }
+    let mut q = ProviderVersion { ty: QUERY_PROVIDER_VERSION, next: std::ptr::null_mut(), id: 0, name: std::ptr::null() };
+    // SAFETY: the PC DLL's export, with a description of ours that outlives the call.
+    let code = unsafe { query(context, (&raw mut q).cast()) };
+    if code != 0 || q.name.is_null() {
+        tracing::info!(code, "FidelityFX: no provider version");
+        return None;
+    }
+    // SAFETY: a NUL-terminated name the DLL keeps.
+    Some(unsafe { std::ffi::CStr::from_ptr(q.name) }.to_string_lossy().into_owned())
+}
+
+const QUERY_PROVIDER_VERSION: u64 = 5;
 
 extern "system" fn ffxDestroyContext(context: *mut *mut c_void, _alloc: *const c_void) -> u32 {
     let Some(api) = api() else { return ERROR };
