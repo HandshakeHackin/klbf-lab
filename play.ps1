@@ -14,7 +14,7 @@
 # -Fsr        Series S mode with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
 # -Bench      KLBF Lab Bench BM-v1 (5 min, hands-off; your morning save in slot 1): Continue pressed for you.
 #              -BenchPlayer <GitHub login> names you on the card (else anonymous).
-#              -BenchLength Short (5 min, the board's test) | Medium (15) | Long (30) | Marathon (60): same place, longer.
+#              -BenchLength Short (5 min, the board's test) | Medium (15) | Long (30) | Marathon (60), or the minutes: -BenchLength 60. Same place, longer.
 # -AutoStart   presses through the start screens by itself, for a fresh start with no save
 # -SkipMovies  skips the opening movies (off by default): all or open (none opens), end (each jumps to its
 #              last frame), fast (decoded without waiting). VICTORY_SKIP_MOVIES, by zocram4cc.
@@ -46,7 +46,7 @@ param(
     [switch]$AutoStart,
     [switch]$Bench,
     [string]$BenchPlayer = 'anonymous',
-    [ValidateSet('Short', 'Medium', 'Long', 'Marathon')]
+    [ValidateSet('Short', 'Medium', 'Long', 'Marathon', '5', '15', '30', '60')]
     [string]$BenchLength = 'Short',
     [ValidateSet('open', 'end', 'fast', 'all')][string]$SkipMovies = '',
     [switch]$NoProbeRays,
@@ -138,7 +138,7 @@ if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'op
 # -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
 # screens and Continue pressed by themselves (your morning save in slot 1 must be the last one); touch nothing.
 if ($Bench) {
-    $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer; $env:KLBF_BENCH_LENGTH = $BenchLength.ToLower()
+    $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer; $env:KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $env:KLBF_BENCH_LENGTH) { $env:KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
     if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
     $set.VICTORY_AUTO_INPUT = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A,d>=1000'
     Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing until the card shows. Your card is saved in bench-results beside victory.exe;'
