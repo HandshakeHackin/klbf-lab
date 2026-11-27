@@ -29,6 +29,10 @@
 #              structure (no cost measured); the first start after a change of this re-translates shaders.
 # -Hooks       with the memory hooks: faster, but they can show a few small textures with old contents for a
 #              moment. Off by default until that is fixed.
+# -TexTrim     KLBF_TEX_TRIM=1: pool pages of textures whose card copy is alive are given back while RAM is low
+#              (needs -Hooks).
+# -Tout        everything at once, for a test: -FsrX (quality unless -FsrQuality), -FrameGen, -Hooks and -TexTrim,
+#              with the DLLs of -FfxDir. Each switch stays usable alone for A/B.
 # -NoPrecompile  skip the step below
 # -OnlyPrecompile  do the step below and stop, without starting the game
 # -More        other settings, last word: -More @{ VICTORY_LOG = 'warn' }
@@ -63,11 +67,14 @@ param(
     [switch]$ProbeRays,
     [switch]$Hooks,
     [switch]$NoHooks,
+    [switch]$TexTrim,
+    [switch]$Tout,
     [switch]$NoPrecompile,
     [switch]$OnlyPrecompile,
     [hashtable]$More = @{}
 )
 $ErrorActionPreference = 'Stop'
+if ($Tout) { $FsrX = [switch]$true; $FrameGen = [switch]$true; $Hooks = [switch]$true; $TexTrim = [switch]$true }
 $root = $PSScriptRoot
 $remembered = Join-Path $root 'game-folder.txt'
 
@@ -155,6 +162,10 @@ $set = [ordered]@{
 if ($Hooks -and -not $NoHooks) {
     # The memory hooks
     $set.VICTORY_GPU_ONLY = '1'; $set.VICTORY_KNOWN_WRITES = '1'
+}
+if ($TexTrim) {
+    if (-not $Hooks -or $NoHooks) { throw '-TexTrim needs -Hooks (KLBF_TEX_TRIM refuses without VICTORY_GPU_ONLY=1).' }
+    $set.KLBF_TEX_TRIM = '1'
 }
 if ($Output) { $set.KLBF_X_OUTPUT = $Output }
 if ($FsrX) {
