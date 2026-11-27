@@ -10745,7 +10745,7 @@ impl Host {
             let copy = self.new_list()?;
             copy.close();
             tracing::info!(width, height, format = format.0, "presenting to a window");
-            crate::klbf_bench::start(hwnd, self.adapter.clone()); // KLBF Lab Bench
+            crate::klbf_bench::start(hwnd, self.adapter.clone(), [width, height], framegen); // KLBF Lab Bench, the caption
             self.log_video_memory("right after the swap chain is made");
             Ok(Presenter {
                 swap_chain,

@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -190,6 +190,212 @@ fn vram_now() -> (u64, u64) {
         Some(Ok(())) => (info.CurrentUsage, info.Budget),
         _ => (0, 0),
     }
+}
+
+// (27/11) What the frame is drawn at and shown on: the card's resolution line, the JSON's sizes and
+// the caption's. The window's size and frame generation come from the swap chain ([`start`]), the
+// FSR sizes from each upscale the FidelityFX redirect sends to the PC DLL ([`note_upscale`]).
+
+/// The swap chain's size (w << 32 | h, 0 before it is made), whether it is frame generation's, the
+/// game window.
+static OUTPUT: AtomicU64 = AtomicU64::new(0);
+static FRAMEGEN: AtomicBool = AtomicBool::new(false);
+static GAME: AtomicUsize = AtomicUsize::new(0);
+/// The last FSR upscale on the PC DLL: render size, upscaled size, when ([`EPOCH`] ms + 1; 0: none).
+static UPSCALE: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn pack([w, h]: [u32; 2]) -> u64 {
+    (u64::from(w) << 32) | u64::from(h)
+}
+
+fn unpack(v: u64) -> [u32; 2] {
+    [(v >> 32) as u32, v as u32]
+}
+
+fn since_epoch_ms() -> u64 {
+    EPOCH.elapsed().as_millis() as u64 + 1
+}
+
+/// (victory-hle's FidelityFX redirect) An FSR upscale from `render` to `upscaled` went to the PC DLL.
+pub fn note_upscale(render: [u32; 2], upscaled: [u32; 2]) {
+    UPSCALE[0].store(pack(render), Ordering::Relaxed);
+    UPSCALE[1].store(pack(upscaled), Ordering::Relaxed);
+    UPSCALE[2].store(since_epoch_ms(), Ordering::Relaxed);
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+enum Upscaler {
+    #[default]
+    Native,
+    /// The title's own (Series X's, or Series S's console FidelityFX).
+    Title,
+    /// AMD FSR, the PC DLL (`VICTORY_FSR_DLL`).
+    Fsr,
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+struct Shown {
+    /// 0 x 0: nothing presented yet.
+    output: [u32; 2],
+    /// 0 x 0: not known.
+    render: [u32; 2],
+    upscaler: Upscaler,
+    /// The PC FSR DLL's file version ("4.1.2"); empty if unread.
+    fsr: String,
+    fg: bool,
+    /// The desktop mode of the monitor the window is on; 0 x 0: not known.
+    screen: [u32; 2],
+}
+
+/// AMD's preset names and per-axis ratios (OptiScaler's too).
+const PRESETS: [(f32, &str); 5] = [(1.0, "Native AA"), (1.5, "Quality"), (1.7, "Balanced"), (2.0, "Performance"), (3.0, "Ultra Performance")];
+
+/// The preset of an upscale from `render_h` to `output_h` rows, if it is one.
+fn preset(render_h: u32, output_h: u32) -> Option<&'static str> {
+    let r = output_h as f32 / render_h.max(1) as f32;
+    PRESETS.iter().find(|(x, _)| (r - x).abs() < 0.05).map(|p| p.1)
+}
+
+/// "960p", "1440p", "4K".
+fn rows(h: u32) -> String {
+    if h == 2160 { "4K".into() } else { format!("{h}p") }
+}
+
+fn wxh([w, h]: [u32; 2]) -> String {
+    format!("{w}x{h}")
+}
+
+impl Shown {
+    /// "FSR 4 Quality 960p → 1440p", "FSR 4 Native AA 1440p", "Title upscaler 960p → 1440p", "Native 1440p";
+    /// empty before the first present.
+    fn label(&self) -> String {
+        if self.output[1] == 0 {
+            return String::new();
+        }
+        let out = rows(self.output[1]);
+        let from = |name: &str| match self.render[1] {
+            0 => format!("{name} {out}"),
+            r => format!("{name} {} \u{2192} {out}", rows(r)),
+        };
+        match self.upscaler {
+            Upscaler::Native => format!("Native {out}"),
+            Upscaler::Title => from("Title upscaler"),
+            Upscaler::Fsr => {
+                let name = match self.fsr.split('.').next() {
+                    Some(major) if !major.is_empty() => format!("FSR {major}"),
+                    _ => "FSR".into(),
+                };
+                match self.preset() {
+                    Some("Native AA") => format!("{name} Native AA {out}"),
+                    Some(p) => from(&format!("{name} {p}")),
+                    None => from(&name),
+                }
+            }
+        }
+    }
+
+    fn preset(&self) -> Option<&'static str> {
+        (self.upscaler == Upscaler::Fsr && self.render[1] > 0).then(|| preset(self.render[1], self.output[1])).flatten()
+    }
+
+    /// "frame generation on · screen 2560x1440".
+    fn extras(&self) -> String {
+        let fg = format!("frame generation {}", if self.fg { "on" } else { "off" });
+        if self.screen[1] == 0 { fg } else { format!("{fg} \u{b7} screen {}", wxh(self.screen)) }
+    }
+}
+
+/// The title's own upscaler's scale: Series X's `KLBF_X_RENDER_SCALE` (victory-loader's
+/// `resolution::asked_render_scale`, 0.5 to 1.0), else 2/3, Series S's too.
+fn title_scale() -> f32 {
+    static S: LazyLock<f32> = LazyLock::new(|| {
+        let asked = std::env::var("KLBF_X_RENDER_SCALE").or_else(|_| std::env::var("VICTORY_RENDER_SCALE")).ok();
+        let asked = asked.and_then(|v| v.trim().parse::<f32>().ok()).filter(|s| (0.5..=1.0).contains(s));
+        asked.filter(|_| profile() == "X").unwrap_or(2.0 / 3.0)
+    });
+    *S
+}
+
+/// The PC FSR DLL's (`VICTORY_FSR_DLL`) file version, "4.1.2"; empty without it. Read once, from its
+/// version resource (the DLL mapped as data, not run).
+fn fsr_version() -> &'static str {
+    static V: LazyLock<String> = LazyLock::new(|| {
+        use windows_sys::Win32::Foundation::FreeLibrary;
+        use windows_sys::Win32::System::LibraryLoader::*;
+        let Some(path) = std::env::var_os("VICTORY_FSR_DLL").filter(|p| !p.is_empty()) else { return String::new() };
+        let path: Vec<u16> = std::os::windows::ffi::OsStrExt::encode_wide(path.as_os_str()).chain([0]).collect();
+        // SAFETY: the file mapped as resources only; the bytes are read inside the resource's size.
+        unsafe {
+            let m = LoadLibraryExW(path.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+            if m.is_null() {
+                return String::new();
+            }
+            let r = FindResourceW(m, 1usize as *const u16, RT_VERSION);
+            let (data, size) = if r.is_null() { (std::ptr::null(), 0) } else { (LockResource(LoadResource(m, r)) as *const u8, SizeofResource(m, r) as usize) };
+            let v = if data.is_null() { String::new() } else { file_version(std::slice::from_raw_parts(data, size)) };
+            FreeLibrary(m);
+            v
+        }
+    });
+    &V
+}
+
+/// "4.1.2" from a version resource: its VS_FIXEDFILEINFO (signature 0xFEEF04BD, structure 1.0).
+fn file_version(res: &[u8]) -> String {
+    let word = |at: usize| res.get(at..at + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    (0..res.len())
+        .step_by(4)
+        .find(|&at| word(at) == 0xFEEF_04BD && word(at + 4) == 0x0001_0000)
+        .map(|at| format!("{}.{}.{}", word(at + 8) >> 16, word(at + 8) & 0xffff, word(at + 12) >> 16))
+        .unwrap_or_default()
+}
+
+/// The desktop mode of the monitor `game` is on (asked again only when it changes monitor).
+fn screen(game: usize) -> [u32; 2] {
+    static LAST: Mutex<(usize, [u32; 2])> = Mutex::new((0, [0; 2]));
+    if game == 0 {
+        return [0; 2];
+    }
+    // SAFETY: a window handle (it may be gone: then no monitor) and our own structs.
+    unsafe {
+        let mon = MonitorFromWindow(game as HWND, MONITOR_DEFAULTTONEAREST);
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if mon.is_null() || last.0 == mon as usize {
+            return last.1;
+        }
+        let mut info = MONITORINFOEXW { monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() }, ..Default::default() };
+        let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+        let size = if GetMonitorInfoW(mon, (&raw mut info).cast()) != 0 && EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0 {
+            [mode.dmPelsWidth, mode.dmPelsHeight]
+        } else {
+            [0; 2]
+        };
+        *last = (mon as usize, size);
+        size
+    }
+}
+
+/// What the frame is drawn at and shown on now. FSR while an upscale went to the PC DLL in the last
+/// 2 s, else the title's own upscaler at [`title_scale`] (native at 1.0).
+fn shown() -> Shown {
+    let output = unpack(OUTPUT.load(Ordering::Relaxed));
+    let (fg, screen) = (FRAMEGEN.load(Ordering::Relaxed), screen(GAME.load(Ordering::Relaxed)));
+    let at = UPSCALE[2].load(Ordering::Relaxed);
+    if at != 0 && since_epoch_ms().saturating_sub(at) <= 2000 {
+        let upscaled = unpack(UPSCALE[1].load(Ordering::Relaxed));
+        return Shown {
+            output: if upscaled[1] > 0 { upscaled } else { output },
+            render: unpack(UPSCALE[0].load(Ordering::Relaxed)),
+            upscaler: Upscaler::Fsr,
+            fsr: fsr_version().into(),
+            fg,
+            screen,
+        };
+    }
+    let s = title_scale();
+    let (upscaler, render) = if s >= 0.999 { (Upscaler::Native, output) } else { (Upscaler::Title, output.map(|v| (v as f32 * s) as u32)) };
+    Shown { output, render, upscaler, fsr: String::new(), fg, screen }
 }
 
 /// (27/11) Live figures after the run's time in the window title, once a second: frames per second over the last
@@ -503,6 +709,8 @@ struct Settings {
     draws_per_frame: f64,
     /// Draws and mesh dispatches asked for during the run and not run on the host.
     dropped_pct: f64,
+    /// (27/11) Sizes, upscaler, frame generation and screen at the end of the run.
+    shown: Shown,
 }
 
 impl Settings {
@@ -517,7 +725,15 @@ impl Settings {
             denied,
             draws_per_frame: if frames > 0 { drawn as f64 / frames as f64 } else { 0.0 },
             dropped_pct: if asked > 0 { asked.saturating_sub(drawn) as f64 * 100.0 / asked as f64 } else { 0.0 },
+            shown: shown(),
         }
+    }
+
+    /// "Series X · FSR 4 Quality 960p → 1440p" (the upscaler alone before anything was presented).
+    fn display(&self) -> String {
+        let label = self.shown.label();
+        let series = if self.profile == "S" { "Series S" } else { "Series X" };
+        format!("{series} \u{b7} {}", if label.is_empty() { self.upscaler } else { &label })
     }
 
     /// The card's short block.
@@ -525,15 +741,15 @@ impl Settings {
         let textures = if self.texture_max_dim > 0 { format!("textures \u{2264} {} px", self.texture_max_dim) } else { "textures uncapped".into() };
         if !TREE_COUNTS {
             return [
-                format!("profile {} \u{b7} {}", self.profile, self.upscaler),
-                "texture cap: not reported by this build".into(),
+                self.display(),
+                self.shown.extras(),
                 format!("{:.0} draws/frame \u{b7} dropped: not measured", self.draws_per_frame),
-                "pipelines skipped / denied: not measured".into(),
+                "texture cap, pipelines skipped / denied: not measured".into(),
             ];
         }
         [
-            format!("profile {} \u{b7} {}", self.profile, self.upscaler),
-            textures,
+            self.display(),
+            format!("{textures} \u{b7} {}", self.shown.extras()),
             format!("{:.0} draws/frame \u{b7} {:.1} % dropped", self.draws_per_frame, self.dropped_pct),
             format!("pipelines: {} skipped \u{b7} {} denied", self.skipped, self.denied),
         ]
@@ -543,13 +759,20 @@ impl Settings {
         let textures = if self.texture_max_dim > 0 { format!("textures \u{2264} {} px", self.texture_max_dim) } else { "textures uncapped".into() };
         if !TREE_COUNTS {
             return format!(
-                "profile {} \u{b7} {} \u{b7} {:.0} draws/frame \u{b7} dropped, skipped, denied and texture cap not measured by this build",
-                self.profile, self.upscaler, self.draws_per_frame
+                "{} \u{b7} {} \u{b7} {:.0} draws/frame \u{b7} dropped, skipped, denied and texture cap not measured by this build",
+                self.display(),
+                self.shown.extras(),
+                self.draws_per_frame
             );
         }
         format!(
-            "profile {} \u{b7} {} \u{b7} {textures} \u{b7} {:.0} draws/frame \u{b7} {:.1} % dropped \u{b7} {} skipped \u{b7} {} denied",
-            self.profile, self.upscaler, self.draws_per_frame, self.dropped_pct, self.skipped, self.denied
+            "{} \u{b7} {} \u{b7} {textures} \u{b7} {:.0} draws/frame \u{b7} {:.1} % dropped \u{b7} {} skipped \u{b7} {} denied",
+            self.display(),
+            self.shown.extras(),
+            self.draws_per_frame,
+            self.dropped_pct,
+            self.skipped,
+            self.denied
         )
     }
 }
@@ -855,6 +1078,8 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
         ("cpu", J::S(c.sys.cpu.clone())),
         ("ram_gb", J::F(c.sys.ram_gb)),
         ("os", J::S(c.sys.os.clone())),
+        // (27/11) The desktop mode of the monitor the game window was on.
+        ("display_native", size_or_null(t.shown.screen)),
         ("duration_s", J::F(c.elapsed.as_secs_f64())),
         ("target_s", J::I(run_for().as_secs())),
         ("frames", J::I(s.frames as u64)),
@@ -895,9 +1120,22 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
                 ("pipelines_denied", J::I(t.denied)),
                 ("draws_per_frame", J::F(t.draws_per_frame)),
                 ("dropped_draws_pct", J::F(t.dropped_pct)),
+                // (27/11) What the frame was drawn at and shown on.
+                ("output_size", size_or_null(t.shown.output)),
+                ("render_size", size_or_null(t.shown.render)),
+                ("upscaler_kind", J::S(match t.shown.upscaler { Upscaler::Native => "native", Upscaler::Title => "title", Upscaler::Fsr => "fsr" }.into())),
+                ("upscaler_preset", t.shown.preset().map_or(J::Null, |p| J::S(p.into()))),
+                ("upscaler_version", if t.shown.fsr.is_empty() { J::Null } else { J::S(t.shown.fsr.clone()) }),
+                ("resolution", J::S(t.shown.label())),
+                ("frame_generation", J::B(t.shown.fg)),
             ]),
         ),
     ])
+}
+
+/// "2560x1440", or null when not known.
+fn size_or_null(s: [u32; 2]) -> J {
+    if s[1] == 0 { J::Null } else { J::S(wxh(s)) }
 }
 
 fn write_results(c: &Card, x: &Extra, json: &str) {
@@ -1024,13 +1262,23 @@ fn decode_png(png: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
 // ---------------------------------------------------------------------------------------------
 // The thread and its window (idle until the card)
 
-/// Starts our thread for the game window `hwnd` (the first call only; with `KLBF_BENCH=bm-v1`).
-pub(crate) fn start(hwnd: windows::Win32::Foundation::HWND, adapter: Option<IDXGIAdapter3>) {
+/// A swap chain of `size` for the game window `hwnd` (through frame generation's if `framegen`) was made:
+/// kept for the resolution line and the caption's card memory. Starts our thread (the first call only;
+/// with `KLBF_BENCH=bm-v1`).
+pub(crate) fn start(hwnd: windows::Win32::Foundation::HWND, adapter: Option<IDXGIAdapter3>, size: [u32; 2], framegen: bool) {
     static ONCE: std::sync::Once = std::sync::Once::new();
+    let game = hwnd.0 as usize;
+    OUTPUT.store(pack(size), Ordering::Relaxed);
+    FRAMEGEN.store(framegen, Ordering::Relaxed);
+    GAME.store(game, Ordering::Relaxed);
+    let mut kept = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
+    if kept.is_none() {
+        kept.clone_from(&adapter);
+    }
+    drop(kept);
     if !active() {
         return;
     }
-    let game = hwnd.0 as usize;
     ONCE.call_once(|| {
         let spawned = std::thread::Builder::new().name("klbf-bench".into()).spawn(move || thread(game as HWND, adapter));
         if let Err(e) = spawned {
@@ -1942,6 +2190,51 @@ mod tests {
         assert_eq!(serial(&doc), "6797e740");
     }
 
+    /// Series X's FSR 4.1.2 in quality at 2560x1440, with frame generation, on a 2560x1440 screen.
+    fn sample_shown() -> Shown {
+        Shown { output: [2560, 1440], render: [1706, 960], upscaler: Upscaler::Fsr, fsr: "4.1.2".into(), fg: true, screen: [2560, 1440] }
+    }
+
+    #[test]
+    fn resolution_labels() {
+        let fsr = sample_shown();
+        assert_eq!(fsr.label(), "FSR 4 Quality 960p \u{2192} 1440p");
+        assert_eq!(fsr.preset(), Some("Quality"));
+        let at = |render: [u32; 2], output: [u32; 2]| Shown { render, output, ..sample_shown() }.label();
+        assert_eq!(at([2560, 1440], [2560, 1440]), "FSR 4 Native AA 1440p");
+        assert_eq!(at([1505, 847], [2560, 1440]), "FSR 4 Balanced 847p \u{2192} 1440p");
+        assert_eq!(at([1920, 1080], [3840, 2160]), "FSR 4 Performance 1080p \u{2192} 4K");
+        assert_eq!(at([1280, 720], [3840, 2160]), "FSR 4 Ultra Performance 720p \u{2192} 4K");
+        assert_eq!(at([2000, 1000], [3840, 2160]), "FSR 4 1000p \u{2192} 4K", "no preset at 2.16x");
+        assert_eq!(Shown { fsr: String::new(), render: [0; 2], ..sample_shown() }.label(), "FSR 1440p");
+        assert_eq!(Shown { upscaler: Upscaler::Title, render: [2560, 1440], output: [3840, 2160], ..sample_shown() }.label(), "Title upscaler 1440p \u{2192} 4K");
+        assert_eq!(Shown { upscaler: Upscaler::Native, ..sample_shown() }.label(), "Native 1440p");
+        assert_eq!(Shown::default().label(), "", "nothing presented yet");
+        assert_eq!(fsr.extras(), "frame generation on \u{b7} screen 2560x1440");
+        assert_eq!(Shown::default().extras(), "frame generation off");
+    }
+
+    #[test]
+    fn card_settings_lines() {
+        let mut set = sample_card().set;
+        set.profile = "X";
+        let lines = set.lines();
+        assert_eq!(lines[0], "Series X \u{b7} FSR 4 Quality 960p \u{2192} 1440p");
+        assert_eq!(lines[1], "frame generation on \u{b7} screen 2560x1440");
+        set.shown = Shown::default();
+        assert_eq!(set.lines()[0], "Series X \u{b7} FSR", "before the first present: the upscaler alone");
+        assert!(sample_card().set.line().starts_with("Series S \u{b7} FSR 4 Quality 960p \u{2192} 1440p \u{b7} frame generation on \u{b7} screen 2560x1440 \u{b7} "));
+    }
+
+    #[test]
+    fn version_resource() {
+        let mut res = vec![0u8; 40];
+        res.extend([0xFEEF_04BDu32, 0x0001_0000, (4 << 16) | 1, (2 << 16) | 4555].iter().flat_map(|w| w.to_le_bytes()));
+        assert_eq!(file_version(&res), "4.1.2");
+        assert_eq!(file_version(&res[..40]), "");
+        assert_eq!(preset(847, 1440), Some("Balanced"));
+    }
+
     /// The certified sample run of the fixture below.
     fn sample_card() -> Card {
         let s = Summary {
@@ -1980,6 +2273,7 @@ mod tests {
                 denied: 0,
                 draws_per_frame: 4321.5,
                 dropped_pct: 0.25,
+                shown: sample_shown(),
             },
             from: String::new(),
             player: "anonymous".into(),
@@ -2053,7 +2347,7 @@ mod tests {
     }
 
     /// A result the game writes, byte for byte the fixture `tools/bench-check.py` accepts
-    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-660c2a95.json`).
+    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-33a2e19f.json`).
     #[test]
     fn result_matches_the_checker_fixture() {
         let card = sample_card();
@@ -2065,7 +2359,7 @@ mod tests {
         m.insert("project_source", J::S("git".into()));
         m.insert("sha", J::S("abc1234".into()));
         let id = serial(&doc);
-        assert_eq!(id, "660c2a95");
+        assert_eq!(id, "33a2e19f");
         let share = format!("[KLBF Lab Bench BM-v1] PastiiJay/klbf-lab@abc1234 | RX 9070 XT | Ryzen 7 7800X3D | avg 60.0 fps, 1% low 58.5 | CERTIFIED | {id}");
         let J::O(m) = &mut doc else { unreachable!() };
         m.insert("serial", J::S(id));
@@ -2073,7 +2367,7 @@ mod tests {
         if let Ok(out) = std::env::var("KLBF_FIXTURE_WRITE") {
             std::fs::write(out, doc.canonical()).unwrap();
         }
-        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-660c2a95.json"));
+        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-33a2e19f.json"));
     }
 
     #[test]

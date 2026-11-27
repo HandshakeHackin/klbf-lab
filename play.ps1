@@ -14,7 +14,7 @@
 # -Fsr        Series S mode with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
 # -FsrX       Series X mode with AMD FSR 4 (KLBF_X_FSR=1): the title is made to use its FidelityFX path, sent to
 #              the PC's FSR DLL in -FfxDir. -FsrQuality quality (default, 1/1.5 of the output) | balanced (1/1.7)
-#              | performance (1/2). -Output 2560x1440 sets the title's output (one of its modes; 3840x2160 without).
+#              | performance (1/2) | ultraperformance (1/3), AMD's presets. -Output 2560x1440 sets the title's output (one of its modes; 3840x2160 without).
 # -FrameGen    AMD FSR frame generation on top (KLBF_FRAMEGEN=1), with -FsrX or -Fsr only: two frames shown per
 #              real one. AMD recommends a base of 60 fps; at ~16 real fps it adds latency and artifacts.
 # -FfxDir      the folder with AMD's signed FidelityFX DLLs (default D:\KLBF-Lab\ffx-4.1.2: SDK 2.4.0, FSR 4.1.2).
@@ -54,7 +54,7 @@ param(
     [switch]$Fsr,
     [switch]$FsrX,
     [switch]$FrameGen,
-    [ValidateSet('quality', 'balanced', 'performance')][string]$FsrQuality = 'quality',
+    [ValidateSet('quality', 'balanced', 'performance', 'ultraperformance')][string]$FsrQuality = 'quality',
     [ValidateSet('', '1280x720', '1664x936', '1920x1080', '2560x1440', '3840x2160')][string]$Output = '',
     [string]$FfxDir = 'D:\KLBF-Lab\ffx-4.1.2',
     [switch]$AutoStart,

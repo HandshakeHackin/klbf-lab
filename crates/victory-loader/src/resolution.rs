@@ -25,8 +25,8 @@
 //! that DLL nothing is patched: the console's own upscaler DLL only knows a
 //! 1920x1080 output and stops the title. FidelityFX's render scale
 //! (+0x28ef680: 1.0 on Series X, 2/3 on Series S) becomes
-//! `KLBF_X_FSR_QUALITY`'s: quality 1/1.5 (default), balanced 1/1.7,
-//! performance 1/2. At 1.0 the Series X memory plan overflows. The picker
+//! `KLBF_X_FSR_QUALITY`'s, AMD's presets: quality 1/1.5 (default), balanced 1/1.7,
+//! performance 1/2, ultraperformance 1/3 (no native AA, 1.0: see below). At 1.0 the Series X memory plan overflows. The picker
 //! and scale sites and their codes are avatarmanz/VIctory-7900XTX 4d7185e's
 //! (from AwkGrep256's Marvisak/VIctory#1793 and avatarmanz#53).
 
@@ -83,7 +83,7 @@ pub fn asked_fsr() -> Option<f32> {
     let quality = std::env::var("KLBF_X_FSR_QUALITY").unwrap_or_default();
     let scale = fsr_scale(&quality);
     if scale.is_none() {
-        eprintln!("KLBF: KLBF_X_FSR_QUALITY={quality}: expected quality, balanced or performance; quality used");
+        eprintln!("KLBF: KLBF_X_FSR_QUALITY={quality}: expected quality, balanced, performance or ultraperformance; quality used");
     }
     Some(scale.unwrap_or(1.0 / 1.5))
 }
@@ -94,6 +94,7 @@ pub fn fsr_scale(quality: &str) -> Option<f32> {
         "" | "quality" => Some(1.0 / 1.5),
         "balanced" => Some(1.0 / 1.7),
         "performance" => Some(0.5),
+        "ultraperformance" | "ultra performance" => Some(1.0 / 3.0),
         _ => None,
     }
 }
@@ -413,6 +414,8 @@ mod tests {
         assert_eq!(fsr_scale("Quality"), Some(1.0 / 1.5));
         assert_eq!(fsr_scale("balanced"), Some(1.0 / 1.7));
         assert_eq!(fsr_scale(" performance "), Some(0.5));
+        assert_eq!(fsr_scale("UltraPerformance"), Some(1.0 / 3.0));
+        assert_eq!(fsr_scale("native"), None, "1.0 overflows the Series X memory plan");
         assert_eq!(fsr_scale("ultra"), None);
         // 2560x1440 in quality renders 1706x960 (the method truncates).
         assert_eq!((2560.0 * fsr_scale("quality").unwrap()) as u32, 1706);

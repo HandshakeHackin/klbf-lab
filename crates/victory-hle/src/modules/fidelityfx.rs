@@ -417,6 +417,12 @@ extern "system" fn ffxDispatch(context: *mut *mut c_void, desc: *mut u8) -> u32 
                 }
             }
             code = (api.dispatch)(context, desc);
+            if code == OK && ty == DISPATCH_UPSCALE {
+                // (KLBF Lab, 27/11) Its render and upscaled sizes (`ffxDispatchDescUpscale`'s words 4..8
+                // from +360), for the bench card and the window's caption.
+                let word = |i: usize| desc.add(360 + 4 * i).cast::<u32>().read_unaligned();
+                victory_gpu::klbf_bench::note_upscale([word(4), word(5)], [word(6), word(7)]);
+            }
             if code == OK && ty == DISPATCH_UPSCALE && victory_gpu::framegen::on() {
                 prepare_framegen(pass.command_list(), desc);
             }
