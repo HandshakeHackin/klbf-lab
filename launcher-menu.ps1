@@ -1423,10 +1423,23 @@ function Get-KlbfPrepareBar([double[]]$Weights, [int]$Phase, [double]$Fraction) 
     [int][math]::Round(1000 * ($before + $Weights[$Phase] * [math]::Min(1.0, [math]::Max(0.0, $Fraction))) / $sum)
 }
 
-# A process and every process it started (victory's workers), ended.
+# A process and every process it started (victory's workers, theirs too), ended: the whole tree is listed
+# first (a child outlives its parent), then each ended. The number still running after up to 3 s (0: all gone).
 function Stop-KlbfTree([int]$Id) {
-    foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$Id" -ErrorAction SilentlyContinue)) { Stop-KlbfTree $c.ProcessId }
-    Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId)
+    $tree = New-Object System.Collections.Generic.List[int]
+    $tree.Add($Id)
+    for ($i = 0; $i -lt $tree.Count; $i++) {
+        foreach ($p in $all) { if ($p.ParentProcessId -eq $tree[$i] -and -not $tree.Contains([int]$p.ProcessId)) { $tree.Add([int]$p.ProcessId) } }
+    }
+    foreach ($p in $tree) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+    $left = $tree
+    for ($t = 0; $t -lt 30; $t++) {
+        $left = @($tree | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if (-not $left) { return 0 }
+        Start-Sleep -Milliseconds 100
+    }
+    $left.Count
 }
 
 # (27/11) The whole preparation in one window, from 0 to done, before Play or the bench: 1. translating the

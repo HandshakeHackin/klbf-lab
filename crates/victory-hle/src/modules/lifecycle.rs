@@ -452,6 +452,11 @@ fn toggle_borderless(hwnd: HWND) {
     }
 }
 
+/// (KLBF Lab) The process groups with KLBF Lab Settings under one taskbar button.
+pub fn set_app_id() {
+    victory_gpu::shell::set_app_id();
+}
+
 /// Puts our procedure in front of the title's.
 fn hook(hwnd: HWND) {
     if hwnd.is_null() {

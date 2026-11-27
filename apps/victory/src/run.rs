@@ -53,7 +53,7 @@ pub fn run(
         #[cfg(windows)]
         victory_hle::modules::fidelityfx::check_at_start();
         #[cfg(windows)]
-        victory_gpu::shell::set_app_id();
+        victory_hle::modules::lifecycle::set_app_id();
     }
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
