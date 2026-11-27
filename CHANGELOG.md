@@ -6,6 +6,10 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## v26.11.2 (27 Nov 2026)
+
+- Hotfix: the launcher opened nothing on PCs where the small screen helper is blocked (antivirus, restricted Windows); it now opens with a fallback. Thanks to the testers who sent the error.
+
 ## v26.11.1 (27 Nov 2026)
 
 Versions follow YY.MM.N (year, month, release of the month), like AMD's drivers.

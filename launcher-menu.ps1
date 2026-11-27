@@ -516,11 +516,17 @@ public static class KlbfDisplay {
 }
 '@
             }
+        } catch {}
+        # (27/11 hotfix) The C# helper can be blocked (antivirus, restricted PCs): the screens are still listed,
+        # with their bounds as the mode, so the window never starts without a screen.
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
             @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
                 $w = $_.WorkingArea
-                @{ primary = $_.Primary; device = $_.DeviceName; mode = [KlbfDisplay]::Mode($_.DeviceName); bounds = '{0}x{1}' -f $_.Bounds.Width, $_.Bounds.Height; work = @($w.X, $w.Y, $w.Width, $w.Height) }
+                $mode = try { [KlbfDisplay]::Mode($_.DeviceName) } catch { '' }
+                @{ primary = $_.Primary; device = $_.DeviceName; mode = $mode; bounds = '{0}x{1}' -f $_.Bounds.Width, $_.Bounds.Height; work = @($w.X, $w.Y, $w.Width, $w.Height) }
             })
-        } catch { @() }
+        } catch { @(@{ primary = $true; device = ''; mode = ''; bounds = '1920x1080'; work = @(0, 0, 1920, 1080) }) }
 }
 
 # The PRIMARY monitor's real mode, where the game window opens by default; the first video controller's
@@ -550,6 +556,10 @@ function Get-KlbfDisplayIndex($Choice, $Screens) {
 # The top-left corner that centres a $Size (width, height) window on a work area (x, y, width, height),
 # kept inside it when larger. Negative coordinates (a monitor left of the main one) are fine.
 function Get-KlbfCentre($Work, $Size) {
+    # (27/11 hotfix) No work area known: the main screen's, else leave the window where Windows put it.
+    if (@($Work).Count -lt 4) {
+        try { $p = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; $Work = @($p.X, $p.Y, $p.Width, $p.Height) } catch { return @(100, 100) }
+    }
     $x = $Work[0] + [math]::Max(0, [math]::Floor(($Work[2] - $Size[0]) / 2))
     $y = $Work[1] + [math]::Max(0, [math]::Floor(($Work[3] - $Size[1]) / 2))
     @([int]$x, [int]$y)
