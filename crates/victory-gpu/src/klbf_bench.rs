@@ -1,4 +1,4 @@
-//! (ours) KLBF Lab Bench · Bayside Morning v1 (BM-v1). On with `KLBF_BENCH=bm-v1` only; nothing
+//! (ours) KLBF Lab Bench BM-v1. On with `KLBF_BENCH=bm-v1` only; nothing
 //! changes otherwise.
 //!
 //! The player loads the fixed save and touches nothing: the measurement starts at the first world
@@ -944,8 +944,9 @@ impl Launch {
 /// the launcher's settings shown elsewhere, the bench's and the build's own, folders, and switches off. A
 /// value that is not a short plain word or number (a path...) is never written: the card is public.
 fn exp_switch(key: &str, value: &str) -> Option<String> {
-    const SHOWN: [&str; 18] = [
-        "BORDERLESS", "FRAMEGEN", "TEX_TRIM", "X_FSR", "X_FSR_QUALITY", "X_OUTPUT", "X_RENDER_SCALE", "WINDOW_MONITOR", "WINDOW_COLORS",
+    // LAUNCHER: set by play.ps1 on every run, not an experiment
+    const SHOWN: [&str; 19] = [
+        "LAUNCHER", "BORDERLESS", "FRAMEGEN", "TEX_TRIM", "X_FSR", "X_FSR_QUALITY", "X_OUTPUT", "X_RENDER_SCALE", "WINDOW_MONITOR", "WINDOW_COLORS",
         "PROJECT", "PROJECT_NAME", "PROJECT_SOURCE", "SHA", "GIT_SHA", "GIT_REMOTE", "FIXTURE_WRITE", "CARD_PREVIEW", "OLD_HOMES",
     ];
     let name = key.strip_prefix("KLBF_")?;
@@ -1070,6 +1071,12 @@ struct Card {
     /// (27/11) The save the run loaded, as the launcher numbers it ("#2", "Autosave"), never its in-game
     /// name (the card is public); empty when not given (`KLBF_BENCH_SAVE`).
     save: String,
+    /// (v26.11.4) The player's own note of where the run took place ("city driving"), at most 40
+    /// characters; empty when not given (`KLBF_BENCH_WHERE`). Players bench wherever they want.
+    place: String,
+    /// (v26.11.4) "Save ID": the first 8 hex digits of the SHA-256 of the save's data file, from the
+    /// launcher (`KLBF_BENCH_SAVE_ID`). Same ID, same starting point; never a file name or a path.
+    save_id: String,
     blocked: u64,
     /// "RAM peak 20.8 GB · VRAM 10.0 / 16 GB · card busy 57 %".
     used: String,
@@ -1100,6 +1107,27 @@ fn save_number(label: &str) -> String {
     let first = label.split_whitespace().next().unwrap_or("");
     let numbered = first.strip_prefix('#').is_some_and(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|b| b.is_ascii_digit()));
     if numbered || first == "Autosave" { first.into() } else { String::new() }
+}
+
+/// `KLBF_BENCH_WHERE`: the player's note of where the run took place, one line of at most 40 characters
+/// ("|" dropped: it separates the share line's fields).
+fn bench_where() -> String {
+    place_note(&std::env::var("KLBF_BENCH_WHERE").unwrap_or_default())
+}
+
+/// `KLBF_BENCH_SAVE_ID`: 8 hex digits, else nothing.
+fn bench_save_id() -> String {
+    save_id_of(&std::env::var("KLBF_BENCH_SAVE_ID").unwrap_or_default())
+}
+
+fn save_id_of(raw: &str) -> String {
+    let v = raw.trim().to_ascii_lowercase();
+    if v.len() == 8 && v.bytes().all(|b| b.is_ascii_hexdigit()) { v } else { String::new() }
+}
+
+fn place_note(raw: &str) -> String {
+    let p: String = raw.chars().filter(|c| !c.is_control() && *c != '|').take(40).collect();
+    p.trim().into()
 }
 
 fn player() -> String {
@@ -1146,6 +1174,8 @@ fn finish(early: Option<&'static str>) {
         from: format!("{PROJECT} @ {SHA}{declared}"),
         player: player(),
         save: bench_save(),
+        place: bench_where(),
+        save_id: bench_save_id(),
         blocked: BLOCKED.load(Ordering::Relaxed),
         used: String::new(),
         share: String::new(),
@@ -1186,6 +1216,12 @@ fn finish(early: Option<&'static str>) {
         stamp.word(),
         card.serial
     );
+    if !card.place.is_empty() {
+        card.share.push_str(&format!(" | where: {}", card.place));
+    }
+    if !card.save_id.is_empty() {
+        card.share.push_str(&format!(" | save ID {}", card.save_id));
+    }
     // Local date and time first, so the results sort and never overwrite each other.
     card.file_stem = format!("KLBF-Bench-{}-{:04}{:02}{:02}-{:02}{:02}-{}", id(), t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, card.serial);
     card.png_name = format!("bench-results\\{}.png", card.file_stem);
@@ -1370,7 +1406,7 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
     let t = &c.set;
     let mut doc = J::obj([
         ("bench", J::S("KLBF Lab Bench".into())),
-        ("test", J::S("Bayside Morning v1".into())),
+        ("test", J::S(format!("KLBF Lab Bench {}", id()))),
         ("test_id", J::S(id())),
         ("schema", J::I(1)),
         ("stamp", J::S(c.stamp.word().into())),
@@ -1463,6 +1499,13 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
     if let (J::O(m), false) = (&mut doc, c.save.is_empty()) {
         m.insert("bench_save", J::S(c.save.clone()));
     }
+    // (v26.11.4) Likewise the player's note of where the run took place.
+    if let (J::O(m), false) = (&mut doc, c.place.is_empty()) {
+        m.insert("where", J::S(c.place.clone()));
+    }
+    if let (J::O(m), false) = (&mut doc, c.save_id.is_empty()) {
+        m.insert("save_id", J::S(c.save_id.clone()));
+    }
     doc
 }
 
@@ -1474,7 +1517,7 @@ fn size_or_null(s: [u32; 2]) -> J {
 fn write_results(c: &Card, x: &Extra, json: &str) {
     let s = &c.s;
     let text = [
-        "KLBF Lab Bench \u{b7} Bayside Morning v1 (BM-v1)".to_string(),
+        format!("KLBF Lab Bench {}", id()),
         format!("Result:     {} \u{2013} {}", c.stamp.word(), c.reason),
         format!("Serial:     {}", c.serial),
         format!("Date:       {}", c.date_iso),
@@ -2081,6 +2124,7 @@ const ARIAL: Font = Font("Arial", 400);
 const ARIAL_BOLD: Font = Font("Arial", 700);
 const ARIAL_BLACK: Font = Font("Arial Black", 900);
 const GEORGIA: Font = Font("Georgia", 400);
+const GEORGIA_BOLD: Font = Font("Georgia", 700);
 const UI: Font = Font("Segoe UI", 400);
 
 /// GDI as a glyph rasteriser only (as Neptune's overlay): `s` drawn white on black into a scratch
@@ -2374,15 +2418,15 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
                 put(&mut bm, ox.round() as i32 + i, oy.round() as i32 + j, rgb, v[3] as u32);
             }
         }
-        // (27/11) Longer runs: the template's "5 minutes at ..." line (between the dotted lines at 290
-        // and 347) is covered with the background just above it; the run's own length is written below.
-        if length().1 != 5 {
-            // Sampled just below the text, above the lower dotted line: the palm's leaf crosses the rows above it.
-            let ys = (344.0 * k * sy) as i32;
+        // (v26.11.4) The template's fixed scene name (y 256..287) and "5 minutes at ..." line (318..344)
+        // are covered with the background: the player's save may be anywhere. Each band takes its colours
+        // from one row with no text (below the lower one: the palm's leaf crosses the rows above it).
+        for (sample, rows) in [(254.0, 256.0..287.0), (344.0, 318.0..344.0)] {
+            let ys = (sample * k * sy) as i32;
             for i in (90.0 * k) as i32..(420.0 * k) as i32 {
                 let p = texel(((i as f32 + 0.5) * sx) as i32, ys);
                 let rgb = [0, 1, 2].map(|n| (p[n] * 255.0 / p[3].max(1.0)).clamp(0.0, 255.0) as u8);
-                for j in (318.0 * k) as i32..(344.0 * k) as i32 {
+                for j in (rows.start * k) as i32..(rows.end * k) as i32 {
                     put(&mut bm, ox.round() as i32 + i, oy.round() as i32 + j, rgb, 255);
                 }
             }
@@ -2390,9 +2434,12 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     }
     let mut pen = Pen { bm: &mut bm, ox, oy, k, boxes: Vec::new() };
     let ink = hex(INK);
-    if length().1 != 5 {
-        pen.text(GEORGIA, 18.0, &format!("{} minutes at the male lead's house", length().1), 255.0, 336.0, true, 370.0, ink);
-    }
+    // The player's note of where, else the bench's name: never a fixed scene name.
+    let title = if c.place.is_empty() { format!("KLBF Lab Bench {}", id()) } else { c.place.clone() };
+    pen.text(GEORGIA_BOLD, 26.0, &title, 255.0, 279.0, true, 370.0, ink);
+    let save = if c.save.is_empty() { String::new() } else { format!("save {} \u{b7} ", c.save) };
+    let save = if c.save_id.is_empty() { save } else { format!("{save}Save ID {} \u{b7} ", c.save_id) };
+    pen.text(GEORGIA, 18.0, &format!("{save}{} in the world", target()), 255.0, 336.0, true, 370.0, ink);
     // Left: the date and how it ended.
     pen.text(GEORGIA, 18.0, &format!("{} \u{b7} {}", c.date, c.reason), 255.0, 394.0, true, 370.0, ink);
     // Postmark: serial and date at the bottom, inside the ring.
@@ -2828,6 +2875,8 @@ mod tests {
             from: String::new(),
             player: "anonymous".into(),
             save: String::new(),
+            place: String::new(),
+            save_id: String::new(),
             blocked: 0,
             used: String::new(),
             share: String::new(),
@@ -2898,6 +2947,8 @@ mod tests {
         card.set.launch = sample_launch();
         card.set.launch.exp.truncate(4);
         card.save = "#1".into();
+        card.place = "city driving".into();
+        card.save_id = "1a2b3c4d".into();
         let out = std::env::var("KLBF_CARD_PREVIEW")
             .unwrap_or_else(|_| std::env::temp_dir().join("klbf-bench-card-sample.png").to_string_lossy().into_owned());
         std::fs::write(&out, render_png(&card)).unwrap();
@@ -2910,7 +2961,7 @@ mod tests {
     }
 
     /// A result the game writes, byte for byte the fixture `tools/bench-check.py` accepts
-    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-33a2e19f.json`).
+    /// (`python -I tools/bench-check.py crates/victory-gpu/tests/fixtures/KLBF-Bench-BM-v1-d46a5583.json`).
     #[test]
     fn result_matches_the_checker_fixture() {
         let card = sample_card();
@@ -2922,7 +2973,7 @@ mod tests {
         m.insert("project_source", J::S("git".into()));
         m.insert("sha", J::S("abc1234".into()));
         let id = serial(&doc);
-        assert_eq!(id, "33a2e19f");
+        assert_eq!(id, "d46a5583");
         let share = format!("[KLBF Lab Bench BM-v1] PastiiJay/klbf-lab@abc1234 | RX 9070 XT | Ryzen 7 7800X3D | avg 60.0 fps, 1% low 58.5 | CERTIFIED | {id}");
         let J::O(m) = &mut doc else { unreachable!() };
         m.insert("serial", J::S(id));
@@ -2930,7 +2981,7 @@ mod tests {
         if let Ok(out) = std::env::var("KLBF_FIXTURE_WRITE") {
             std::fs::write(out, doc.canonical()).unwrap();
         }
-        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-33a2e19f.json"));
+        assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-d46a5583.json"));
     }
 
     fn running(lit: bool) -> Run {
@@ -3064,6 +3115,18 @@ mod tests {
         let J::O(plain) = result_json(&card, &extra, &[60.0]) else { unreachable!() };
         assert!(!plain.contains_key("bench_save"));
         card.save = save_number("#2 Night at home");
+        assert_eq!(place_note("  city driving | at night\u{7}  "), "city driving  at night");
+        assert_eq!(place_note(&"x".repeat(60)).len(), 40);
+        card.place = "countryside".into();
+        let J::O(m) = result_json(&card, &extra, &[]) else { unreachable!() };
+        assert_eq!(m.get("where").map(J::canonical).as_deref(), Some("\"countryside\""));
+        card.place = String::new();
+        assert_eq!(save_id_of(" 1A2B3C4D "), "1a2b3c4d");
+        assert_eq!(save_id_of("C:\\saves\\0"), "");
+        card.save_id = "1a2b3c4d".into();
+        let J::O(m) = result_json(&card, &extra, &[]) else { unreachable!() };
+        assert_eq!(m.get("save_id").map(J::canonical).as_deref(), Some("\"1a2b3c4d\""));
+        card.save_id = String::new();
         let J::O(named) = result_json(&card, &extra, &[60.0]) else { unreachable!() };
         assert_eq!(named.get("bench_save").map(J::canonical).as_deref(), Some("\"#2\""), "the number only, never the in-game name");
         assert_eq!(save_number("Autosave (Auto) Night at home"), "Autosave");

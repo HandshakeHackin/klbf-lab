@@ -386,7 +386,7 @@ function Get-KlbfUpdateTick($c, $Inst, $Timer, $GameOk) {
         $Timer.Stop(); $c.updating = $false
         $r = try { @($Inst.ps.EndInvoke($Inst.job))[0] } catch { @{ ok = $false; message = "Update not installed: $_" } }
         if ($r.ok) { $env:KLBF_UPDATED = $r.message; $c.form.Tag = 'updated'; $c.form.Close(); return }
-        $c.status.Text = $r.message; $c.update.Enabled = $true; $c.play.Enabled = & $GameOk $c.gamePath
+        $c.status.Text = $r.message; $c.update.Enabled = $true; $c.play.Enabled = $c.playIsUpdate -or (& $GameOk $c.gamePath)
         if (-not $c.quiet) { [void][System.Windows.Forms.MessageBox]::Show($r.message, 'KLBF Lab', 'OK', 'Warning') }
     }.GetNewClosure()
 }
@@ -402,6 +402,8 @@ function Set-KlbfUpdateLine($c, $Update) {
     # Right after "v26.11.1 -"
     if ($c.versionLabel) { $c.update.Left = $c.versionLabel.Right }
     $c.update.Visible = $true
+    # (v26.11.4) A newer release found: the big Play button becomes Update (no playing an old build by mistake)
+    $c.playIsUpdate = $true; $c.play.Text = 'Update'; $c.play.Enabled = $true
 }
 
 # Desktop\KLBF Lab.lnk (the Desktop known folder) from a spec; $Path for tests.
@@ -1095,12 +1097,11 @@ function Hide-KlbfPaths([Parameter(ValueFromPipeline)][string]$Text, [string]$Ga
 # player makes his own, at the point below.
 function Get-KlbfBenchGuide {
     @(
-        'KLBF Lab Bench BM-v1: 5 minutes, always the same scene, measured by the build itself.'
+        'KLBF Lab Bench BM-v1: 5 minutes wherever you like, measured by the build itself.'
         ''
         'Once, before the first bench:'
         '1. Play about 10 minutes with this build, so its shaders and effects are prepared (the bench does not start before).'
-        "2. Make the bench save: sleep until the morning in the main character's bed at his house (about 3 % into the story), go down to the laundry room, pick up the fishing book on the workbench, keep it in hand, and save."
-        '   It must be your most recent save: the bench presses Continue, which loads the most recent one.'
+        '2. Pick below the save the bench loads (any save, any place). Optional: say where you are, it goes on the card.'
         ''
         'Each bench:'
         '3. Close other heavy programs. Press Start bench, then touch nothing: after 5 seconds in the world the controller and keyboard are ignored until 5:00.'
@@ -1145,7 +1146,7 @@ function Get-KlbfBenchShareText($Result) {
     $k = Get-KlbfGpuKind ([string]$Result.gpu)
     $card = if ($k.gen) { $k.gen } else { 'GPU' }
     @(
-        "KLBF Lab Bench BM-v1: $head, 1% low $([string]::Format($en, '{0:0.0}', $Result.fps.low_1pct))"
+        "KLBF Lab Bench BM-v1$(if ($Result.where) { " ($($Result.where))" }): $head, 1% low $([string]::Format($en, '{0:0.0}', $Result.fps.low_1pct))"
         (@("Profile $($set.profile)", $up, $res, "frame generation $(if ($fg) { 'on' } else { 'off' })") | Where-Object { $_ }) -join ' - '
         "$card, $([math]::Round([double]$Result.gpu_vram_gb)) GB VRAM, $([math]::Round([double]$Result.ram_gb)) GB RAM"
         "$($Result.stamp) - KLBF Lab $($Result.sha)"
@@ -1183,6 +1184,14 @@ function Get-KlbfSaveLabel($Save) {
     if ($Save.auto) { 'Autosave' } else { '#' + ($Save.slot -replace '^Slot ', '') }
 }
 
+# (v26.11.4) The bench card's "Save ID": the first 8 hex digits of the SHA-256 of the save's data file. Same ID,
+# same starting point (players may share a save among themselves; we never ship one). Never a name or a path.
+function Get-KlbfSaveId($Save) {
+    $f = Join-Path ([string]$Save.version) '0'
+    if (-not $Save.version -or -not (Test-Path -LiteralPath $f)) { return '' }
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.Substring(0, 8).ToLower()
+}
+
 # "Slot 2" / "Autosave", with the in-game name after it only when $Show (the Saves tab's Show names).
 function Get-KlbfSaveName($Save, [bool]$Show = $false) {
     $n = if ($Save.auto) { 'Autosave' } else { $Save.slot }
@@ -1196,7 +1205,7 @@ function Show-KlbfBenchGuide($Saves) {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'KLBF Lab Bench'; Set-KlbfTheme $f; $f.FormBorderStyle = 'FixedDialog'
     $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.StartPosition = 'CenterParent'
-    $f.ClientSize = New-Object System.Drawing.Size(520, 456)
+    $f.ClientSize = New-Object System.Drawing.Size(520, 492)
     $t = New-Object System.Windows.Forms.Label; $t.Text = Get-KlbfBenchGuide; $t.SetBounds(16, 12, 488, 300)
     $sl = New-Object System.Windows.Forms.Label; $sl.Text = 'Save the bench loads:'; $sl.SetBounds(16, 358, 200, 20)
     $pick = New-Object System.Windows.Forms.ComboBox; $pick.DropDownStyle = 'DropDownList'; $pick.ForeColor = [System.Drawing.Color]::Black; $pick.SetBounds(216, 355, 288, 24)
@@ -1205,12 +1214,16 @@ function Show-KlbfBenchGuide($Saves) {
     $l = New-Object System.Windows.Forms.Label; $l.Text = 'Your GitHub login (on the card; empty: anonymous):'; $l.SetBounds(16, 322, 300, 20)
     $box = New-Object System.Windows.Forms.TextBox; $box.SetBounds(316, 319, 188, 24)
     $box.BackColor = Get-KlbfColor $script:KlbfTheme.field; $box.ForeColor = Get-KlbfColor $script:KlbfTheme.text
-    $go = New-Object System.Windows.Forms.Button; $go.Text = 'Start bench'; $go.DialogResult = 'OK'; $go.SetBounds(296, 404, 100, 34)
-    $no = New-Object System.Windows.Forms.Button; $no.Text = 'Cancel'; $no.DialogResult = 'Cancel'; $no.SetBounds(404, 404, 100, 34)
+    # (v26.11.4) Players bench wherever they want: an optional note of where, on the card
+    $wl = New-Object System.Windows.Forms.Label; $wl.Text = 'Where were you? (optional, e.g. city driving):'; $wl.SetBounds(16, 394, 300, 20)
+    $where = New-Object System.Windows.Forms.TextBox; $where.MaxLength = 40; $where.SetBounds(316, 391, 188, 24)
+    $where.BackColor = Get-KlbfColor $script:KlbfTheme.field; $where.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    $go = New-Object System.Windows.Forms.Button; $go.Text = 'Start bench'; $go.DialogResult = 'OK'; $go.SetBounds(296, 440, 100, 34)
+    $no = New-Object System.Windows.Forms.Button; $no.Text = 'Cancel'; $no.DialogResult = 'Cancel'; $no.SetBounds(404, 440, 100, 34)
     $go.Enabled = [bool]$Saves
     Set-KlbfButton $go $true; Set-KlbfButton $no
-    $f.Controls.AddRange(@($t, $l, $box, $sl, $pick, $go, $no)); $f.AcceptButton = $go; $f.CancelButton = $no
-    if ($f.ShowDialog() -eq 'OK') { @{ player = $box.Text; save = @($Saves)[$pick.SelectedIndex] } } else { $null }
+    $f.Controls.AddRange(@($t, $l, $box, $sl, $pick, $wl, $where, $go, $no)); $f.AcceptButton = $go; $f.CancelButton = $no
+    if ($f.ShowDialog() -eq 'OK') { @{ player = $box.Text; save = @($Saves)[$pick.SelectedIndex]; where = $where.Text.Trim() } } else { $null }
 }
 
 # The setup window, not shown: @{ form; c (its controls) }. $Hardware: Get-KlbfHardware's; $Info: @{ victory;
@@ -1557,7 +1570,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.bench.add_Click({
         $r = if ($c.benchGuide) { & $c.benchGuide $c.saves } else { & $fGuide $c.saves }
         if ($null -eq $r) { return }
-        $c.benchPlayer = $r.player; $c.benchSave = $r.save; $c.form.Tag = 'bench'; $c.form.Close()
+        $c.benchPlayer = $r.player; $c.benchSave = $r.save; $c.benchWhere = $r.where; $c.form.Tag = 'bench'; $c.form.Close()
     }.GetNewClosure())
     $c.browse.add_Click({
         $d = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1603,9 +1616,9 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.lastShare = $text
         try { & $c.clipboard $text; $c.quickNote.Text = 'Text copied: paste it anywhere.' } catch { $c.quickNote.Text = 'Could not copy the text.' }
     }.GetNewClosure())
-    $c.play.add_Click({ $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
+    $c.play.add_Click({ if ($c.playIsUpdate -and $c.startUpdate) { & $c.startUpdate; return }; $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
     $opened = $Choice; $fShots = ${function:Set-KlbfShotsPath}; $fShotsDir = ${function:Get-KlbfShotsDir}
-    $c.quickRestart.add_Click({ & $fSet $c $opened; $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
+    $c.quickRestart.add_Click({ if ($c.playIsUpdate -and $c.startUpdate) { & $c.startUpdate; return }; & $fSet $c $opened; $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
     $c.quickSettings.add_Click({ $c.tabs.SelectedIndex = 0 }.GetNewClosure())
     $fShortcut = ${function:Set-KlbfShortcut}; $fSpec = ${function:Get-KlbfShortcutSpec}; $here = $PSScriptRoot
     $c.shortcut.add_Click({
@@ -1751,6 +1764,7 @@ function Update-KlbfForm($c) {
     $c.gameDot.ForeColor = Get-KlbfColor $(if ($ok) { 0x22C55E } else { 0xEF4444 })
     $c.gameText.Text = if ($ok) { 'Game files found' } elseif ($c.gamePath) { 'This folder does not contain the game files' } else { 'Choose the folder where your copy of the game is installed (Browse...)' }
     foreach ($b in $c.play, $c.bench, $c.prepare) { $b.Enabled = $ok }
+    if ($c.playIsUpdate) { $c.play.Enabled = $true }
 }
 
 # Shows the window: @{ action = 'play'|'prepare'|'bench'; choice; benchPlayer; benchSave } or $null if closed.
@@ -1784,10 +1798,9 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
             if ($r.state -eq 'update' -and $r.update.tag) { & $fLine $c $r.update }
         }.GetNewClosure())
         $uTick.Start()
-        $c.update.add_LinkClicked({
-            param($s, $e)
+        # The Update link and the Play button turned Update (Set-KlbfUpdateLine) both start it
+        $c.startUpdate = {
             $u = $c.updateInfo
-            if ($e.Link.LinkData -eq 'notes') { & $c.openUrl $u.page; return }
             $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Question') -eq 'Yes' } }
             if (-not (& $ask "Update KLBF Lab to $($u.tag)?`r`nThe zip is downloaded from GitHub and checked; your saves and settings are not touched. This window then opens again.")) { return }
             $c.update.Enabled = $false; $c.play.Enabled = $false; $c.updating = $true
@@ -1796,6 +1809,11 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
             $iTick = New-Object System.Windows.Forms.Timer; $iTick.Interval = 500
             $iTick.add_Tick((& $fTick $c $inst $iTick $fGameOk))
             $iTick.Start()
+        }.GetNewClosure()
+        $c.update.add_LinkClicked({
+            param($s, $e)
+            if ($e.Link.LinkData -eq 'notes') { & $c.openUrl $c.updateInfo.page; return }
+            & $c.startUpdate
         }.GetNewClosure())
     }
     # (27/11) A first start from the release zip: the official components fetched while the window is open,
@@ -1822,7 +1840,7 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
     }
     [void]$m.form.ShowDialog()
     if (-not $m.form.Tag) { return $null }
-    @{ action = [string]$m.form.Tag; choice = Get-KlbfFormChoice $m.c; benchPlayer = $m.c.benchPlayer; benchSave = $m.c.benchSave }
+    @{ action = [string]$m.form.Tag; choice = Get-KlbfFormChoice $m.c; benchPlayer = $m.c.benchPlayer; benchSave = $m.c.benchSave; benchWhere = $m.c.benchWhere }
 }
 
 # "You changed how the game is rendered..." with Prepare now / Later: $true for Prepare now.

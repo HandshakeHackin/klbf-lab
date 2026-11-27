@@ -27,7 +27,7 @@
 # -FfxDir      the folder with AMD's signed FidelityFX DLLs (SDK 2.4.0, FSR 4.1.2). Default: ffx\ beside
 #              victory.exe, fetched there once from AMD's GitHub (hash-checked), or D:\KLBF-Lab\ffx-4.1.2 when
 #              ffx\ has none and that has. Without them FSR is turned off: the built-in upscaler is used.
-# -Bench      KLBF Lab Bench BM-v1 (5 min, hands-off; your morning save in slot 1): Continue pressed for you.
+# -Bench      KLBF Lab Bench BM-v1 (5 min, hands-off; any save, your most recent one): Continue pressed for you.
 #              -BenchPlayer <GitHub login> names you on the card (else anonymous).
 #              -BenchLength Short (5 min, the board's test) | Medium (15) | Long (30) | Marathon (60), or the minutes: -BenchLength 60. Same place, longer.
 # -AutoStart   presses through the start screens by itself, for a fresh start with no save
@@ -230,20 +230,21 @@ if (-not $PrintEnv -and -not $Bench) { $lost = Test-KlbfLostSaves $Data; if ($lo
 New-Item -ItemType Directory -Force -Path $Cache, $Data | Out-Null
 # (27/11) A bench from the window loads the save picked there: the run gets a copy of the data folder in which
 # that save is the only one (Continue can load nothing else), and the player's own saves are not opened.
-$benchLabel = ''
+$benchLabel = ''; $benchId = ''
 if ($menuAction -eq 'bench' -and $picked.benchSave) {
     try {
         $zip = Backup-KlbfSaves (Get-KlbfSavesRoot $Data)
         if ($zip) { Write-Host "Saves backed up: $zip" }
     } catch { Write-Warning "Saves not backed up: $_" }
     $benchLabel = Get-KlbfSaveLabel $picked.benchSave
+    $benchId = try { Get-KlbfSaveId $picked.benchSave } catch { '' }
     $Data = New-KlbfBenchData $Data $picked.benchSave
     Write-Host "KLBF Lab Bench: save $benchLabel, alone in a copy of your data ($Data)"
 }
 
 # Settings left in this window by an earlier start go: only what is below counts.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -ne 'VICTORY_HALF_VIEWS' -and $_.Name -ne 'VICTORY_AUTO_INPUT' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
-Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM', 'KLBF_BENCH_SAVE' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_WHERE', 'KLBF_BENCH_SAVE_ID' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 
 $set = [ordered]@{
     VICTORY_GAME_DIR  = $Game
@@ -325,7 +326,7 @@ if ($AutoStart) {
 }
 if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'open' } else { $SkipMovies }) }
 # -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
-# screens and Continue pressed by themselves (your morning save in slot 1 must be the last one); touch nothing.
+# screens and Continue pressed by themselves (the most recent save loads, any place); touch nothing.
 if ($Bench) {
     $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer; $env:KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $env:KLBF_BENCH_LENGTH) { $env:KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
     if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
@@ -334,6 +335,9 @@ if ($Bench) {
     Write-Host 'post it with the form: https://github.com/PastiiJay/klbf-lab/issues/new?template=bench-bm-v1.yml'
 }
 if ($benchLabel) { $set.KLBF_BENCH_SAVE = $benchLabel }
+if ($benchId) { $set.KLBF_BENCH_SAVE_ID = $benchId }
+# (v26.11.4) The player's optional note of where the run takes place, on the card and in the JSON
+if ($menuAction -eq 'bench' -and $picked.benchWhere) { $set.KLBF_BENCH_WHERE = ([string]$picked.benchWhere).Trim() }
 # (27/11) F8's screenshots: the folder chosen in Settings, else Pictures\KLBF Lab
 $saved = Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')
 $set.KLBF_SHOTS_DIR = Get-KlbfShotsDir $saved
