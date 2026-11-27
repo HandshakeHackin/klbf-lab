@@ -1947,6 +1947,7 @@ mod tests {
             from: String::new(),
             player: "anonymous".into(),
             blocked: 0,
+            used: String::new(),
             share: String::new(),
             file_stem: String::new(),
             png_name: String::new(),
