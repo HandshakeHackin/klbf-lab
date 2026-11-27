@@ -49,6 +49,11 @@ pub fn run(
 
     if execute {
         check_cpu_features()?;
+        // (KLBF Lab) AMD FSR tried on this PC first; the built-in upscaler if it cannot start.
+        #[cfg(windows)]
+        victory_hle::modules::fidelityfx::check_at_start();
+        #[cfg(windows)]
+        victory_hle::modules::lifecycle::set_app_id();
     }
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();

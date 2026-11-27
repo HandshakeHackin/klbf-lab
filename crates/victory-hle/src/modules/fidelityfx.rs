@@ -45,6 +45,57 @@ pub fn enabled() -> bool {
     path().is_some()
 }
 
+/// (KLBF Lab, 27/11) Before the title starts: the PC FSR DLL is loaded and an upscaler context made on
+/// this PC's card. If either fails, FSR is turned off for the run (`VICTORY_FSR_DLL`, `KLBF_X_FSR` and
+/// frame generation's `KLBF_FRAMEGEN`) and the title uses its own upscaler (the caption then says
+/// "Title upscaler"), instead of a title that cannot upscale. Call it before anything reads them.
+pub fn check_at_start() {
+    let Some(path) = path() else { return };
+    let why = match load(&path) {
+        Err(e) => Some(e),
+        Ok(api) => match victory_gpu::external::with_probe_device(|device| try_context(&api, device)) {
+            None => Some("no D3D12 card".into()),
+            Some(Err(code)) => Some(format!("ffxCreateContext returned {code}")),
+            Some(Ok(())) => None,
+        },
+    };
+    if let Some(why) = why {
+        tracing::warn!(%why, "AMD FSR cannot start on this PC: the built-in upscaler is used instead");
+        println!("fidelityfx     AMD FSR cannot start on this PC ({why}): the built-in upscaler is used");
+        // SAFETY: at the run's start, before other threads read the environment.
+        unsafe {
+            for v in [VARIABLE, "KLBF_X_FSR", "KLBF_FRAMEGEN"] {
+                std::env::remove_var(v);
+            }
+        }
+    }
+}
+
+/// An upscaler context of a 1920x1080 to 3840x2160 upscale on `device`, made and destroyed.
+fn try_context(api: &Api, device: *mut c_void) -> Result<(), u32> {
+    // ffxCreateContextDescUpscale: header (type, next), flags, maxRenderSize, maxUpscaleSize, fpMessage.
+    #[repr(C)]
+    struct Upscale {
+        ty: u64,
+        next: *mut c_void,
+        flags: u32,
+        max_render: [u32; 2],
+        max_upscale: [u32; 2],
+        message: *const c_void,
+    }
+    let mut backend = [CREATE_BACKEND_DX12, 0, device as u64];
+    let mut desc = Upscale { ty: CREATE_UPSCALE, next: backend.as_mut_ptr().cast(), flags: 0, max_render: [1920, 1080], max_upscale: [3840, 2160], message: std::ptr::null() };
+    let mut context: *mut c_void = std::ptr::null_mut();
+    // SAFETY: the PC DLL's exports, with descriptions of ours that outlive the calls.
+    let code = unsafe { (api.create)(&mut context, (&raw mut desc).cast(), std::ptr::null()) };
+    if code != OK {
+        return Err(code);
+    }
+    // SAFETY: the context just made.
+    unsafe { (api.destroy)(&mut context, std::ptr::null()) };
+    Ok(())
+}
+
 /// Whether the title's `file` is answered by the redirect instead of being
 /// mapped from the title's folder.
 pub fn replaces(file: &str) -> bool {
@@ -515,6 +566,21 @@ pub(crate) fn module() -> HleModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (KLBF Lab) A PC FSR DLL that cannot load turns FSR and frame generation off for the run: the
+    /// title keeps its own upscaler.
+    #[test]
+    fn fsr_that_cannot_start_falls_back_to_the_titles_upscaler() {
+        // SAFETY: this test alone sets these variables.
+        unsafe {
+            std::env::set_var(VARIABLE, r"C:\nowhere\amd_fidelityfx_upscaler_dx12.dll");
+            std::env::set_var("KLBF_X_FSR", "1");
+            std::env::set_var("KLBF_FRAMEGEN", "1");
+        }
+        check_at_start();
+        assert!(!enabled());
+        assert!(std::env::var_os("KLBF_X_FSR").is_none() && std::env::var_os("KLBF_FRAMEGEN").is_none());
+    }
 
     #[test]
     fn states_map_to_d3d12() {

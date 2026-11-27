@@ -1,19 +1,17 @@
 //! (27/11) KLBF Lab's in-game keys and menu, one press each while the game window has the focus: F10
 //! closes the game for the launcher's settings (exit code 10, play.ps1 opens KLBF Lab Settings, Play
 //! starts it again), F11 restarts it with the same settings (11), F8 saves a screenshot of the game
-//! image (`klbf_bench::save_screenshot`). The same three are items of the window's menu bar, at its
-//! right. The keys come as window messages (`on_message`, from the title window's procedure), so a short
-//! tap is never missed between two frames. During a bench run none of them acts (F10 is the bench's:
-//! it stops the run) and the window gets no menu.
+//! image (`klbf_bench::save_screenshot`). With our launcher (`KLBF_LAUNCHER`) the caption says them at
+//! its right (`with_hints`). The keys come as window messages (`on_message`, from the title window's
+//! procedure), so a short tap is never missed between two frames. During a bench run none of them acts
+//! (F10 is the bench's: it stops the run).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateMenu, HMENU, MF_STRING, MFT_RIGHTJUSTIFY, WM_COMMAND, WM_KEYDOWN, WM_SYSKEYDOWN,
-};
+use windows_sys::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_SYSKEYDOWN};
 
 /// Exit codes play.ps1 reads.
 pub const EXIT_SETTINGS: i32 = 10;
@@ -26,9 +24,8 @@ pub enum Action {
     Settings,
 }
 
-/// In the menu bar's order (left to right), with each one's key and menu id.
-const ALL: [(Action, usize, u16); 3] =
-    [(Action::Screenshot, 0x77, 0x4B08), (Action::Restart, 0x7A, 0x4B0B), (Action::Settings, 0x79, 0x4B0A)];
+/// Each action's key.
+const ALL: [(Action, usize); 3] = [(Action::Screenshot, 0x77), (Action::Restart, 0x7A), (Action::Settings, 0x79)];
 
 impl Action {
     /// The exit code play.ps1 acts on; `None`: done in the game.
@@ -51,18 +48,13 @@ impl Action {
     fn of_key(vk: usize) -> Option<Action> {
         ALL.iter().find(|a| a.1 == vk).map(|a| a.0)
     }
-
-    fn of_command(id: usize) -> Option<Action> {
-        ALL.iter().find(|a| usize::from(a.2) == id).map(|a| a.0)
-    }
 }
 
-/// What a window message asks for: a first press of F8, F10 or F11 (not a key repeat, lparam bit 30), or
-/// one of our menu items. F10 comes as a system key.
+/// What a window message asks for: a first press of F8, F10 or F11 (not a key repeat, lparam bit 30).
+/// F10 comes as a system key.
 fn action_of(message: u32, wparam: usize, lparam: isize) -> Option<Action> {
     match message {
         WM_KEYDOWN | WM_SYSKEYDOWN if lparam & (1 << 30) == 0 => Action::of_key(wparam),
-        WM_COMMAND if lparam == 0 && wparam >> 16 == 0 => Action::of_command(wparam & 0xFFFF),
         _ => None,
     }
 }
@@ -94,24 +86,76 @@ pub fn on_message(message: u32, wparam: usize, lparam: isize) -> bool {
     true
 }
 
-/// The game window's menu bar: our three items at its right. Null during a bench run.
-pub fn menu() -> HMENU {
-    if crate::klbf_bench::active() {
-        return std::ptr::null_mut();
+/// (27/11) The keys, said at the caption's right.
+const HINTS: &str = "F8 Screenshot \u{b7} F10 Settings \u{b7} F11 Restart";
+
+/// `caption` with the keys pushed to its right end, just before the window's buttons, by spaces measured
+/// in the caption's font; the caption alone when they do not fit, during a bench, or without our
+/// launcher (`KLBF_LAUNCHER`: F10 and F11 need it). Measured at each call (the window may have changed size).
+pub(crate) fn with_hints(hwnd: usize, caption: String) -> String {
+    if std::env::var_os("KLBF_LAUNCHER").is_none() || crate::klbf_bench::active() {
+        return caption;
     }
-    // SAFETY: a new menu and NUL-terminated texts.
+    match measure(hwnd, &caption).and_then(|([c, h, room], sp)| spaces(c, h, sp, room)) {
+        Some(n) => format!("{caption}{}{HINTS}", " ".repeat(n)),
+        None => caption,
+    }
+}
+
+/// How many spaces of `space` px put hints `hints` px wide at the end of `room` px after a caption
+/// `caption` px wide; `None` when less than two spaces would be left between them.
+fn spaces(caption: i32, hints: i32, space: f32, room: i32) -> Option<usize> {
+    let gap = (room - caption - hints) as f32;
+    (space > 0.0 && gap >= 2.0 * space).then(|| (gap / space) as usize)
+}
+
+/// ([caption, hints, room], one space) in px (a space's width from a hundred, so a long run of them adds up): the caption's font (the system's), the room from after the
+/// window's icon to its buttons (DWM's bounds, else three caption buttons' widths).
+fn measure(hwnd: usize, caption: &str) -> Option<([i32; 3], f32)> {
+    use windows_sys::Win32::Foundation::{HWND, RECT, SIZE};
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CAPTION_BUTTON_BOUNDS, DwmGetWindowAttribute};
+    use windows_sys::Win32::Graphics::Gdi::{CreateFontIndirectW, DeleteObject, GetDC, GetTextExtentPoint32W, ReleaseDC, SelectObject};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, GetWindowRect, NONCLIENTMETRICSW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSIZE, SM_CXSMICON, SPI_GETNONCLIENTMETRICS,
+        SystemParametersInfoW,
+    };
+    let hwnd = hwnd as HWND;
+    // SAFETY: plain queries; a font and a screen DC made and freed here.
     unsafe {
-        let m = CreateMenu();
-        if m.is_null() {
-            return m;
+        let mut ncm: NONCLIENTMETRICSW = std::mem::zeroed();
+        ncm.cbSize = size_of::<NONCLIENTMETRICSW>() as u32;
+        if SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, ncm.cbSize, (&raw mut ncm).cast(), 0) == 0 {
+            return None;
         }
-        for (i, (action, _, id)) in ALL.iter().enumerate() {
-            let text: Vec<u16> = action.label().encode_utf16().chain([0]).collect();
-            // The first item right-justified takes those after it to the right too.
-            let flags = if i == 0 { MF_STRING | MFT_RIGHTJUSTIFY } else { MF_STRING };
-            AppendMenuW(m, flags, usize::from(*id), text.as_ptr());
+        let mut window = RECT::default();
+        if GetWindowRect(hwnd, &mut window) == 0 {
+            return None;
         }
-        m
+        let mut buttons = RECT::default();
+        let left_of_buttons = if DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS as u32, (&raw mut buttons).cast(), size_of::<RECT>() as u32) >= 0 && buttons.left > 0 {
+            buttons.left
+        } else {
+            window.right - window.left - 3 * GetSystemMetrics(SM_CXSIZE)
+        };
+        let start = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) + GetSystemMetrics(SM_CXSMICON) + 8;
+        let room = left_of_buttons - start - 16;
+        let font = CreateFontIndirectW(&ncm.lfCaptionFont);
+        let dc = GetDC(std::ptr::null_mut());
+        if font.is_null() || dc.is_null() {
+            return None;
+        }
+        let old = SelectObject(dc, font);
+        let width = |s: &str| {
+            let t: Vec<u16> = s.encode_utf16().collect();
+            let mut size = SIZE { cx: 0, cy: 0 };
+            GetTextExtentPoint32W(dc, t.as_ptr(), t.len() as i32, &mut size);
+            size.cx
+        };
+        let out = ([width(caption), width(HINTS), room], width(&" ".repeat(100)) as f32 / 100.0);
+        SelectObject(dc, old);
+        DeleteObject(font);
+        ReleaseDC(std::ptr::null_mut(), dc);
+        Some(out)
     }
 }
 
@@ -213,22 +257,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_key_and_menu_item_does_one_thing_on_one_press() {
+    fn each_key_does_one_thing_on_one_press() {
         let down = |vk: usize| action_of(WM_KEYDOWN, vk, 1);
         assert_eq!(down(0x77), Some(Action::Screenshot));
         assert_eq!(down(0x7A), Some(Action::Restart));
         assert_eq!(action_of(WM_SYSKEYDOWN, 0x79, 1), Some(Action::Settings), "F10 comes as a system key");
         assert_eq!(down(0x78), None, "F9 is not ours");
         assert_eq!(action_of(WM_KEYDOWN, 0x7A, 1 << 30), None, "a held key's repeats do nothing");
-        assert_eq!(action_of(WM_COMMAND, 0x4B0A, 0), Some(Action::Settings));
-        assert_eq!(action_of(WM_COMMAND, 0x4B08, 0), Some(Action::Screenshot));
-        assert_eq!(action_of(WM_COMMAND, 0x1_4B0A, 0), None, "an accelerator's command is the title's");
-        assert_eq!(action_of(WM_COMMAND, 0x4B0A, 1234), None, "a control's command is the title's");
         assert_eq!(Action::Settings.exit_code(), Some(10));
         assert_eq!(Action::Restart.exit_code(), Some(11));
         assert_eq!(Action::Screenshot.exit_code(), None);
-        let labels: Vec<_> = ALL.iter().map(|a| a.0.label()).collect();
-        assert_eq!(labels, ["Screenshot (F8)", "Restart (F11)", "Settings (F10)"]);
+    }
+
+    /// The hints end where the caption's room ends; dropped when fewer than two spaces would separate them.
+    #[test]
+    fn the_hints_are_pushed_to_the_right_or_dropped() {
+        // 1600 px of room, a 700 px caption, 300 px of hints, 5 px spaces: 600 px of spaces.
+        assert_eq!(spaces(700, 300, 5.0, 1600), Some(120));
+        let n = spaces(700, 300, 3.4, 1600).unwrap() as f32;
+        assert!(700.0 + n * 3.4 + 300.0 <= 1600.0 && 700.0 + (n + 1.0) * 3.4 + 300.0 > 1600.0, "as far right as it fits");
+        assert_eq!(spaces(1295, 300, 5.0, 1600), None, "one space left: no hints");
+        assert_eq!(spaces(1290, 300, 5.0, 1600), Some(2));
+        assert_eq!(spaces(700, 300, 0.0, 1600), None, "no font measured");
+        assert_eq!(spaces(1500, 300, 5.0, 1600), None, "a caption longer than the room");
     }
 
     #[test]

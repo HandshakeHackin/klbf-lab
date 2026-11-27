@@ -1192,7 +1192,7 @@ pub(crate) fn rdna2_safe_defaults() -> bool {
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
 /// Reject it before creating a device in diagnostics' software-only mode.
 /// (27/11) The first adapter in DXGI's high-performance order that is not software, if DXGI 1.6 can say.
-fn high_performance_adapter() -> Option<IDXGIAdapter1> {
+pub(crate) fn high_performance_adapter() -> Option<IDXGIAdapter1> {
     // SAFETY: plain DXGI adapter queries.
     unsafe {
         let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
@@ -10435,6 +10435,8 @@ impl Meter {
         if !crate::klbf_bench::holds_title() {
             // While pipelines are being made: "· compiling N shaders" (the frame line's counter).
             let text = crate::klbf_bench::caption(fps, low1, draws, crate::pipeline::making());
+            // (KLBF Lab) The keys at the caption's right, before the window's buttons.
+            let text = crate::klbf_keys::with_hints(hwnd.0 as usize, text);
             let text: Vec<u16> = text.encode_utf16().chain([0]).collect();
             *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd.0 as usize, text));
         }
@@ -10442,12 +10444,17 @@ impl Meter {
             let _ = std::thread::Builder::new()
                 .name("victory-caption".into())
                 .spawn(|| {
+                    // (KLBF Lab) The same text is not set again: each change is an event the taskbar
+                    // (and tools hooked on it) redraws for.
+                    let mut last: Vec<u16> = Vec::new();
                     loop {
                         let next = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
                         match next {
+                            Some((_, text)) if text == last => {}
                             // SAFETY: a window handle and a NUL-terminated text.
                             Some((hwnd, text)) => unsafe {
                                 let _ = SetWindowTextW(HWND(hwnd as *mut _), PCWSTR(text.as_ptr()));
+                                last = text;
                             },
                             None => std::thread::sleep(std::time::Duration::from_millis(100)),
                         }
@@ -11337,7 +11344,7 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // (KLBF Lab) F8, F10, F11 and the menu bar's items.
+    // (KLBF Lab) F8, F10, F11.
     if crate::klbf_keys::on_message(message, wparam.0, lparam.0) {
         return LRESULT(0);
     }
@@ -11367,9 +11374,7 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             right: width as i32,
             bottom: height as i32,
         };
-        // (KLBF Lab) Our menu bar (Screenshot, Restart, Settings), the client size kept.
-        let menu = HMENU(crate::klbf_keys::menu());
-        AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, !menu.0.is_null())?;
+        AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false)?;
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
@@ -11380,7 +11385,7 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             rect.right - rect.left,
             rect.bottom - rect.top,
             None,
-            (!menu.0.is_null()).then_some(menu),
+            None,
             Some(instance.into()),
             None,
         )

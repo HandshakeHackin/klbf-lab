@@ -140,14 +140,16 @@ function Get-KlbfShotsDir($Choice) {
 
 # (27/11) What play.ps1 does when the game ends with $Code: 10 (F10, Settings) opens the settings window,
 # whose Play starts it again; 11 (F11, Restart) starts it again with the same settings; anything else stops.
-function Get-KlbfNextStart([int]$Code) {
+# After a benchmark (whatever the exit): 'quick', the settings window on the Quick tab with the new card.
+function Get-KlbfNextStart([int]$Code, [bool]$Bench = $false) {
+    if ($Bench) { return 'quick' }
     switch ($Code) { 10 { 'settings' } 11 { 'restart' } default { '' } }
 }
 
 # F11's start: play.ps1's own parameters again, without the settings window.
 function Get-KlbfRestartArgs($Bound) {
     $a = @{}
-    foreach ($k in $Bound.Keys) { if ($k -ne 'Setup') { $a[$k] = $Bound[$k] } }
+    foreach ($k in $Bound.Keys) { if ($k -notin 'Setup', 'Quick') { $a[$k] = $Bound[$k] } }
     $a.NoMenu = [switch]$true
     $a
 }
@@ -201,6 +203,15 @@ function Invoke-KlbfShortcutOffer($Spec, $Ask, [string]$Path = (Join-Path ([Envi
     Set-Content -LiteralPath $mark -Value $(if ($yes) { 'yes' } else { 'no' }) -Encoding utf8
     if (-not $yes) { return '' }
     Set-KlbfShortcut $Spec $Ask $Path
+}
+
+# (27/11) This process groups with the game under one KLBF Lab taskbar button (the game sets the same id),
+# shown with the windows' flask instead of PowerShell's icon.
+function Set-KlbfAppId {
+    try {
+        if (-not ('KlbfAppId' -as [type])) { Add-Type -Namespace '' -Name KlbfAppId -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string id);' }
+        [KlbfAppId]::SetCurrentProcessExplicitAppUserModelID('PastiiJay.KLBFLab') -eq 0
+    } catch { $false }
 }
 
 # Every key of KLBF Lab, as the Quick tab lists them.
@@ -414,7 +425,13 @@ function Get-KlbfHardware {
         if ($v) { $gpu = [string]$v.Name; $vram = [double]$v.AdapterRAM }
     }
     # Installed memory (Windows' total leaves out what is reserved: 31.2 GB on a 32 GB PC)
-    $ram = [double](Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | Measure-Object Capacity -Sum).Sum
+    $ram = 0
+    try {
+        if (-not ('KlbfMem' -as [type])) { Add-Type -Namespace '' -Name KlbfMem -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool GetPhysicallyInstalledSystemMemory(out ulong kb);' }
+        $kb = [uint64]0
+        if ([KlbfMem]::GetPhysicallyInstalledSystemMemory([ref]$kb)) { $ram = [double]$kb * 1KB }
+    } catch {}
+    if (-not $ram) { $ram = [double](Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | Measure-Object Capacity -Sum).Sum }
     if (-not $ram) { $ram = [double](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory }
     @{ gpu = $gpu; vramGB = [math]::Round($vram / 1GB); ramGB = [math]::Round($ram / 1GB); screen = Get-KlbfScreenSize }
 }
@@ -470,8 +487,10 @@ function Get-KlbfUpscalerName($Hw, [string]$Cache) {
 # Profile X, the built-in (console) upscaler, the largest title mode not above the screen, no frame
 # generation, hooks and texture trim. The Your PC panel's button applies the hardware table instead.
 function Get-KlbfUniversal($Hw) {
+    # (27/11, owner) Every PC: Profile X, AMD FSR (FSR 4 on RDNA 4, FSR 3.1 elsewhere) Ultra Performance, no
+    # frame generation, Advanced on. Where FSR cannot start, the game falls back to its own upscaler by itself.
     $c = Get-KlbfDefaults
-    $c.upscaler = 'title'; $c.frameGen = $false
+    $c.upscaler = 'fsr'; $c.preset = 'ultraperformance'; $c.frameGen = $false; $c.advanced = $true
     # (27/11) Profile X: output 3840x2160 on every screen (Windows scales the window down). Below it the
     # title's HUD and menus get too big and their texts overlap (known issue); the cost is the upscaler's.
     $c.output = '3840x2160'
@@ -1357,10 +1376,11 @@ function Update-KlbfForm($c) {
 }
 
 # Shows the window: @{ action = 'play'|'prepare'|'bench'; choice; benchPlayer; benchSave } or $null if closed.
-function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '', [string]$Data = '', [string]$Game = '', [string]$Cache = '') {
+function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '', [string]$Data = '', [string]$Game = '', [string]$Cache = '', [int]$Tab = 0) {
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
     $info = @{ victory = $Victory; data = $Data; game = $Game; cache = $Cache; windows = $(if ($os) { "$($os.Caption) (build $($os.BuildNumber))" } else { '' }) }
     $m = New-KlbfMenuForm $Choice (Get-KlbfHardware) $ShaderStatus $info
+    $m.c.tabs.SelectedIndex = $Tab
     [void]$m.form.ShowDialog()
     if (-not $m.form.Tag) { return $null }
     @{ action = [string]$m.form.Tag; choice = Get-KlbfFormChoice $m.c; benchPlayer = $m.c.benchPlayer; benchSave = $m.c.benchSave }
@@ -1403,10 +1423,23 @@ function Get-KlbfPrepareBar([double[]]$Weights, [int]$Phase, [double]$Fraction) 
     [int][math]::Round(1000 * ($before + $Weights[$Phase] * [math]::Min(1.0, [math]::Max(0.0, $Fraction))) / $sum)
 }
 
-# A process and every process it started (victory's workers), ended.
+# A process and every process it started (victory's workers, theirs too), ended: the whole tree is listed
+# first (a child outlives its parent), then each ended. The number still running after up to 3 s (0: all gone).
 function Stop-KlbfTree([int]$Id) {
-    foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$Id" -ErrorAction SilentlyContinue)) { Stop-KlbfTree $c.ProcessId }
-    Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId)
+    $tree = New-Object System.Collections.Generic.List[int]
+    $tree.Add($Id)
+    for ($i = 0; $i -lt $tree.Count; $i++) {
+        foreach ($p in $all) { if ($p.ParentProcessId -eq $tree[$i] -and -not $tree.Contains([int]$p.ProcessId)) { $tree.Add([int]$p.ProcessId) } }
+    }
+    foreach ($p in $tree) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+    $left = $tree
+    for ($t = 0; $t -lt 30; $t++) {
+        $left = @($tree | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if (-not $left) { return 0 }
+        Start-Sleep -Milliseconds 100
+    }
+    $left.Count
 }
 
 # (27/11) The whole preparation in one window, from 0 to done, before Play or the bench: 1. translating the

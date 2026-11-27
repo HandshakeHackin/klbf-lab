@@ -14,6 +14,27 @@ pub fn host_device() -> Option<*mut c_void> {
     crate::host::host().map(|h| windows::core::Interface::as_raw(&h.device))
 }
 
+/// (KLBF Lab, 27/11) `f` given a throwaway D3D12 device on the card the host will use (the
+/// high-performance one, else Windows' default), before the host is made: to try a PC library first.
+/// `None` without a D3D12 card.
+pub fn with_probe_device<R>(f: impl FnOnce(*mut c_void) -> R) -> Option<R> {
+    use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
+    use windows::Win32::Graphics::Direct3D12::{D3D12CreateDevice, ID3D12Device};
+    let mut device: Option<ID3D12Device> = None;
+    // SAFETY: plain object creation.
+    unsafe {
+        let made = match crate::host::high_performance_adapter() {
+            Some(a) => D3D12CreateDevice(&a, D3D_FEATURE_LEVEL_12_0, &mut device),
+            None => D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device),
+        };
+        if made.is_err() {
+            let _ = D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device);
+        }
+    }
+    let device = device?;
+    Some(f(windows::core::Interface::as_raw(&device)))
+}
+
 /// Whether `object` is the device the title created.
 pub fn is_title_device(object: *const c_void) -> bool {
     std::ptr::eq(object, (&raw const crate::device::DEVICE).cast())

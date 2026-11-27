@@ -81,10 +81,14 @@ param(
     [hashtable]$More = @{},
     [switch]$Setup,
     [switch]$NoMenu,
-    [switch]$PrintEnv
+    [switch]$PrintEnv,
+    [switch]$Quick,
+    [switch]$Cancelled,
+    [switch]$SkipShaderCheck
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'launcher-menu.ps1')
+if (-not $env:KLBF_LAUNCHER_DIR) { $null = Set-KlbfAppId }
 # (27/11) First start with the Saved Games home: the older AppData folder's saves, settings, backups and
 # cache are COPIED into it once (the older folder is left as it was).
 if (-not $PrintEnv -and -not (Test-Path -LiteralPath (Get-KlbfHome))) {
@@ -93,8 +97,8 @@ if (-not $PrintEnv -and -not (Test-Path -LiteralPath (Get-KlbfHome))) {
 # The setup window's choice (launcher-menu.ps1), only when no settings switch is given.
 $menuAction = ''
 $passOn = @{}
-foreach ($k in 'Game', 'Build', 'Victory', 'Cache', 'Data', 'FfxDir') { if ($PSBoundParameters.ContainsKey($k)) { $passOn[$k] = $PSBoundParameters[$k] } }
-$notSettings = @($passOn.Keys) + @('Setup', 'NoMenu', 'PrintEnv')
+foreach ($k in 'Game', 'Build', 'Victory', 'Cache', 'Data', 'FfxDir', 'SkipShaderCheck') { if ($PSBoundParameters.ContainsKey($k)) { $passOn[$k] = $PSBoundParameters[$k] } }
+$notSettings = @($passOn.Keys) + @('Setup', 'NoMenu', 'PrintEnv', 'Quick', 'Cancelled', 'SkipShaderCheck')
 $explicit = @($PSBoundParameters.Keys | Where-Object { $_ -notin $notSettings })
 if (-not $explicit) {
     $settingsFile = Join-Path (Get-KlbfLauncherDir) 'settings.json'
@@ -110,10 +114,10 @@ if (-not $explicit) {
             $v = if ($Victory) { $Victory } else { Join-Path $PSScriptRoot "target\$Build\victory.exe" }
             $m = Join-Path (Get-KlbfCacheDir $Cache) 'scarlett-shaders-ahead.txt'
             $ready = (Test-Path -LiteralPath $m) -and ((Get-Content -LiteralPath $m -TotalCount 1) -eq (Get-KlbfShaderStamp $v $Build '1' ''))
-            $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared yet (Play offers it).' }
+            $status = if ($Cancelled) { "Preparation cancelled $([char]0x2014) shaders not ready (Play will offer it again)." } elseif ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared yet (Play prepares them first).' }
         } catch {}
         $known = if ($Game) { $Game } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt')) { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt') -TotalCount 1).Trim() } else { '' }
-        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path (Get-KlbfHome) 'data' }) $known $Cache
+        $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path (Get-KlbfHome) 'data' }) $known $Cache $(if ($Quick) { 2 } else { 0 })
         if (-not $picked) { exit 0 }
         $choice = $picked.choice; $menuAction = $picked.action
         Save-KlbfSettings $choice $settingsFile
@@ -269,6 +273,8 @@ if ($benchLabel) { $set.KLBF_BENCH_SAVE = $benchLabel }
 # (27/11) F8's screenshots: the folder chosen in Settings, else Pictures\KLBF Lab
 $saved = Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')
 $set.KLBF_SHOTS_DIR = Get-KlbfShotsDir $saved
+# (27/11) Started by our launcher: the game says F8 / F10 / F11 in its caption (F10 and F11 come back here)
+$set.KLBF_LAUNCHER = '1'
 # (27/11) The Display chosen in Settings: the game window opens centred on that monitor (else the main one)
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }
@@ -291,17 +297,16 @@ $rpf = Join-Path $Game 'shaders.rpf'
 $mark = Join-Path $Cache 'scarlett-shaders-ahead.txt'
 $stamp = Get-KlbfShaderStamp $Victory $Build $set['VICTORY_PROBE_RAYS'] $set['VICTORY_BVH_BUILDER']
 $have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -TotalCount 1 } else { '' }
-# From the setup window: "Prepare shaders", or Play with shaders to prepare (asked: Prepare now / Later).
-if ($menuAction -and -not $NoPrecompile -and ($menuAction -eq 'prepare' -or $have -ne $stamp)) {
-    if (-not (Test-Path -LiteralPath $rpf -PathType Leaf)) {
-        Write-Warning "No shaders.rpf in ${Game}: the shaders will be translated while playing."
-    } elseif ($menuAction -eq 'prepare' -or (Confirm-KlbfPrepare (Get-KlbfPrepareReason $have $stamp))) {
-        # (27/11) Translation and the pipelines of earlier runs, in the one window
-        if (Show-KlbfPrepare $Victory $rpf (Join-Path $Cache 'pipelines\known-pipelines.bin')) { Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8 }
-        $warmed = $true
-    }
+# From the setup window: "Prepare shaders", or Play / Run benchmark with shaders to prepare. (27/11, owner) No
+# "Later": the preparation runs first, in its window, and only its end starts the game; Cancel (or a failure)
+# goes back to KLBF Lab Settings, nothing started.
+if ($menuAction -and -not $NoPrecompile -and ($menuAction -eq 'prepare' -or $have -ne $stamp) -and (Test-Path -LiteralPath $rpf -PathType Leaf)) {
+    # Translation and the pipelines of earlier runs, in the one window
+    $prepared = Show-KlbfPrepare $Victory $rpf (Join-Path $Cache 'pipelines\known-pipelines.bin')
+    if ($prepared) { Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8; $have = $stamp }
+    $warmed = $true
+    if (-not $prepared) { & $PSCommandPath -Setup -Cancelled @passOn; exit $LASTEXITCODE }
     if ($menuAction -eq 'prepare') { & $PSCommandPath -Setup @passOn; exit $LASTEXITCODE }
-    $have = $stamp
 }
 if (-not $NoPrecompile -and $have -ne $stamp) {
     if (Test-Path -LiteralPath $rpf -PathType Leaf) {
@@ -321,14 +326,20 @@ if (-not $NoPrecompile -and $have -ne $stamp) {
 # starts. Only new ones are made; it goes on where it stopped. -NoPrecompile skips it.
 $book = Join-Path $Cache 'pipelines\known-pipelines.bin'
 if (-not $NoPrecompile -and (Test-Path -LiteralPath $book) -and $menuAction -and -not $warmed) {
-    # (27/11) From the settings window: the pipelines in a progress window, never a hidden wait
-    $null = Show-KlbfPrepare $Victory $rpf $book -NoTranslate
+    # (27/11) From the settings window: the pipelines in a progress window, never a hidden wait; Cancel goes back
+    if (-not (Show-KlbfPrepare $Victory $rpf $book -NoTranslate)) { & $PSCommandPath -Setup -Cancelled @passOn; exit $LASTEXITCODE }
 } elseif (-not $NoPrecompile -and (Test-Path -LiteralPath $book) -and -not $warmed) {
     Write-Host 'Making the effects of earlier runs ahead, so they do not compile while playing (only new ones; resumes where it stopped)...'
     & $Victory warm
     if ($LASTEXITCODE -ne 0) { Write-Warning 'Making effects ahead stopped early; the rest are made while playing.' }
 }
 if ($OnlyPrecompile) { exit 0 }
+# (27/11, owner) Never a game on shaders not prepared for this build (-SkipShaderCheck, a developer switch the
+# window never gives, starts it anyway).
+$have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -TotalCount 1 } else { '' }
+if ($have -ne $stamp -and -not $SkipShaderCheck) {
+    throw "The game's shaders are not prepared for this build: the game was not started. Start KLBF Lab again and let the preparation finish$(if (-not (Test-Path -LiteralPath $rpf -PathType Leaf)) { " (no shaders.rpf in the game folder)" })."
+}
 # (27/11) The bench starts only on a ready cache: the shaders translated for this build, and the effects made by
 # about ten minutes of play (otherwise they compile during the run and the figures are not comparable).
 if ($Bench) {
@@ -368,7 +379,8 @@ if ($Fsr) {
 # (its Play starts the game again), or the same start again; the saves are backed up again at that start.
 # ponytail: a new play.ps1 per relaunch (nested), fine for a session's few dozen restarts.
 $code = $LASTEXITCODE
-switch (Get-KlbfNextStart $code) {
+switch (Get-KlbfNextStart $code ([bool]$Bench)) {
+    'quick' { $again = $passOn; & $PSCommandPath -Setup -Quick @again; exit $LASTEXITCODE }
     'settings' { $again = $passOn; & $PSCommandPath -Setup @again; exit $LASTEXITCODE }
     'restart' { $again = Get-KlbfRestartArgs $PSBoundParameters; & $PSCommandPath @again; exit $LASTEXITCODE }
 }
