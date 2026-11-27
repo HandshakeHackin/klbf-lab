@@ -540,6 +540,8 @@ pub(crate) fn end_title(why: &'static str, then: Box<dyn FnOnce() + Send>) {
     if ENDING.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Before the suspend: a pad keeps rumbling after the process ends.
+    super::gameinput::stop_rumble();
     let constrain = constrained().clone();
     let suspend = routines().clone();
     tracing::info!(
