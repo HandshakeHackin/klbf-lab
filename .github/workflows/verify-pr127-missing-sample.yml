@@ -1,0 +1,23 @@
+name: Verify PR 127 missing segment sample
+
+on:
+  push:
+    branches:
+      - verify/pr127-retain-tight-query-failure
+
+permissions:
+  contents: read
+
+jobs:
+  focused-windows-test:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Missing sample and hysteresis regression
+        run: cargo test -p victory-gpu --locked --features diagnostics --lib tight_state_survives_a_missing_sample_and_uses_hysteresis
+      - name: Exact aperture selection regressions
+        run: cargo test -p victory-gpu --locked --features diagnostics --lib fullest_aperture
+      - name: Compile the diagnostic configuration
+        run: cargo build --profile diag -p victory --features diagnostics --locked
