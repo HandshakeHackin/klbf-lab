@@ -45,6 +45,11 @@ try {
     $order = { param($have, $latest) Set-Content -LiteralPath $json -Value ((Get-Content -LiteralPath $json -Raw) -replace '"tag_name":\s*"[^"]*"', "`"tag_name`": `"$latest`"") ; $null -ne (Get-KlbfUpdate $have $json) }
     Check 'YY.MM.N order: 26.11.1 < 26.11.2 < 26.12.1 < 27.1.1, v0.27.0 older' ((& $order 'v26.11.2' 'v26.12.1') -and (& $order 'v26.12.1' 'v27.1.1') -and (& $order 'v26.11.9' 'v26.11.10') -and (& $order 'v0.27.0' 'v26.11.1') -and -not (& $order 'v26.11.1' 'v0.28.0') -and -not (& $order 'v26.12.1' 'v26.11.2'))
     $null = & $order 'v26.11.1' 'v26.11.2'
+    # (low-end beta) A beta counts as its stable number: the next stable is offered, never a beta tag
+    Check 'beta v26.11.3-lowend-beta1: v26.11.4 offered, v26.11.3 not' ((& $order 'v26.11.3-lowend-beta1' 'v26.11.4') -and -not (& $order 'v26.11.3-lowend-beta1' 'v26.11.3'))
+    Check 'stable v26.11.3: a beta tag is never offered' (-not (& $order 'v26.11.3' 'v26.11.4-lowend-beta1'))
+    Check 'beta label' ((Get-KlbfVersionText 'v26.11.3-lowend-beta1') -eq 'low-end beta 1' -and (Get-KlbfVersionText 'v26.11.3') -eq 'v26.11.3' -and (Get-KlbfVersionText '') -eq 'dev')
+    $null = & $order 'v26.11.1' 'v26.11.2'
     Check 'offline check: silent $null' ($null -eq (Get-KlbfUpdate 'v26.11.1' 'http://127.0.0.1:9/latest'))
 
     $r = Install-KlbfUpdate @{ tag = 'v26.11.2'; zip = 'http://127.0.0.1:9/x.zip'; sha = $sha } $b

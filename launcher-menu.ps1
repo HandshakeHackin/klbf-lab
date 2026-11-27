@@ -111,7 +111,18 @@ function Test-KlbfLostSaves([string]$Data, [string[]]$From = (Get-KlbfOldHomes))
 # The owner's setting: Profile X, FSR 4 Performance, 3840x2160, frame generation, hooks and texture trim
 # (= -Tout -FsrQuality performance -Output 3840x2160).
 function Get-KlbfDefaults {
-    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1; borderless = $false }
+    [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1; borderless = $false
+        # (low-end beta) Experimental switches, all off: Experimental tab, play.ps1's -HeapSkip and siblings
+        heapSkip = $false; heapSkipVerify = $false; rebarUpload = $false; refreshCoalesce = $false; pagePool = $false }
+}
+
+# (low-end beta) The experimental choices: play.ps1 switch, environment variable, the tab's text and tooltip.
+$script:KlbfExperimental = [ordered]@{
+    heapSkip = @{ switch = 'HeapSkip'; text = 'Heap skip (KLBF_HEAP_SKIP)'; tip = 'Skips descriptor slots the game rewrote unchanged; may show a stale texture.' }
+    heapSkipVerify = @{ switch = 'HeapSkipVerify'; text = 'Verify mode (slower, for testing)'; tip = 'Checks every skip anyway and writes any mismatch to the log.' }
+    rebarUpload = @{ switch = 'RebarUpload'; text = 'ReBAR upload (KLBF_REBAR_UPLOAD), needs Resizable BAR / SAM'; tip = 'Uploads go straight into the card''s memory; no effect without Resizable BAR.' }
+    refreshCoalesce = @{ switch = 'RefreshCoalesce'; text = 'Refresh coalesce (KLBF_REFRESH_COALESCE)'; tip = 'Joins buffer refreshes that touch into one.' }
+    pagePool = @{ switch = 'PagePool'; text = '16 GB memory pool (VICTORY_PAGE_POOL)'; tip = 'Shares texture memory pages to use less RAM on 16 GB PCs.' }
 }
 
 # Any object (a parsed JSON) over the defaults: unknown or invalid values keep the default.
@@ -127,6 +138,7 @@ function ConvertTo-KlbfChoice($o) {
     if ($o.game -is [string]) { $c.game = $o.game }
     if ($o.shotsDir -is [string]) { $c.shotsDir = $o.shotsDir }
     if ($o.borderless -is [bool]) { $c.borderless = $o.borderless }
+    foreach ($k in $script:KlbfExperimental.Keys) { if ($o.$k -is [bool]) { $c[$k] = $o.$k } }
     if (($o.display -is [int] -or $o.display -is [long]) -and $o.display -ge -1 -and $o.display -lt 16) { $c.display = [int]$o.display }
     $c
 }
@@ -240,6 +252,11 @@ function Install-KlbfComponent([ValidateSet('agility', 'ffx')][string]$Name, [st
 
 # (27/11) Updates. This build's version: the VERSION file of the release zip ('' in a source checkout, which
 # is never updated).
+# (low-end beta) What the window shows for a VERSION: "low-end beta 1" for v26.11.3-lowend-beta1.
+function Get-KlbfVersionText([string]$Version) {
+    if (-not $Version) { 'dev' } elseif ($Version -match '-lowend-beta(\d+)$') { "low-end beta $($Matches[1])" } else { $Version }
+}
+
 function Get-KlbfVersion([string]$BuildDir = $PSScriptRoot) {
     $f = Join-Path $BuildDir 'VERSION'
     if (Test-Path -LiteralPath $f -PathType Leaf) { (Get-Content -LiteralPath $f -TotalCount 1).Trim() } else { '' }
@@ -249,7 +266,9 @@ function Get-KlbfVersion([string]$BuildDir = $PSScriptRoot) {
 # notes, '' if absent), else $null (offline, rate limit, not newer, no version). $Url: a local JSON for tests.
 function Get-KlbfUpdate([string]$Current, [string]$Url = $(if ($env:KLBF_UPDATE_URL) { $env:KLBF_UPDATE_URL } else { 'https://api.github.com/repos/PastiiJay/klbf-lab/releases/latest' })) {
     $ver = { param($t) if ($t -match '^v(\d+\.\d+\.\d+)$') { [version]$Matches[1] } }
-    $have = & $ver $Current
+    # (low-end beta) A beta's VERSION (v26.11.3-lowend-beta1) counts as its stable number: the next stable is
+    # offered. Only plain tags are offered, and /releases/latest never lists a pre-release.
+    $have = & $ver ($Current -replace '-[a-z]+-beta\d+$', '')
     if (-not $have) { return $null }
     try {
         $r = if ($Url -notmatch '^https?://') { Get-Content -LiteralPath $Url -Raw | ConvertFrom-Json } else {
@@ -498,6 +517,7 @@ function Get-KlbfSwitches($Choice) {
     }
     if ($fsr -and $Choice.frameGen) { $s.FrameGen = $on }
     if ($Choice.advanced) { $s.Hooks = $on; $s.TexTrim = $on }
+    foreach ($k in $script:KlbfExperimental.Keys) { if ($Choice.$k -and ($k -ne 'heapSkipVerify' -or $Choice.heapSkip)) { $s[$script:KlbfExperimental[$k].switch] = $on } }
     $s
 }
 
@@ -1087,6 +1107,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     [System.Windows.Forms.Application]::EnableVisualStyles()
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'KLBF Lab Settings'
+    if ((Get-KlbfVersion) -match '-lowend-beta') { $f.Text += " $([char]0x2014) $(Get-KlbfVersionText (Get-KlbfVersion))" }
     Set-KlbfTheme $f
     $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
     # (27/11) Centred on the chosen display (moved when Display changes), not on the main one
@@ -1134,7 +1155,8 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $page = New-Object System.Windows.Forms.TabPage; $page.Text = 'Play'; $page.BackColor = $back; $page.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $savesPage = New-Object System.Windows.Forms.TabPage; $savesPage.Text = 'Saves'; $savesPage.BackColor = $back; $savesPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $quickPage = New-Object System.Windows.Forms.TabPage; $quickPage.Text = 'Quick'; $quickPage.BackColor = $back; $quickPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
-    $tabs.TabPages.AddRange(@($page, $savesPage, $quickPage))
+    $expPage = New-Object System.Windows.Forms.TabPage; $expPage.Text = 'Experimental'; $expPage.BackColor = $back; $expPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    $tabs.TabPages.AddRange(@($page, $savesPage, $quickPage, $expPage))
 
     # Your PC: what was found, a verdict per line (green: fine, amber: works with less, red: not supported)
     # Game folder: where the player's copy is; checked, and the room the cache needs on its drive
@@ -1228,6 +1250,22 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.delete = & $btn $g 'Delete' 406 22 62
     $c.save.Enabled = $null -ne $c.saved.SelectedItem
 
+    # (low-end beta) Experimental tab: untested switches, each off by default, one per run for A/B
+    $g = & $group $expPage 'Experimental (untested, all off by default)' 4 160
+    $c.exp = @{}
+    $y = 22
+    foreach ($k in $script:KlbfExperimental.Keys) {
+        $e = $script:KlbfExperimental[$k]
+        $x = if ($k -eq 'heapSkipVerify') { 32 } else { 12 }
+        $c.exp[$k] = New-Object System.Windows.Forms.CheckBox; $c.exp[$k].Text = $e.text
+        [void](& $white (& $add $g $c.exp[$k] $x $y (462 - $x) 22))
+        $c.tips.SetToolTip($c.exp[$k], $e.tip)
+        $y += 26
+    }
+    $c.exp.heapSkip.add_CheckedChanged({ $c.exp.heapSkipVerify.Enabled = $c.exp.heapSkip.Checked }.GetNewClosure())
+    $note = & $label $expPage 'Turn on one at a time and compare with all off: same save, same route, same length.' 6 170 480 36
+    $note.ForeColor = $soft
+
     # Saves tab
     $c.savesRoot = Get-KlbfSavesRoot $Info.data
     $c.savesList = New-Object System.Windows.Forms.ListView
@@ -1305,12 +1343,12 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.bugNote.ForeColor = $soft
     # (27/11) Bottom left, opposite Play: the version (small, grey), and the update line when Show-KlbfMenu's
     # check finds a newer release (Set-KlbfUpdateLine)
-    $c.versionLabel = & $label $f $(if ($c.version) { $c.version } else { 'dev' }) 16 884 56 18
+    $c.versionLabel = & $label $f (Get-KlbfVersionText $c.version) 16 884 84 18
     $c.versionLabel.ForeColor = $soft; $c.versionLabel.Font = New-KlbfFont 8
     $c.update = New-Object System.Windows.Forms.LinkLabel; $c.update.Visible = $false; $c.update.Font = New-KlbfFont 8
     $c.update.ForeColor = Get-KlbfColor $script:KlbfTheme.text; $c.update.LinkColor = Get-KlbfColor 0xA78BFA
     $c.update.ActiveLinkColor = Get-KlbfColor $script:KlbfTheme.text
-    [void](& $add $f $c.update 72 884 274 18)
+    [void](& $add $f $c.update 100 884 246 18)
     $c.play = & $btn $f 'Play' (& $col 2) 850 156 44
     Set-KlbfButton $c.play $true
     $c.play.Font = New-KlbfFont 12 'Bold'
@@ -1526,6 +1564,8 @@ function Set-KlbfFormChoice($c, $Choice) {
     $c.presets[$Choice.preset].Checked = $true
     $c.output.SelectedIndex = $c.output.Items.IndexOf($Choice.output)
     $c.fg.Checked = $Choice.frameGen; $c.adv.Checked = $Choice.advanced
+    foreach ($k in $c.exp.Keys) { $c.exp[$k].Checked = [bool]$Choice.$k }
+    $c.exp.heapSkipVerify.Enabled = $c.exp.heapSkip.Checked
     Update-KlbfForm $c
 }
 
@@ -1540,6 +1580,8 @@ function Get-KlbfFormChoice($c) {
         game = [string]$c.gamePath
         shotsDir = [string]$c.shotsDir
         borderless = [bool]($c.mode.SelectedIndex -eq 1)
+        heapSkip = [bool]$c.exp.heapSkip.Checked; heapSkipVerify = [bool]$c.exp.heapSkipVerify.Checked
+        rebarUpload = [bool]$c.exp.rebarUpload.Checked; refreshCoalesce = [bool]$c.exp.refreshCoalesce.Checked; pagePool = [bool]$c.exp.pagePool.Checked
         display = $(if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -eq $c.primaryIndex) { -1 } else { [int]$c.display.SelectedIndex })
     })
 }
