@@ -3,7 +3,7 @@
 What each KLBF Lab release adds, in one place, so anyone (or any tool) can see at a glance what a build has
 and what it lacks. Every switch below is an environment variable; "off" means it changes nothing unless set.
 
-Base: [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (Series X profile, sea fixed),
+Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
 ## v0.27 (27 Nov 2026)

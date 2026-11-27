@@ -1,6 +1,9 @@
-# KLBF Lab — AMD beta (branch `beta-amd`)
+# KLBF Lab v0.27.0 — stable (branch `stable-amd`)
 
-**Beta v12 (2026-11-27).** Based on [Op-lite/victory-scarlett](https://github.com/Op-lite/victory-scarlett) (itself on
+**Download the ready-to-play zip from the [Releases](https://github.com/PastiiJay/klbf-lab/releases/latest)** (extract, double-click "KLBF Lab", choose your game folder, Play). What changed: [CHANGELOG.md](CHANGELOG.md). The notes below are the earlier beta history.
+
+
+**Beta v12 (2026-11-27).** Based on Op-lite's victory-scarlett (no longer public) (itself on
 codec-d/cool_fox), plus our changes. v11, published earlier the same day, was pulled after an hour (characters in a
 T-pose, black textures in real play); v12 is the same code with the settings behind that left off.
 
