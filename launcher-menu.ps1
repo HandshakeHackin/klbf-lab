@@ -178,6 +178,53 @@ function Get-KlbfVbsText {
     ) -join "`r`n"
 }
 
+# (27/11) The official components the release zip does not carry, fetched once into the build folder:
+# 'agility' (Microsoft's DirectX 12 Agility SDK 1.620.2, NuGet, into D3D12\) and 'ffx' (AMD's signed
+# FidelityFX DLLs, SDK v2.4.0 / FSR 4.1.2, AMD's GitHub at the tag's commit, into ffx\), each file checked
+# against its SHA-256 before it is put in place, the license beside them. $true when all are there.
+function Install-KlbfComponent([ValidateSet('agility', 'ffx')][string]$Name, [string]$BuildDir, [switch]$CheckOnly) {
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    $c = @{
+        agility = @{ dir = 'D3D12'; zip = 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.620.2'; license = @('LICENSE.txt', 'LICENSE-Microsoft-Agility-SDK.txt')
+            files = [ordered]@{
+                'build/native/bin/x64/D3D12Core.dll'      = '70a6d47d335b4a15180544c01a35b84474522a369dc582d85fe057313a3aeaa0'
+                'build/native/bin/x64/d3d12SDKLayers.dll' = '3140822f550003d322b0a0681e0c40af7364c561296a1d7eeb96b3258c9cd32d'
+            } }
+        ffx = @{ dir = 'ffx'; base = 'https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/7539ae8b6568ad29ed78a753404351daf3b5cca7/Kits/FidelityFX'; license = @('docs/license.md', 'LICENSE-AMD-FidelityFX.md')
+            files = [ordered]@{
+                'signedbin/amd_fidelityfx_loader_dx12.dll'          = 'e2191d3c0828be45eb8affd4e3ec0378f2293adc345b772a7170edcf3b021ecb'
+                'signedbin/amd_fidelityfx_upscaler_dx12.dll'        = 'aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace'
+                'signedbin/amd_fidelityfx_framegeneration_dx12.dll' = 'e6843252f58b0341a0d80f6a20bc0d840643ee95bc48c22cac08745344577bb6'
+            } }
+    }[$Name]
+    $dst = Join-Path $BuildDir $c.dir
+    $have = { param($rel) Test-Path -LiteralPath (Join-Path $dst (Split-Path -Leaf $rel)) }
+    if (@($c.files.Keys | Where-Object { -not (& $have $_) }).Count -eq 0) { return $true }
+    if ($CheckOnly) { return $false }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "klbf-$Name-$([guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $get = { param($rel) $out = Join-Path $tmp ($rel -replace '/', '_'); Invoke-WebRequest -UseBasicParsing "$($c.base)/$rel" -OutFile $out; $out }
+        if ($c.zip) {
+            Invoke-WebRequest -UseBasicParsing $c.zip -OutFile (Join-Path $tmp 'p.zip')
+            Expand-Archive -LiteralPath (Join-Path $tmp 'p.zip') -DestinationPath (Join-Path $tmp 'p')
+            $get = { param($rel) Join-Path (Join-Path $tmp 'p') $rel }
+        }
+        $got = [ordered]@{}
+        foreach ($rel in $c.files.Keys) {
+            $f = & $get $rel
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash -ne $c.files[$rel]) { return $false }
+            $got[$rel] = $f
+        }
+        $lic = & $get $c.license[0]
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        foreach ($rel in $got.Keys) { Copy-Item -LiteralPath $got[$rel] -Destination (Join-Path $dst (Split-Path -Leaf $rel)) -Force }
+        Copy-Item -LiteralPath $lic -Destination (Join-Path $dst $c.license[1]) -Force
+        $true
+    } catch { $false } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 # Desktop\KLBF Lab.lnk (the Desktop known folder) from a spec; $Path for tests.
 function New-KlbfShortcut($Spec, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
     if ($Spec.vbs) { Set-Content -LiteralPath $Spec.vbs -Value (Get-KlbfVbsText) -Encoding ascii }
@@ -1381,6 +1428,28 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
     $info = @{ victory = $Victory; data = $Data; game = $Game; cache = $Cache; windows = $(if ($os) { "$($os.Caption) (build $($os.BuildNumber))" } else { '' }) }
     $m = New-KlbfMenuForm $Choice (Get-KlbfHardware) $ShaderStatus $info
     $m.c.tabs.SelectedIndex = $Tab
+    # (27/11) A first start from the release zip: the official components fetched while the window is open,
+    # on the status line, in a runspace of this process (no window). Play waits for nothing: play.ps1 checks.
+    $dir = if ($Victory) { Split-Path -Parent $Victory } else { '' }
+    $need = @(if ($dir) { 'agility', 'ffx' | Where-Object { -not (Install-KlbfComponent $_ $dir -CheckOnly) } })
+    if ($need) {
+        $ps = [powershell]::Create()
+        $null = $ps.AddScript("param(`$Need, `$Dir)`nfunction Install-KlbfComponent {${function:Install-KlbfComponent}}`n" +
+            '$r = @{}; foreach ($n in $Need) { $r[$n] = Install-KlbfComponent $n $Dir }; $r').AddArgument($need).AddArgument($dir)
+        $job = $ps.BeginInvoke()
+        $st = $m.c.status
+        $st.Text = if ($need -contains 'ffx') { "Downloading AMD FSR (official, from AMD's GitHub)$([char]0x2026)" } else { "Downloading DirectX 12 (official, from Microsoft)$([char]0x2026)" }
+        $tick = New-Object System.Windows.Forms.Timer; $tick.Interval = 500
+        $tick.add_Tick({
+            if (-not $job.IsCompleted) { return }
+            $tick.Stop()
+            $r = try { @($ps.EndInvoke($job))[0] } catch { @{} }
+            $st.Text = if ($need -contains 'ffx' -and -not $r.ffx) { 'AMD FSR unavailable (offline or check failed): the built-in upscaler is used.' }
+                elseif ($need -contains 'agility' -and -not $r.agility) { 'DirectX 12 download failed (offline?): Play tries again.' }
+                else { $ShaderStatus }
+        }.GetNewClosure())
+        $tick.Start()
+    }
     [void]$m.form.ShowDialog()
     if (-not $m.form.Tag) { return $null }
     @{ action = [string]$m.form.Tag; choice = Get-KlbfFormChoice $m.c; benchPlayer = $m.c.benchPlayer; benchSave = $m.c.benchSave }

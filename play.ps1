@@ -24,7 +24,9 @@
 #              | performance (1/2) | ultraperformance (1/3), AMD's presets. -Output 2560x1440 sets the title's output (one of its modes; 3840x2160 without).
 # -FrameGen    AMD FSR frame generation on top (KLBF_FRAMEGEN=1), with -FsrX or -Fsr only: two frames shown per
 #              real one. AMD recommends a base of 60 fps; at ~16 real fps it adds latency and artifacts.
-# -FfxDir      the folder with AMD's signed FidelityFX DLLs (default D:\KLBF-Lab\ffx-4.1.2: SDK 2.4.0, FSR 4.1.2).
+# -FfxDir      the folder with AMD's signed FidelityFX DLLs (SDK 2.4.0, FSR 4.1.2). Default: ffx\ beside
+#              victory.exe, fetched there once from AMD's GitHub (hash-checked), or D:\KLBF-Lab\ffx-4.1.2 when
+#              ffx\ has none and that has. Without them FSR is turned off: the built-in upscaler is used.
 # -Bench      KLBF Lab Bench BM-v1 (5 min, hands-off; your morning save in slot 1): Continue pressed for you.
 #              -BenchPlayer <GitHub login> names you on the card (else anonymous).
 #              -BenchLength Short (5 min, the board's test) | Medium (15) | Long (30) | Marathon (60), or the minutes: -BenchLength 60. Same place, longer.
@@ -63,7 +65,7 @@ param(
     [switch]$FrameGen,
     [ValidateSet('quality', 'balanced', 'performance', 'ultraperformance')][string]$FsrQuality = 'quality',
     [ValidateSet('', '1280x720', '1664x936', '1920x1080', '2560x1440', '3840x2160')][string]$Output = '',
-    [string]$FfxDir = 'D:\KLBF-Lab\ffx-4.1.2',
+    [string]$FfxDir = '',
     [switch]$AutoStart,
     [switch]$Bench,
     [string]$BenchPlayer = 'anonymous',
@@ -149,17 +151,25 @@ if (-not (Test-Path -LiteralPath $Victory -PathType Leaf)) {
     throw "No $Victory. Build it first: cargo build --profile diag -p victory --features diagnostics --locked"
 }
 # The exe asks for the DirectX 12 Agility SDK 1.620.2 in D3D12\ beside it (Windows' own runtime is older).
-# A source build has no such folder: fetched once from Microsoft's NuGet package (27/11, #82).
-$agility = Join-Path (Split-Path -Parent $Victory) 'D3D12'
-if (-not (Test-Path -LiteralPath (Join-Path $agility 'D3D12Core.dll'))) {
+# The release zip and a source build have no such folder: fetched once from Microsoft's NuGet package
+# (27/11, #82), hash-checked (Install-KlbfComponent).
+$buildDir = Split-Path -Parent $Victory
+if (-not (Install-KlbfComponent agility $buildDir -CheckOnly)) {
     Write-Host 'Fetching the DirectX 12 Agility SDK 1.620.2 (Microsoft NuGet, once)...'
-    $pkg = Join-Path $env:TEMP 'klbf-agility-1.620.2.zip'
-    $tmp = Join-Path $env:TEMP 'klbf-agility-1.620.2'
-    Invoke-WebRequest -UseBasicParsing 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.620.2' -OutFile $pkg
-    Expand-Archive -LiteralPath $pkg -DestinationPath $tmp -Force
-    New-Item -ItemType Directory -Force -Path $agility | Out-Null
-    Copy-Item (Join-Path $tmp 'build\native\bin\x64\D3D12Core.dll'), (Join-Path $tmp 'build\native\bin\x64\d3d12SDKLayers.dll') $agility
-    Remove-Item -Recurse -Force $pkg, $tmp
+    if (-not (Install-KlbfComponent agility $buildDir)) { throw 'The DirectX 12 Agility SDK could not be downloaded (offline, or the file did not match). Connect to the internet and start KLBF Lab again.' }
+}
+# (27/11) AMD FSR: ffx\ beside the exe, fetched once from AMD's GitHub (hash-checked). Offline or a mismatch:
+# FSR and frame generation off, the built-in upscaler used, and said.
+if (-not $FfxDir) {
+    $FfxDir = Join-Path $buildDir 'ffx'
+    $old = 'D:\KLBF-Lab\ffx-4.1.2'
+    if (-not (Install-KlbfComponent ffx $buildDir -CheckOnly) -and (Test-Path -LiteralPath (Join-Path $old 'amd_fidelityfx_upscaler_dx12.dll'))) { $FfxDir = $old }
+    elseif (($FsrX -or $Fsr -or $FrameGen) -and -not (Install-KlbfComponent ffx $buildDir)) {
+        $FsrX = $Fsr = $FrameGen = [switch]$false
+        $msg = 'AMD FSR could not be downloaded (offline, or the file did not match): this game runs with the built-in upscaler. Start KLBF Lab again online to get FSR.'
+        Write-Warning $msg
+        try { Add-Type -AssemblyName System.Windows.Forms; $null = [System.Windows.Forms.MessageBox]::Show($msg, 'KLBF Lab', 'OK', 'Information') } catch {}
+    }
 }
 if (-not $Cache) { $Cache = Get-KlbfCacheDir '' }
 if (-not $Data) { $Data = Join-Path (Get-KlbfHome) 'data' }
