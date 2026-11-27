@@ -233,22 +233,43 @@ function Get-KlbfVersion([string]$BuildDir = $PSScriptRoot) {
     if (Test-Path -LiteralPath $f -PathType Leaf) { (Get-Content -LiteralPath $f -TotalCount 1).Trim() } else { '' }
 }
 
-# The latest GitHub release when it is newer than $Current: @{ tag; page; zip; sha } (sha from the release
-# notes, '' if absent), else $null (offline, rate limit, not newer, no version). $Url: a local JSON for tests.
-function Get-KlbfUpdate([string]$Current, [string]$Url = $(if ($env:KLBF_UPDATE_URL) { $env:KLBF_UPDATE_URL } else { 'https://api.github.com/repos/PastiiJay/klbf-lab/releases/latest' })) {
+# (27/11) What GitHub's latest release says of $Current: @{ state = 'update'; update = @{ tag; page; zip; sha } }
+# (sha from the release notes, '' if absent), 'latest' (nothing newer), 'unknown' (offline, rate limit, an
+# unreadable answer) or 'none' (no version: a source checkout). $Url: a local JSON for tests.
+function Get-KlbfUpdateCheck([string]$Current, [string]$Url = $(if ($env:KLBF_UPDATE_URL) { $env:KLBF_UPDATE_URL } else { 'https://api.github.com/repos/PastiiJay/klbf-lab/releases/latest' })) {
     $ver = { param($t) if ($t -match '^v(\d+\.\d+\.\d+)$') { [version]$Matches[1] } }
     $have = & $ver $Current
-    if (-not $have) { return $null }
+    if (-not $have) { return @{ state = 'none' } }
     try {
         $r = if ($Url -notmatch '^https?://') { Get-Content -LiteralPath $Url -Raw | ConvertFrom-Json } else {
             [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
             Invoke-RestMethod -UseBasicParsing -TimeoutSec 10 -Uri $Url }
-    } catch { return $null }
+    } catch { return @{ state = 'unknown' } }
     $new = & $ver ([string]$r.tag_name)
+    if (-not $new) { return @{ state = 'unknown' } }
     $asset = @($r.assets | Where-Object { $_.name -eq 'KLBF-Lab-win64.zip' })[0]
-    if (-not $new -or $new -le $have -or -not $asset) { return $null }
-    @{ tag = [string]$r.tag_name; page = [string]$r.html_url; zip = [string]$asset.browser_download_url
-        sha = $(if ([string]$r.body -match 'SHA-256 of the zip: ([0-9a-fA-F]{64})') { $Matches[1].ToLower() } else { '' }) }
+    if ($new -le $have -or -not $asset) { return @{ state = 'latest' } }
+    @{ state = 'update'; update = @{ tag = [string]$r.tag_name; page = [string]$r.html_url; zip = [string]$asset.browser_download_url
+        sha = $(if ([string]$r.body -match 'SHA-256 of the zip: ([0-9a-fA-F]{64})') { $Matches[1].ToLower() } else { '' }) } }
+}
+
+# The latest GitHub release when it is newer than $Current (Get-KlbfUpdateCheck's update), else $null.
+function Get-KlbfUpdate([string]$Current, [string]$Url) {
+    $r = Get-KlbfUpdateCheck @PSBoundParameters
+    if ($r.state -eq 'update') { $r.update } else { $null }
+}
+
+# (27/11) The bottom-left line: "v26.11.1 · Up to date", "v26.11.1 · Couldn't check for updates", or
+# "v26.11.1 ·" followed by the update link (Set-KlbfUpdateLine); the version alone before the answer.
+function Get-KlbfVersionLine([string]$Version, $Check) {
+    $v = if ($Version) { $Version } else { 'dev' }
+    $dot = [char]0xB7
+    switch ([string]$Check.state) {
+        'latest' { "$v $dot Up to date" }
+        'unknown' { "$v $dot Couldn't check for updates" }
+        'update' { "$v $dot" }
+        default { $v }
+    }
 }
 
 # SHA256SUMS.txt of a folder: name -> hash (plain names only, no folders), empty without the file.
@@ -340,10 +361,12 @@ function Install-KlbfUpdate($Update, [string]$BuildDir) {
 function Set-KlbfUpdateLine($c, $Update) {
     $c.updateInfo = $Update
     $t = "Update available: $($Update.tag) $([char]0x2014) "
-    $c.update.Text = "${t}Update   What's new"
+    $c.update.Text = "${t}Update $([char]0xB7) What's new"
     $c.update.Links.Clear()
     [void]$c.update.Links.Add($t.Length, 6, 'update')
     [void]$c.update.Links.Add($t.Length + 9, 10, 'notes')
+    # Right after "v26.11.1 ·"
+    if ($c.versionLabel) { $c.update.Left = $c.versionLabel.Right }
     $c.update.Visible = $true
 }
 
@@ -1344,7 +1367,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     # (27/11) Bottom left, opposite Play: the version (small, grey), and the update line when Show-KlbfMenu's
     # check finds a newer release (Set-KlbfUpdateLine)
     $c.versionLabel = & $label $f $(if ($c.version) { $c.version } else { 'dev' }) 16 884 56 18
-    $c.versionLabel.ForeColor = $soft; $c.versionLabel.Font = New-KlbfFont 8
+    $c.versionLabel.ForeColor = $soft; $c.versionLabel.Font = New-KlbfFont 8; $c.versionLabel.AutoSize = $true
     $c.update = New-Object System.Windows.Forms.LinkLabel; $c.update.Visible = $false; $c.update.Font = New-KlbfFont 8
     $c.update.ForeColor = Get-KlbfColor $script:KlbfTheme.text; $c.update.LinkColor = Get-KlbfColor 0xA78BFA
     $c.update.ActiveLinkColor = Get-KlbfColor $script:KlbfTheme.text
@@ -1627,19 +1650,22 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
     # nothing shown); a newer one puts the update line in the header. Installed only on its Update link.
     $dir = if ($Victory) { Split-Path -Parent $Victory } else { '' }
     if ($dir -and $m.c.version) {
-        $defs = (('Get-KlbfVersion', 'Get-KlbfUpdate', 'Read-KlbfSums', 'Test-KlbfSums', 'Test-KlbfRunning', 'Switch-KlbfBuild', 'Install-KlbfUpdate') |
+        $defs = (('Get-KlbfVersion', 'Get-KlbfUpdateCheck', 'Get-KlbfUpdate', 'Read-KlbfSums', 'Test-KlbfSums', 'Test-KlbfRunning', 'Switch-KlbfBuild', 'Install-KlbfUpdate') |
             ForEach-Object { "function $_ {$((Get-Item "function:$_").ScriptBlock)}" }) -join "`n"
         $run = { param($script, $a, $b) $p = [powershell]::Create(); $null = $p.AddScript("param(`$a, `$b)`n$defs`n$script").AddArgument($a).AddArgument($b); @{ ps = $p; job = $p.BeginInvoke() } }.GetNewClosure()
-        $c = $m.c; $fLine = ${function:Set-KlbfUpdateLine}; $fGameOk = ${function:Test-KlbfGameFolder}
+        $c = $m.c; $fLine = ${function:Set-KlbfUpdateLine}; $fGameOk = ${function:Test-KlbfGameFolder}; $fVer = ${function:Get-KlbfVersionLine}
         # Never closed while the files are being replaced
         $c.form.add_FormClosing({ param($s, $e) if ($c.updating -and $c.form.Tag -ne 'updated') { $e.Cancel = $true } }.GetNewClosure())
-        $check = & $run 'Get-KlbfUpdate $a' $c.version $null
+        $check = & $run 'Get-KlbfUpdateCheck $a' $c.version $null
         $uTick = New-Object System.Windows.Forms.Timer; $uTick.Interval = 500
         $uTick.add_Tick({
             if (-not $check.job.IsCompleted) { return }
             $uTick.Stop()
-            $u = try { @($check.ps.EndInvoke($check.job))[0] } catch { $null }
-            if ($u -and $u.tag) { & $fLine $c $u }
+            # (27/11) The answer beside the version, whatever it is (never a popup)
+            $r = try { @($check.ps.EndInvoke($check.job))[0] } catch { @{ state = 'unknown' } }
+            if (-not $r) { $r = @{ state = 'unknown' } }
+            $c.versionLabel.Text = & $fVer $c.version $r
+            if ($r.state -eq 'update' -and $r.update.tag) { & $fLine $c $r.update }
         }.GetNewClosure())
         $uTick.Start()
         $c.update.add_LinkClicked({

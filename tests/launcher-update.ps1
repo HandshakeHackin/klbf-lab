@@ -46,6 +46,17 @@ try {
     Check 'YY.MM.N order: 26.11.1 < 26.11.2 < 26.12.1 < 27.1.1, v0.27.0 older' ((& $order 'v26.11.2' 'v26.12.1') -and (& $order 'v26.12.1' 'v27.1.1') -and (& $order 'v26.11.9' 'v26.11.10') -and (& $order 'v0.27.0' 'v26.11.1') -and -not (& $order 'v26.11.1' 'v0.28.0') -and -not (& $order 'v26.12.1' 'v26.11.2'))
     $null = & $order 'v26.11.1' 'v26.11.2'
     Check 'offline check: silent $null' ($null -eq (Get-KlbfUpdate 'v26.11.1' 'http://127.0.0.1:9/latest'))
+    # (27/11) The state beside the version
+    $dot = [char]0xB7
+    $s = Get-KlbfUpdateCheck 'v26.11.1' $json
+    Check 'state: update' ($s.state -eq 'update' -and $s.update.tag -eq 'v26.11.2' -and (Get-KlbfVersionLine 'v26.11.1' $s) -eq "v26.11.1 $dot")
+    $s = Get-KlbfUpdateCheck 'v26.11.2' $json
+    Check 'state: up to date' ($s.state -eq 'latest' -and (Get-KlbfVersionLine 'v26.11.2' $s) -eq "v26.11.2 $dot Up to date")
+    $s = Get-KlbfUpdateCheck 'v26.11.1' 'http://127.0.0.1:9/latest'
+    Check "state: couldn't check (offline)" ($s.state -eq 'unknown' -and (Get-KlbfVersionLine 'v26.11.1' $s) -eq "v26.11.1 $dot Couldn't check for updates")
+    $garbled = Join-Path $t 'garbled.json'; Set-Content -LiteralPath $garbled -Value '{"message": "API rate limit exceeded"}'
+    Check "state: couldn't check (rate limit)" ((Get-KlbfUpdateCheck 'v26.11.1' $garbled).state -eq 'unknown')
+    Check 'state: source checkout' ((Get-KlbfUpdateCheck '' $json).state -eq 'none' -and (Get-KlbfVersionLine '' $null) -eq 'dev')
 
     $r = Install-KlbfUpdate @{ tag = 'v26.11.2'; zip = 'http://127.0.0.1:9/x.zip'; sha = $sha } $b
     Check "offline download refused, unchanged ($($r.message))" (-not $r.ok -and (Same $before (Get-Sums $b)))
