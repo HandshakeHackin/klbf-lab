@@ -207,7 +207,7 @@ fn live_figures() -> String {
             }
             let gpu = GPU.load(Ordering::Relaxed);
             format!(
-                " | {:.0} FPS{} | CPU usage {:.0} % | Memory usage {:.1} GB | VRAM usage {:.1} GB",
+                " | {:.0} FPS{} | CPU usage {:.0} % | RAM {:.1} GB incl. shared | VRAM usage {:.1} GB",
                 frames.saturating_sub(f) as f64 / secs,
                 if gpu == u64::MAX { String::new() } else { format!(" | GPU usage {gpu} %") },
                 cpu.clamp(0.0, 100.0),
