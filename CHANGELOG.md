@@ -6,6 +6,25 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## Next
+
+### Game window
+- The game window takes the keyboard focus at the start: F8, F10, F11 and Alt+F4 work without a click
+  first (the launcher lets it take the foreground; the log says "game window has the keyboard focus").
+- Borderless fullscreen: the black backdrop always stays behind the game (it could cover the picture).
+- F8: a short white flash and "Screenshot saved" in the caption, or "Screenshot failed: <reason>" in the
+  caption and the log. Never silent.
+- VRAM in the caption and on the bench card: used / installed as sold ("VRAM 10.6/16 GB"); DXGI's budget
+  only in the JSON.
+
+### Launcher
+- Every run's log in `Saved Games\KLBF Lab\logs` (run-<date>.log, the last 10 kept) with crashes.log;
+  "Report a bug" points there, the user's profile hidden.
+- Beside the version: "Up to date", "Update available: ..." or "Couldn't check for updates".
+- The first-run desktop shortcut offer says whether the shortcut was created, and asks again after a failure.
+- "KLBF Lab.cmd" beside "KLBF Lab.vbs", for PCs where the .vbs does nothing; the README says what to do if it
+  doesn't start (Unblock the zip, the .cmd, or play.ps1 with PowerShell). The launcher unblocks its own files.
+
 ## v26.11.1 (27 Nov 2026)
 
 Versions follow YY.MM.N (year, month, release of the month), like AMD's drivers.

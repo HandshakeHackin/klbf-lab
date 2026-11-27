@@ -91,6 +91,8 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'launcher-menu.ps1')
 if (-not $env:KLBF_LAUNCHER_DIR) { $null = Set-KlbfAppId }
+# (27/11) This folder's files without the internet mark of an extracted zip (silent)
+Unblock-KlbfFolder $PSScriptRoot
 # (27/11) First start with the Saved Games home: the older AppData folder's saves, settings, backups and
 # cache are COPIED into it once (the older folder is left as it was).
 if (-not $PrintEnv -and -not (Test-Path -LiteralPath (Get-KlbfHome))) {

@@ -169,6 +169,19 @@ function Get-KlbfShortcutSpec([string]$BuildDir = $PSScriptRoot, [string]$Victor
     }
 }
 
+# (27/11) The other starter, for PCs where the .vbs does nothing (VBScript turned off on newer Windows 11,
+# Smart App Control or an antivirus stopping wscript -> PowerShell): the same start from a .cmd.
+function Get-KlbfCmdText {
+    '@start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0play.ps1" -Victory "%~dp0victory.exe" -Setup'
+}
+
+# (27/11) The files of the launcher's folder lose the downloaded-from-the-internet mark (Mark of the Web) a
+# zip extracted without "Unblock" gives them, which can stop the .vbs and warn on victory.exe. Silent, at
+# every start (a file already unblocked costs nothing).
+function Unblock-KlbfFolder([string]$Dir) {
+    try { Get-ChildItem -LiteralPath $Dir -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch {}
+}
+
 # The starter script: the folder from its own place, PowerShell hidden (window style 0), not waited for.
 function Get-KlbfVbsText {
     @(

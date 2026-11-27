@@ -4,7 +4,7 @@
 #
 #   .\scripts\package-release.ps1 -Tag v1.0.0 -Victory target\diag\victory.exe -Out dist
 #
-# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.vbs", klbf-lab.ico, README.txt, LICENSE, VERSION and
+# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.vbs", "KLBF Lab.cmd", klbf-lab.ico, README.txt, LICENSE, VERSION and
 # SHA256SUMS.txt, at its root (Windows' "Extract All" makes the folder).
 param(
     [Parameter(Mandatory)][string]$Tag,
@@ -31,6 +31,8 @@ Copy-Item -LiteralPath (Join-Path $Source 'apps\victory\klbf-lab.ico') -Destinat
 # The starter, the same text the launcher writes beside a desktop shortcut
 . (Join-Path $Source 'launcher-menu.ps1')
 Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.vbs') -Value (Get-KlbfVbsText) -Encoding ascii
+# (27/11) The fallback starter where the .vbs does nothing
+Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.cmd') -Value (Get-KlbfCmdText) -Encoding ascii
 
 Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding ascii -Value @"
 KLBF Lab $Tag (Windows, 64-bit)
@@ -42,6 +44,11 @@ KLBF Lab $Tag (Windows, 64-bit)
 
 Windows SmartScreen: KLBF Lab is not signed. If Windows says it protected your PC, click
 "More info" then "Run anyway". If it asks whether to open "KLBF Lab", click Open.
+
+If it doesn't start (nothing happens after double-clicking "KLBF Lab.vbs"):
+1. Right-click the zip, Properties, tick "Unblock", OK, then extract it again.
+2. Double-click "KLBF Lab.cmd" (the same start, without VBScript).
+3. Or right-click play.ps1, "Run with PowerShell".
 
 The first start downloads two official components once, into this folder, each file checked:
 Microsoft's DirectX 12 Agility SDK (from Microsoft's NuGet) and AMD FSR (AMD FidelityFX SDK v2.4.0,
