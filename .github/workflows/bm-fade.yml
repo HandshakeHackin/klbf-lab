@@ -1,0 +1,14 @@
+name: Test opening fade and black frame verdict
+on:
+  push:
+    branches: [verify/bm-all-black-verdict]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p victory-gpu --lib --locked --features diagnostics klbf_bench::tests -- --nocapture
