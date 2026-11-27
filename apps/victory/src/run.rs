@@ -201,7 +201,8 @@ pub fn run(
         return Ok(());
     }
     victory_loader::report_crashes();
-    victory_loader::log_crashes_to(temp.with_file_name("crashes.log"));
+    // (KLBF Lab, 27/11) Beside the run logs when our launcher names their folder (KLBF_LOG_DIR).
+    victory_loader::log_crashes_to(crashes_log(std::env::var_os("KLBF_LOG_DIR"), &temp));
     victory_hle::runtime::use_console_timers();
     #[cfg(feature = "diagnostics")]
     diagnostics(&image, &cfg);
@@ -535,6 +536,36 @@ mod tests {
         #[cfg(not(target_arch = "x86_64"))]
         let expected_ok = true;
         assert_eq!(super::check_cpu_features().is_ok(), expected_ok);
+    }
+}
+
+/// (KLBF Lab, 27/11) Where the crash log goes: the run logs' folder our launcher names (`KLBF_LOG_DIR`,
+/// "Report a bug" points there), else beside the title's temporary files as before.
+#[cfg(any(windows, test))]
+fn crashes_log(log_dir: Option<std::ffi::OsString>, temp: &Path) -> std::path::PathBuf {
+    match log_dir.filter(|d| !d.is_empty()) {
+        Some(d) => {
+            let d = std::path::PathBuf::from(d);
+            let _ = std::fs::create_dir_all(&d);
+            d.join("crashes.log")
+        }
+        None => temp.with_file_name("crashes.log"),
+    }
+}
+
+#[cfg(test)]
+mod crashes_log_tests {
+    use std::path::Path;
+
+    #[test]
+    fn crashes_log_beside_the_run_logs() {
+        let dir = std::env::temp_dir().join(format!("klbf-logs-{}", std::process::id()));
+        let temp = Path::new("data/0000/temp");
+        assert_eq!(super::crashes_log(Some(dir.clone().into_os_string()), temp), dir.join("crashes.log"));
+        assert!(dir.is_dir(), "the folder is made");
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(super::crashes_log(None, temp), temp.with_file_name("crashes.log"));
+        assert_eq!(super::crashes_log(Some("".into()), temp), temp.with_file_name("crashes.log"));
     }
 }
 

@@ -891,12 +891,55 @@ function Copy-KlbfSave($From, $To, [string]$SavesRoot, [string]$Dir = (Get-KlbfB
     $backup
 }
 
-# ---- Report a bug and the bench ----
+# ---- Run logs, report a bug and the bench ----
 
-# The newest log of the title (the crash log beside its data), or ''.
-function Get-KlbfLatestLog([string]$Data) {
+# (27/11) The game's logs: <home>\logs (Saved Games\KLBF Lab\logs): run-<date>.log for each start (the last
+# 10 kept) and the title's crashes.log (KLBF_LOG_DIR). Started from the desktop shortcut nothing shows the
+# console, so everything the game says goes there.
+function Get-KlbfLogDir { Join-Path (Get-KlbfHome) 'logs' }
+
+# The run logs of $Dir beyond the newest $Keep, removed.
+function Remove-KlbfOldLogs([string]$Dir, [int]$Keep = 10) {
+    Get-ChildItem -LiteralPath $Dir -Filter 'run-*.log' -File -ErrorAction SilentlyContinue | Sort-Object Name -Descending |
+        Select-Object -Skip $Keep | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+# Runs $Exe with $ArgList, every line it writes (output and errors) shown as before and written to a new
+# run-<date>.log in $Dir as it comes (a crash keeps what was said). Its exit code.
+function Invoke-KlbfLogged([string]$Exe, [string[]]$ArgList, [string]$Dir) {
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $log = Join-Path $Dir ('run-{0:yyyy-MM-dd_HH-mm-ss}.log' -f (Get-Date))
+    Remove-KlbfOldLogs $Dir 9
+    $w = New-Object System.IO.StreamWriter($log, $false, (New-Object System.Text.UTF8Encoding($false)))
+    $w.AutoFlush = $true
+    # PowerShell 5.1 turns each error line of a program into an error record: with 'Stop' the first one
+    # would end the script.
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        $w.WriteLine("KLBF Lab run, $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): $(Split-Path -Leaf $Exe) $($ArgList[0])")
+        & $Exe @ArgList 2>&1 | ForEach-Object { $l = "$_"; $w.WriteLine($l); $l } | Out-Host
+        $code = $LASTEXITCODE
+        $w.WriteLine("exit code $code")
+    } finally { $ErrorActionPreference = $eap; $w.Dispose() }
+    $code
+}
+
+# (27/11) The game window may take the foreground (and the keyboard) from this launcher: started hidden
+# through the shortcut, Windows' foreground lock otherwise kept it until a click in the game.
+function Grant-KlbfForeground {
+    try {
+        if (-not ('KlbfForeground' -as [type])) { Add-Type -Namespace '' -Name KlbfForeground -MemberDefinition '[DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int process);' }
+        [KlbfForeground]::AllowSetForegroundWindow(-1)
+    } catch { $false }
+}
+
+# The newest log to attach: a run log or crashes.log of the logs folder, else an older crash log beside the
+# data; ''.
+function Get-KlbfLatestLog([string]$Data, [string]$LogDir = '') {
+    if (-not $LogDir) { $LogDir = Get-KlbfLogDir }
     if (-not $Data) { $Data = Join-Path (Get-KlbfHome) 'data' }
-    $l = Get-ChildItem -Path (Join-Path $Data '*\crashes.log') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $l = @(Get-ChildItem -Path (Join-Path $LogDir '*.log') -File -ErrorAction SilentlyContinue) + @(Get-ChildItem -Path (Join-Path $Data '*\crashes.log') -ErrorAction SilentlyContinue) |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($l) { $l.FullName } else { '' }
 }
 
@@ -922,7 +965,8 @@ function Get-KlbfBugReport($Choice, $Hw, [string]$Victory, [string]$Log, [string
         "- Memory: $($Hw.ramGB) GB"
         "- Screen: $($Hw.screen)"
         "- Windows: $Windows"
-        "- Log to attach: $(if ($Log) { $Log } else { 'none found: copy the text of the console window' })"
+        "- Log to attach: $(if ($Log) { $Log } else { 'none found yet' })"
+        "- Logs folder: $(Get-KlbfLogDir) (the newest run-*.log, and crashes.log if there is one)"
     ) -join "`r`n" | Hide-KlbfPaths -Game $Choice.game
 }
 
@@ -1690,11 +1734,19 @@ function Stop-KlbfTree([int]$Id) {
 # shaders (`victory shaders <rpf>`, unless -NoTranslate), 2. making the pipelines of earlier runs
 # (`victory warm` and its workers, when $Book exists). One bar (translation 30 %, pipelines 70 %), the step
 # and its count under it; Cancel ends every worker. $true when the translation finished (or was not asked).
-function Show-KlbfPrepare([string]$Victory, [string]$Rpf, [string]$Book = '', [switch]$NoTranslate) {
-    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+# (27/11) The preparation's steps: translating (unless $NoTranslate), then the pipelines whenever earlier runs
+# wrote some down ($Book). Nothing else (display mode, bench) changes them. A first start has no book yet: its
+# pipelines are written down while it plays and made here from the next start.
+function Get-KlbfPreparePhases([string]$Rpf, [string]$Book = '', [switch]$NoTranslate) {
     $phases = @()
     if (-not $NoTranslate) { $phases += @{ args = 'shaders "' + $Rpf + '"'; weight = 0.3; what = 'Translating shaders'; parse = ${function:Update-KlbfPrepareProgress} } }
     if ($Book -and (Test-Path -LiteralPath $Book)) { $phases += @{ args = 'warm'; weight = 0.7; what = 'Preparing pipelines'; parse = ${function:Update-KlbfWarmProgress} } }
+    $phases
+}
+
+function Show-KlbfPrepare([string]$Victory, [string]$Rpf, [string]$Book = '', [switch]$NoTranslate) {
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    $phases = @(Get-KlbfPreparePhases $Rpf $Book -NoTranslate:$NoTranslate)
     if (-not $phases) { return $true }
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'KLBF Lab'; Set-KlbfTheme $f; $f.FormBorderStyle = 'FixedDialog'

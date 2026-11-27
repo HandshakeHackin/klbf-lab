@@ -289,6 +289,8 @@ $saved = Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')
 $set.KLBF_SHOTS_DIR = Get-KlbfShotsDir $saved
 # (27/11) Started by our launcher: the game says F8 / F10 / F11 in its caption (F10 and F11 come back here)
 $set.KLBF_LAUNCHER = '1'
+# (27/11) The game's crash log beside the run logs (Saved Games\KLBF Lab\logs), where "Report a bug" points
+$set.KLBF_LOG_DIR = Get-KlbfLogDir
 # (27/11) The Display chosen in Settings: the game window opens centred on that monitor (else the main one)
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }
@@ -381,18 +383,21 @@ Write-Host "Cache: $Cache"
 Write-Host "Saves: $Data"
 # -Fsr (KLBF Lab): Profile S, whose title upscales with FSR 4, the calls going to the PC's FSR DLL
 # (VICTORY_FSR_DLL, in -FfxDir).
+# (27/11) The game window takes the keyboard at once (F8, F10, F11, Alt+F4 without a click first)
+$null = Grant-KlbfForeground
+# (27/11) Everything the game says, also in Saved Games\KLBF Lab\logs\run-<date>.log (the last 10 kept): started
+# from the shortcut, no console shows it.
+$runArgs = @('run', $exe, '--execute')
 if ($Fsr) {
     $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
     if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
     $env:VICTORY_FSR_DLL = $fsrDll
-    & $Victory run $exe --execute --console series-s
-} else {
-    & $Victory run $exe --execute
+    $runArgs += '--console', 'series-s'
 }
+$code = Invoke-KlbfLogged $Victory $runArgs (Get-KlbfLogDir)
 # (27/11) In the game F10 (Settings) and F11 (Restart) end it with exit code 10 or 11: the settings window
 # (its Play starts the game again), or the same start again; the saves are backed up again at that start.
 # ponytail: a new play.ps1 per relaunch (nested), fine for a session's few dozen restarts.
-$code = $LASTEXITCODE
 switch (Get-KlbfNextStart $code ([bool]$Bench)) {
     'quick' { $again = $passOn; & $PSCommandPath -Setup -Quick @again; exit $LASTEXITCODE }
     'settings' { $again = $passOn; & $PSCommandPath -Setup @again; exit $LASTEXITCODE }
