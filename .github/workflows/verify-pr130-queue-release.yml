@@ -1,0 +1,39 @@
+name: Verify PR 130 queue release stress
+
+on:
+  push:
+    branches:
+      - verify/pr130-queue-release-stress
+
+permissions:
+  contents: read
+
+jobs:
+  windows-stress:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Repeat the queue release regression
+        shell: pwsh
+        run: |
+          1..25 | ForEach-Object {
+            cargo test -p victory-gpu queue::tests::release_waits_for_release_held_before_freeing_waiting_queue --locked -- --exact
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          1..25 | ForEach-Object {
+            cargo test -p victory-gpu queue::tests::release_waits_for_release_held_before_freeing_waiting_queue --all-features --locked -- --exact
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Verify the lock-removal negative control
+        shell: pwsh
+        run: |
+          $path = 'crates/victory-gpu/src/queue.rs'
+          $text = Get-Content -LiteralPath $path -Raw
+          $pattern = '(?s)(extern "system" fn release\(this: This\).*?#\[cfg\(windows\)\]\s+\{\s+)let _one = lock\(&RELEASING\);\s+'
+          $changed = [regex]::Replace($text, $pattern, '$1', 1)
+          if ($changed -eq $text) { throw 'negative-control edit did not apply' }
+          Set-Content -LiteralPath $path -Value $changed -NoNewline -Encoding utf8
+          cargo test -p victory-gpu queue::tests::release_waits_for_release_held_before_freeing_waiting_queue --locked -- --exact
+          if ($LASTEXITCODE -eq 0) { throw 'negative control unexpectedly passed' }
