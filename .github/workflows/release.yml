@@ -55,4 +55,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" "${{ steps.pkg.outputs.zip2 }}" "${{ steps.pkg.outputs.zip }}" --title "KLBF Lab ${{ github.ref_name }}" --notes "Download KLBF-Lab.zip, extract it, open the \"KLBF Lab\" folder, double-click \"KLBF Lab.cmd\", choose your own game folder. No game files are included. KLBF-Lab-win64.zip is the same files for the automatic update. SHA-256 of the zip: ${{ steps.pkg.outputs.sha }} (KLBF-Lab-win64.zip). SHA-256 of KLBF-Lab.zip: ${{ steps.pkg.outputs.sha2 }}"
+          # (v26.11.4) The notes from a file: escaped quotes inside --notes split under pwsh (v26.11.3's publish
+          # failed). The updater reads the first "SHA-256 of the zip: <hash>": it stays the flat zip's.
+          $notes = @(
+            'Download KLBF-Lab.zip, extract it, open the "KLBF Lab" folder, double-click "KLBF Lab.cmd", choose your own game folder. No game files are included.'
+            'KLBF-Lab-win64.zip is the same files, for the automatic update.'
+            ''
+            'SHA-256 of the zip: ${{ steps.pkg.outputs.sha }} (KLBF-Lab-win64.zip)'
+            'SHA-256 of KLBF-Lab.zip: ${{ steps.pkg.outputs.sha2 }}'
+          ) -join "`n"
+          Set-Content -LiteralPath notes.md -Value $notes -Encoding utf8NoBOM
+          gh release create "${{ github.ref_name }}" "${{ steps.pkg.outputs.zip2 }}" "${{ steps.pkg.outputs.zip }}" --title "KLBF Lab ${{ github.ref_name }}" --notes-file notes.md

@@ -15,6 +15,13 @@ Dominic, MalarkZA and Aphantasiac.
 - Download KLBF-Lab.zip: everything is inside a "KLBF Lab" folder when you extract it.
   KLBF-Lab-win64.zip (the same files, flat) stays for the automatic update.
 - Prefer to build it yourself? See [BUILD.md](BUILD.md).
+- When a newer version is out, the big Play button becomes Update: one click updates and reopens the launcher.
+
+### Bench
+- Bench wherever you like: any save, any place. An optional "Where were you?" note (e.g. city driving) goes
+  on the card, in the result file and in the text to share; no fixed scene name any more.
+- The card shows a Save ID (a short fingerprint of the save it loaded): same ID, same starting point.
+- The card no longer lists the launcher itself among the experimental switches.
 
 ### Controls
 - Keyboard and mouse: a click in the game takes the mouse for the camera (F9 or leaving the window lets it go);
