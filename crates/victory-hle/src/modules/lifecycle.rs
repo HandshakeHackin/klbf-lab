@@ -110,13 +110,15 @@ pub extern "system" fn CreateWindowExW(
     instance: HINSTANCE,
     param: *const c_void,
 ) -> HWND {
-    let (x, y, width, height) = fit(parent, x, y, width, height);
-    // SAFETY: the title's own arguments, forwarded (the size fitted).
+    let (menu, extra) = our_menu(parent, ex_style, style, menu, height);
+    let (x, y, width, height) = fit(parent, x, y, width, height, extra);
+    // SAFETY: the title's own arguments, forwarded (the size fitted, our menu bar's height added).
     let hwnd = unsafe {
         wm::CreateWindowExW(
-            ex_style, class, name, style, x, y, width, height, parent, menu, instance, param,
+            ex_style, class, name, style, x, y, width, height + extra, parent, menu, instance, param,
         )
     };
+    keep_client(hwnd, ex_style, style, height, extra);
     hook(hwnd);
     hwnd
 }
@@ -136,13 +138,15 @@ pub extern "system" fn CreateWindowExA(
     instance: HINSTANCE,
     param: *const c_void,
 ) -> HWND {
-    let (x, y, width, height) = fit(parent, x, y, width, height);
-    // SAFETY: the title's own arguments, forwarded (the size fitted).
+    let (menu, extra) = our_menu(parent, ex_style, style, menu, height);
+    let (x, y, width, height) = fit(parent, x, y, width, height, extra);
+    // SAFETY: the title's own arguments, forwarded (the size fitted, our menu bar's height added).
     let hwnd = unsafe {
         wm::CreateWindowExA(
-            ex_style, class, name, style, x, y, width, height, parent, menu, instance, param,
+            ex_style, class, name, style, x, y, width, height + extra, parent, menu, instance, param,
         )
     };
+    keep_client(hwnd, ex_style, style, height, extra);
     hook(hwnd);
     hwnd
 }
@@ -153,11 +157,13 @@ pub extern "system" fn CreateWindowExA(
 /// its proportions, and centred; what it shows is scaled to it (the swap
 /// chain stretches). `VICTORY_WINDOW_MAX=WIDTHxHEIGHT` applies a smaller
 /// limit without changing the title's render targets.
-fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32, i32) {
+/// `reserve`: the height our menu bar will add below it (kept free of the work area).
+fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32, reserve: i32) -> (i32, i32, i32, i32) {
     let mut area = RECT::default();
     // SAFETY: `area` receives the primary monitor's work area.
     let known =
         unsafe { wm::SystemParametersInfoW(wm::SPI_GETWORKAREA, 0, (&raw mut area).cast(), 0) };
+    area.bottom -= reserve;
     let limit = window_limit();
     let fitted = fit_with_limit(&area, width, height, limit);
     if !parent.is_null() || known == 0 || fitted == (width, height) {
@@ -226,6 +232,65 @@ fn fit_into(area: &RECT, width: i32, height: i32) -> (i32, i32) {
     )
 }
 
+/// (KLBF Lab, 27/11) The title's main window gets our menu bar (Screenshot, Restart, Settings at its
+/// right, `klbf_keys::menu`), and is made taller by the bar's height so its client area, which the swap
+/// chain fills, keeps the size the title asked for. Only the first top-level window with a caption and no
+/// menu of its own; none during a bench run. Returns the menu to create it with and the height added.
+fn our_menu(parent: HWND, ex_style: u32, style: u32, menu: HMENU, height: i32) -> (HMENU, i32) {
+    static GIVEN: AtomicBool = AtomicBool::new(false);
+    let top = parent.is_null() && style & wm::WS_CHILD == 0 && style & wm::WS_CAPTION == wm::WS_CAPTION;
+    if !top || !menu.is_null() || GIVEN.load(Ordering::Relaxed) {
+        return (menu, 0);
+    }
+    let ours = victory_gpu::klbf_keys::menu();
+    if ours.is_null() {
+        return (menu, 0);
+    }
+    GIVEN.store(true, Ordering::Relaxed);
+    if height == wm::CW_USEDEFAULT {
+        return (ours, 0);
+    }
+    let frame = |with: bool| {
+        let mut r = RECT::default();
+        // SAFETY: `r` receives the frame around an empty client area.
+        unsafe { wm::AdjustWindowRectEx(&mut r, style, i32::from(with), ex_style) };
+        r.bottom - r.top
+    };
+    (ours, frame(true) - frame(false))
+}
+
+/// After the window is made with our menu (`extra` > 0): if the bar took another height than planned
+/// (it wraps on a narrow window, or another scale), the window is resized so the client area is the
+/// one `height` (the title's window height) gives without a menu.
+fn keep_client(hwnd: HWND, ex_style: u32, style: u32, height: i32, extra: i32) {
+    if hwnd.is_null() || extra == 0 {
+        return;
+    }
+    let mut frame = RECT::default();
+    let (mut client, mut window) = (RECT::default(), RECT::default());
+    // SAFETY: a window this thread just created; rects of ours.
+    unsafe {
+        wm::AdjustWindowRectEx(&mut frame, style, 0, ex_style);
+        let want = height - (frame.bottom - frame.top);
+        if wm::GetClientRect(hwnd, &mut client) == 0 || wm::GetWindowRect(hwnd, &mut window) == 0 {
+            return;
+        }
+        let off = want - (client.bottom - client.top);
+        if off != 0 {
+            tracing::info!(off, "KLBF Lab: the window resized for its menu bar");
+            wm::SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                window.right - window.left,
+                window.bottom - window.top + off,
+                wm::SWP_NOMOVE | wm::SWP_NOZORDER | wm::SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 /// Puts our procedure in front of the title's.
 fn hook(hwnd: HWND) {
     if hwnd.is_null() {
@@ -240,7 +305,15 @@ fn hook(hwnd: HWND) {
     }
     // KLBF Lab Bench: the card's close ends the title the same way.
     victory_gpu::klbf_bench::on_exit(|| end_title("bench finished", Box::new(|| {})));
+    // KLBF Lab's F10 / F11 (and the menu's Settings / Restart): the same end, with the exit code play.ps1 reads.
+    victory_gpu::klbf_keys::on_exit(|code| {
+        EXIT_CODE.store(code as u32, Ordering::SeqCst);
+        end_title(if code == victory_gpu::klbf_keys::EXIT_SETTINGS { "KLBF Lab settings" } else { "KLBF Lab restart" }, Box::new(|| {}));
+    });
 }
+
+/// The process's exit code at its end ([`end`]): 0, or KLBF Lab's for the launcher.
+static EXIT_CODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 extern "system" fn window_proc(
     hwnd: HWND,
@@ -258,10 +331,14 @@ extern "system" fn window_proc(
     // Alt or F10 puts a window into menu mode: the system runs a modal menu
     // loop on the thread that owns the window, which is the title's. The
     // title then stops (no frames, no input) until a key ends the loop, and
-    // nothing shows it, since the window has no menu bar;
+    // nothing shows it (our menu bar's items are commands, not menus);
     // the title aborts itself about half a minute later. A console has no window
     // menu. The mouse still opens it from the title bar.
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
+        return 0;
+    }
+    // KLBF Lab: F8, F10, F11 and our menu bar's items.
+    if victory_gpu::klbf_keys::on_message(message, wparam, lparam) {
         return 0;
     }
     // SAFETY: the procedure `hook` stored, called the way the system would.
@@ -389,7 +466,7 @@ fn end() {
     #[cfg(windows)]
     victory_gpu::pipeline::save_pipeline_cache();
     // SAFETY: ends this process, as the console ends a suspended title.
-    unsafe { TerminateProcess(GetCurrentProcess(), 0) };
+    unsafe { TerminateProcess(GetCurrentProcess(), EXIT_CODE.load(Ordering::SeqCst)) };
 }
 
 pub(crate) fn module() -> HleModule {

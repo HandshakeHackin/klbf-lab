@@ -512,7 +512,9 @@ fn shown() -> Shown {
 /// 6.3 shared) [| compiling N shaders]". `low1`: the 1 % low of the last second's frames, fps (0: not known).
 pub(crate) fn caption(fps: f64, low1: f64, draws: f64, making: u64) -> String {
     let (used, budget) = vram_now();
-    caption_text(fps, low1, draws, profile_name(), &shown(), crate::framegen::shown_fps(), [used, budget, ram_bytes(), shared_now()], making)
+    let text = caption_text(fps, low1, draws, profile_name(), &shown(), crate::framegen::shown_fps(), [used, budget, ram_bytes(), shared_now()], making);
+    LAST_CAPTION.lock().unwrap_or_else(|e| e.into_inner()).clone_from(&text);
+    text
 }
 
 /// The frames shown per second with frame generation on: `measured` (the swap chain's count, 0: not
@@ -965,8 +967,8 @@ struct Card {
     set: Settings,
     from: String,
     player: String,
-    /// (27/11) The save the run loaded, as the launcher's Saves tab names it ("#2 <in-game name>"); empty
-    /// when not given (`KLBF_BENCH_SAVE`).
+    /// (27/11) The save the run loaded, as the launcher numbers it ("#2", "Autosave"), never its in-game
+    /// name (the card is public); empty when not given (`KLBF_BENCH_SAVE`).
     save: String,
     blocked: u64,
     /// "RAM peak 20.8 GB · VRAM 10.0 / 15.6 GB · card busy 57 %".
@@ -977,9 +979,17 @@ struct Card {
     png_name: String,
 }
 
-/// `KLBF_BENCH_SAVE`: the save the launcher isolated for the run (no control characters, 64 at most).
+/// `KLBF_BENCH_SAVE`: the save the launcher isolated for the run, by number only.
 fn bench_save() -> String {
-    std::env::var("KLBF_BENCH_SAVE").unwrap_or_default().chars().filter(|c| !c.is_control()).take(64).collect::<String>().trim().into()
+    save_number(&std::env::var("KLBF_BENCH_SAVE").unwrap_or_default())
+}
+
+/// "#N" or "Autosave" from the launcher's label; anything after it (an in-game name, from an older
+/// launcher) is dropped, and anything else gives nothing.
+fn save_number(label: &str) -> String {
+    let first = label.split_whitespace().next().unwrap_or("");
+    let numbered = first.strip_prefix('#').is_some_and(|n| !n.is_empty() && n.len() <= 4 && n.bytes().all(|b| b.is_ascii_digit()));
+    if numbered || first == "Autosave" { first.into() } else { String::new() }
 }
 
 fn player() -> String {
@@ -2337,6 +2347,108 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     (bm, boxes)
 }
 
+// ---------------------------------------------------------------------------------------------
+// (27/11) F8's screenshot (`klbf_keys`): the game image with a small watermark in its bottom-right corner
+
+/// The newest caption text ([`caption`]), for the screenshot's watermark.
+static LAST_CAPTION: Mutex<String> = Mutex::new(String::new());
+
+/// The caption's figures at this moment, as the watermark says them.
+pub(crate) fn shot_stats() -> String {
+    watermark_stats(&LAST_CAPTION.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// The watermark's line from a caption: frames per second, profile and upscaler, VRAM and RAM, at " · "
+/// ("34 FPS (base 17) · Profile X FSR 4 Performance (1080p -> 4K) · VRAM 11.6/14.0 GB · RAM 21.5 GB").
+/// No 1% low, frame time, draws, RAM detail or shaders being compiled.
+fn watermark_stats(caption: &str) -> String {
+    caption
+        .split(" | ")
+        .filter(|f| *f != "KLBF Lab" && !f.starts_with("1% ") && !f.ends_with(" ms") && !f.ends_with(" draws") && !f.starts_with("compiling "))
+        .map(|f| if f.starts_with("RAM ") { f.split(" (").next().unwrap_or(f) } else { f })
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
+}
+
+/// Where screenshots go: `KLBF_SHOTS_DIR` (the launcher's choice), else the Pictures folder's "KLBF Lab".
+fn shots_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("KLBF_SHOTS_DIR").filter(|d| !d.is_empty()) {
+        return Some(d.into());
+    }
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Pictures, SHGetKnownFolderPath};
+    let mut path = std::ptr::null_mut();
+    // SAFETY: the shell writes a NUL-terminated path, freed here.
+    unsafe {
+        let ok = SHGetKnownFolderPath(&FOLDERID_Pictures, 0, std::ptr::null_mut(), &mut path) >= 0 && !path.is_null();
+        let dir = ok.then(|| {
+            let len = (0..).take_while(|&i| *path.add(i) != 0).count();
+            PathBuf::from(String::from_utf16_lossy(std::slice::from_raw_parts(path, len))).join("KLBF Lab")
+        });
+        CoTaskMemFree(path as *const _);
+        dir
+    }
+}
+
+/// Writes `rgb` (`w` x `h`) with the watermark as `KLBF-Lab-<date>_<time>.png` in [`shots_dir`].
+pub(crate) fn save_screenshot(w: usize, h: usize, rgb: &[u8], stats: &str) {
+    let Some(dir) = shots_dir() else {
+        tracing::warn!("KLBF Lab: screenshot not saved (no Pictures folder)");
+        return;
+    };
+    let t = local_time();
+    let name = format!("KLBF-Lab-{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.png", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    let png = screenshot_png(w, h, rgb, stats);
+    match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&name), png)) {
+        // The file's name only in the log (it is posted).
+        Ok(()) => tracing::info!("KLBF Lab: screenshot saved ({name})"),
+        Err(e) => tracing::warn!(error = %e, "KLBF Lab: screenshot not saved"),
+    }
+}
+
+/// Our flask (the icon's 64 x 64 picture), straight RGBA.
+fn flask() -> Option<&'static (usize, usize, Vec<u8>)> {
+    static FLASK: OnceLock<Option<(usize, usize, Vec<u8>)>> = OnceLock::new();
+    FLASK
+        .get_or_init(|| {
+            let ico: &[u8] = include_bytes!("../../../apps/victory/klbf-lab.ico");
+            let n = usize::from(u16::from_le_bytes([*ico.get(4)?, *ico.get(5)?]));
+            (0..n).find_map(|i| {
+                let e = ico.get(6 + 16 * i..22 + 16 * i)?;
+                let len = u32::from_le_bytes(e[8..12].try_into().ok()?) as usize;
+                let at = u32::from_le_bytes(e[12..16].try_into().ok()?) as usize;
+                if e[0] == 64 { decode_png(ico.get(at..at + len)?) } else { None }
+            })
+        })
+        .as_ref()
+}
+
+/// `rgb` with the watermark (flask, "KLBF Lab", `stats` under it, on a soft dark plate), as a PNG.
+fn screenshot_png(w: usize, h: usize, rgb: &[u8], stats: &str) -> Vec<u8> {
+    let k = (h as f32 / 1080.0).clamp(0.5, 3.0);
+    let (name, line) = (text(ARIAL_BOLD, 17.0 * k, 0.0, "KLBF Lab"), text(UI, 13.0 * k, 0.0, stats));
+    let (pad, icon) = ((8.0 * k) as usize, (36.0 * k) as usize);
+    let text_w = (name.adv.max(line.adv) as usize).max(1);
+    let mut bm = Bitmap::new(pad * 3 + icon + text_w, pad * 2 + icon.max(name.h + line.h));
+    bm.fill_round((0, 0, bm.w, bm.h), 6.0 * k, BACKDROP, 120);
+    if let Some((fw, fh, px)) = flask() {
+        for y in 0..icon {
+            for x in 0..icon {
+                let p = &px[((y * fh / icon) * fw + x * fw / icon) * 4..][..4];
+                bm.over(pad + x, (bm.h - icon) / 2 + y, [p[0], p[1], p[2]], u32::from(p[3]) * 200 / 255);
+            }
+        }
+    }
+    let tx = (pad * 2 + icon) as i32;
+    let ty = ((bm.h - name.h - line.h) / 2) as i32;
+    paint(&mut bm, &name, tx, ty, 210, [255, 255, 255]);
+    paint(&mut bm, &line, tx, ty + name.h as i32, 190, [235, 228, 240]);
+    let mut out = rgb.to_vec();
+    let margin = (16.0 * k) as usize;
+    crate::pixels::blend_onto_rgb(&mut out, w, h, &bm, w.saturating_sub(bm.w + margin), h.saturating_sub(bm.h + margin));
+    encode_png(w as u32, h as u32, &out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2434,6 +2546,29 @@ mod tests {
         set.shown = Shown::default();
         assert_eq!(set.lines()[0], "Profile X \u{b7} FSR", "before the first present: the upscaler alone");
         assert!(sample_card().set.line().starts_with("Profile S \u{b7} FSR 4 Quality 960p \u{2192} 1440p \u{b7} frame generation x2 \u{b7} screen 2560x1440 \u{b7} "));
+    }
+
+    #[test]
+    fn the_watermark_says_the_captions_figures_only() {
+        let caption = "KLBF Lab | 34 FPS (base 17) | 1% 8 | 59 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 + 6.3 shared) | compiling 12 shaders";
+        assert_eq!(watermark_stats(caption), "34 FPS (base 17) \u{b7} Profile X FSR 4 Performance (1080p -> 4K) \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 21.5 GB");
+        assert_eq!(watermark_stats("KLBF Lab | 0 FPS | \u{2013} ms"), "0 FPS");
+        assert_eq!(watermark_stats(""), "");
+    }
+
+    #[test]
+    fn a_screenshot_is_a_png_of_the_image_with_the_watermark_in_its_corner() {
+        let (w, h) = (640usize, 360usize);
+        let rgb: Vec<u8> = (0..w * h).flat_map(|i| [(i % w) as u8, (i / w) as u8, 77]).collect();
+        let png = screenshot_png(w, h, &rgb, "34 FPS (base 17) \u{b7} Profile X");
+        let (dw, dh, px) = decode_png(&png).expect("a PNG we can read back");
+        assert_eq!((dw, dh), (w, h));
+        let at = |x: usize, y: usize| [px[(y * w + x) * 4], px[(y * w + x) * 4 + 1], px[(y * w + x) * 4 + 2]];
+        assert_eq!(at(10, 10), [10, 10, 77], "the image is untouched away from the corner");
+        assert_eq!(at(w / 2, h / 2), [(w / 2) as u8, (h / 2) as u8, 77]);
+        let corner = (h * 3 / 4..h).flat_map(|y| (w / 2..w).map(move |x| (x, y))).filter(|&(x, y)| at(x, y) != [x as u8, y as u8, 77]).count();
+        assert!(corner > 500, "the watermark is in the bottom-right corner ({corner} pixels)");
+        assert!(flask().is_some_and(|f| f.0 == 64), "the flask comes from our icon");
     }
 
     #[test]
@@ -2686,9 +2821,12 @@ mod tests {
         let extra = Extra { black: 0, fade: 0, removed: false, compiled: [3, 7], vram: (9000 << 20, 15000 << 20), ram: 12345 << 20, peaks: (13000 << 20, 9500 << 20), why: "5:00 reached" };
         let J::O(plain) = result_json(&card, &extra, &[60.0]) else { unreachable!() };
         assert!(!plain.contains_key("bench_save"));
-        card.save = "#2 Night at home".into();
+        card.save = save_number("#2 Night at home");
         let J::O(named) = result_json(&card, &extra, &[60.0]) else { unreachable!() };
-        assert_eq!(named.get("bench_save").map(J::canonical).as_deref(), Some("\"#2 Night at home\""));
+        assert_eq!(named.get("bench_save").map(J::canonical).as_deref(), Some("\"#2\""), "the number only, never the in-game name");
+        assert_eq!(save_number("Autosave (Auto) Night at home"), "Autosave");
+        assert_eq!(save_number("Night at home"), "");
+        assert_eq!(save_number("#12345"), "");
         assert_eq!(named.len(), plain.len() + 1);
     }
 

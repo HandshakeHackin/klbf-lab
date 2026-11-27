@@ -10532,6 +10532,9 @@ impl Host {
             let read_now = crate::capture::wanted(frame) || crate::capture::listed(frame);
             #[cfg(not(feature = "diagnostics"))]
             let read_now = false;
+            // (KLBF Lab) F8: this frame's image is read back, its list waited for (one frame, once).
+            let shot = crate::klbf_keys::take_shot();
+            let read_now = read_now || shot;
             let slot = if late_free_present() && !read_now {
                 let finished = FINISHED.load(Ordering::Acquire);
                 p.ahead.iter().position(|(_, flown)| *flown <= finished).or_else(|| {
@@ -10621,6 +10624,15 @@ impl Host {
                 list.ResourceBarrier(&pre);
                 list.CopyResource(&back, texture);
             }
+            // (KLBF Lab) The image as shown (after FSR and the composite), before anything of ours is drawn on it.
+            let shot = shot
+                .then(|| {
+                    list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                    let taken = crate::klbf_keys::read_back(&self.device, list, &back);
+                    list.ResourceBarrier(&[transition(&back, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST)]);
+                    taken
+                })
+                .flatten();
             #[cfg(feature = "diagnostics")]
             let capture = crate::capture::wanted(frame)
                 .then(|| {
@@ -10694,6 +10706,10 @@ impl Host {
             }
             #[cfg(not(feature = "diagnostics"))]
             let _ = flown;
+            // Run and waited for (`read_now`): read, watermarked and written on a thread of its own.
+            if let Some(taken) = shot {
+                crate::klbf_keys::save(taken, crate::klbf_bench::shot_stats());
+            }
             #[cfg(feature = "diagnostics")]
             if let Some((buffer, footprint)) = capture {
                 crate::capture::save_read_back(frame, &buffer, &footprint);
@@ -11275,6 +11291,10 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // (KLBF Lab) F8, F10, F11 and the menu bar's items.
+    if crate::klbf_keys::on_message(message, wparam.0, lparam.0) {
+        return LRESULT(0);
+    }
     // SAFETY: the default handling for our window.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
@@ -11301,7 +11321,9 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             right: width as i32,
             bottom: height as i32,
         };
-        AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false)?;
+        // (KLBF Lab) Our menu bar (Screenshot, Restart, Settings), the client size kept.
+        let menu = HMENU(crate::klbf_keys::menu());
+        AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, !menu.0.is_null())?;
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
@@ -11312,7 +11334,7 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             rect.right - rect.left,
             rect.bottom - rect.top,
             None,
-            None,
+            (!menu.0.is_null()).then_some(menu),
             Some(instance.into()),
             None,
         )

@@ -25,6 +25,8 @@ mod port; // KLBF Lab: renderer port 1 (VICTORY_PORT_CONSTANTS, from rodrion-vi)
 #[cfg(windows)]
 pub mod klbf_bench; // KLBF Lab Bench BM-v1 (PastiiJay/klbf-lab)
 #[cfg(windows)]
+pub mod klbf_keys; // KLBF Lab in-game keys and menu: F8 screenshot, F10 settings, F11 restart
+#[cfg(windows)]
 mod pixels; // KLBF Lab Bench card pixels (from Neptune)
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
