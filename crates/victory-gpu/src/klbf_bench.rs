@@ -112,11 +112,14 @@ struct Run {
     /// Frame times since the start, ms.
     ms: Vec<f64>,
     black: u64,
+    /// (27/11, #124) Whether a frame that was not black has been presented in the run: black frames count only
+    /// from then on, so the title's opening fade (seconds of black on slower cards) does not invalidate a run.
+    lit: bool,
     /// [`counters`] at the start.
     base: [u64; 4],
 }
 
-static RUN_STATE: Mutex<Run> = Mutex::new(Run { phase: Phase::Waiting, last: None, ms: Vec::new(), black: 0, base: [0; 4] });
+static RUN_STATE: Mutex<Run> = Mutex::new(Run { phase: Phase::Waiting, last: None, ms: Vec::new(), black: 0, lit: false, base: [0; 4] });
 /// Presses the lock kept from the game.
 static BLOCKED: AtomicU64 = AtomicU64::new(0);
 static CARD: OnceLock<(Card, Instant)> = OnceLock::new();
@@ -327,7 +330,8 @@ pub(crate) fn on_present(black: bool, world_frame: u64) {
         r.ms.push(now.duration_since(last).as_secs_f64() * 1000.0);
     }
     r.last = Some(now);
-    r.black += u64::from(black);
+    r.lit |= !black;
+    r.black += u64::from(black && r.lit);
     drop(r);
     if START.get().is_some_and(|s| now.duration_since(*s) >= run_for()) {
         finish(None);
