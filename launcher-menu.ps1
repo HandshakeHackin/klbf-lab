@@ -868,11 +868,11 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
 
     # Under the tabs: the shaders' line, then a 3-column grid (156 px columns, 10 px apart): grey buttons on
     # the first row (room for more), Play alone in the right column of the second, violet.
-    $c.status = & $label $f $ShaderStatus 16 780 318 22
+    $c.status = & $label $f $ShaderStatus 16 780 276 22
     $c.status.ForeColor = $soft
     # (27/11) Clear shader cache, with its size (no path)
     $c.cacheBytes = Get-KlbfCacheBytes $Info.cache; $c.cacheGB = if ($c.cacheBytes -gt 0) { [math]::Max(0.1, [math]::Round($c.cacheBytes / 1GB, 1)) } else { 0 }
-    $c.clearCache = & $btn $f "Clear shader cache ($($c.cacheGB) GB)" 340 776 164 26
+    $c.clearCache = & $btn $f "Clear shader cache ($($c.cacheGB) GB)" 298 776 206 26
     $c.clearCache.Enabled = $c.cacheGB -gt 0
     $col = { param($i) 16 + 166 * $i }
     $c.prepare = & $btn $f 'Prepare shaders' (& $col 0) 806 156 36
@@ -1029,7 +1029,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.clearCache.add_Click({
         $ask = if ($c.confirm) { $c.confirm } else { { param($t) [System.Windows.Forms.MessageBox]::Show($t, 'KLBF Lab', 'YesNo', 'Warning') -eq 'Yes' } }
         if (-not (& $ask "Delete the shader cache ($($c.cacheGB) GB)?`r`nThe shaders are prepared again before the next start (a few minutes).")) { return }
-        try { & $fClear $c.info.cache; $c.cacheGB = 0; $c.clearCache.Text = 'Clear shader cache (0 GB)'; $c.clearCache.Enabled = $false; $c.status.Text = 'Shaders: not prepared for this build yet (a few minutes; Play offers it).' }
+        try { & $fClear $c.info.cache; $c.cacheGB = 0; $c.clearCache.Text = 'Clear shader cache (0 GB)'; $c.clearCache.Enabled = $false; $c.status.Text = 'Shaders: not prepared yet (Play offers it).' }
         catch { $c.status.Text = "$_" }
     }.GetNewClosure())
     @{ form = $f; c = $c }

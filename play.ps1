@@ -105,7 +105,7 @@ if (-not $explicit) {
             $v = if ($Victory) { $Victory } else { Join-Path $PSScriptRoot "target\$Build\victory.exe" }
             $m = Join-Path $(if ($Cache) { $Cache } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }) 'scarlett-shaders-ahead.txt'
             $ready = (Test-Path -LiteralPath $m) -and ((Get-Content -LiteralPath $m -TotalCount 1) -eq (Get-KlbfShaderStamp $v $Build '1' ''))
-            $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared for this build yet (a few minutes; Play offers it).' }
+            $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared yet (Play offers it).' }
         } catch {}
         $known = if ($Game) { $Game } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt')) { (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'game-folder.txt') -TotalCount 1).Trim() } else { '' }
         $picked = Show-KlbfMenu $choice $status $v $(if ($Data) { $Data } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\data' }) $known $Cache
