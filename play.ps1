@@ -1,7 +1,14 @@
-# KLBF Lab: starts the title in Series X mode with the settings of Op-lite/victory-scarlett's
+# KLBF Lab: starts the title in Profile X with the settings of Op-lite/victory-scarlett's
 # scripts\play-scarlett.ps1 (same set; only the cache and save folders are KLBF Lab's own).
 #
 #   .\play.ps1 -Game 'D:\Games\MyDump'
+#
+# Started with no settings switch, a setup window asks how to play (profile, upscaler and preset, output,
+# frame generation; saved profiles) on the first start, and the choice is reused on later starts without it.
+# -Setup (or holding Shift while it starts) opens it again. -NoMenu skips it (the saved choice, else the
+# default: Profile X, FSR 4 Performance, 3840x2160, frame generation, hooks and texture trim). Any switch
+# below but -Game, -Build, -Victory, -Cache, -Data and -FfxDir skips it too and runs exactly what is asked.
+# -PrintEnv prints what would be run (settings and environment) and stops, without starting anything.
 #
 # -Game        your own dump: the folder with game_scarlett_master.exe (or that file itself).
 #              Remembered in game-folder.txt next to the repository's README, so later starts need no -Game.
@@ -11,8 +18,8 @@
 #              and is slow; faces can be missing in that first run and are right from the second.
 # -Data        saves (default: %LOCALAPPDATA%\klbf-lab\data)
 # -RayTracing  the title's own ray tracing (VICTORY_BVH_BUILDER=1): better light, much slower. Off by default.
-# -Fsr        Series S mode with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
-# -FsrX       Series X mode with AMD FSR 4 (KLBF_X_FSR=1): the title is made to use its FidelityFX path, sent to
+# -Fsr        Profile S with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
+# -FsrX       Profile X with AMD FSR 4 (KLBF_X_FSR=1): the title is made to use its FidelityFX path, sent to
 #              the PC's FSR DLL in -FfxDir. -FsrQuality quality (default, 1/1.5 of the output) | balanced (1/1.7)
 #              | performance (1/2) | ultraperformance (1/3), AMD's presets. -Output 2560x1440 sets the title's output (one of its modes; 3840x2160 without).
 # -FrameGen    AMD FSR frame generation on top (KLBF_FRAMEGEN=1), with -FsrX or -Fsr only: two frames shown per
@@ -71,9 +78,40 @@ param(
     [switch]$Tout,
     [switch]$NoPrecompile,
     [switch]$OnlyPrecompile,
-    [hashtable]$More = @{}
+    [hashtable]$More = @{},
+    [switch]$Setup,
+    [switch]$NoMenu,
+    [switch]$PrintEnv
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'launcher-menu.ps1')
+# The setup window's choice (launcher-menu.ps1), only when no settings switch is given.
+$menuAction = ''
+$passOn = @{}
+foreach ($k in 'Game', 'Build', 'Victory', 'Cache', 'Data', 'FfxDir') { if ($PSBoundParameters.ContainsKey($k)) { $passOn[$k] = $PSBoundParameters[$k] } }
+$notSettings = @($passOn.Keys) + @('Setup', 'NoMenu', 'PrintEnv')
+$explicit = @($PSBoundParameters.Keys | Where-Object { $_ -notin $notSettings })
+if (-not $explicit) {
+    $settingsFile = Join-Path (Get-KlbfLauncherDir) 'settings.json'
+    $choice = Read-KlbfSettings $settingsFile
+    $ask = -not $NoMenu -and -not $PrintEnv -and ($Setup -or -not $choice -or (Test-KlbfShift))
+    if (-not $choice) { $choice = Get-KlbfDefaults }
+    if ($ask) {
+        # One line on the shaders: prepared for this build or not (the window's choices do not change them).
+        $status = ''
+        try {
+            $v = if ($Victory) { $Victory } else { Join-Path $PSScriptRoot "target\$Build\victory.exe" }
+            $m = Join-Path $(if ($Cache) { $Cache } else { Join-Path $env:LOCALAPPDATA 'klbf-lab\cache' }) 'scarlett-shaders-ahead.txt'
+            $ready = (Test-Path -LiteralPath $m) -and ((Get-Content -LiteralPath $m -TotalCount 1) -eq (Get-KlbfShaderStamp $v $Build '1' ''))
+            $status = if ($ready) { 'Shaders: ready for this build.' } else { 'Shaders: not prepared for this build yet (a few minutes; Play offers it).' }
+        } catch {}
+        $picked = Show-KlbfMenu $choice $status
+        if (-not $picked) { exit 0 }
+        $choice = $picked.choice; $menuAction = $picked.action
+        Save-KlbfSettings $choice $settingsFile
+    }
+    foreach ($kv in (Get-KlbfSwitches $choice).GetEnumerator()) { Set-Variable -Name $kv.Key -Value $kv.Value }
+}
 if ($Tout) { $FsrX = [switch]$true; $FrameGen = [switch]$true; $Hooks = [switch]$true; $TexTrim = [switch]$true }
 $root = $PSScriptRoot
 $remembered = Join-Path $root 'game-folder.txt'
@@ -176,7 +214,7 @@ if ($FsrX) {
 }
 if ($FrameGen) {
     # (KLBF Lab, 27/11) AMD's frame generation, fed by the FSR upscale: its DLLs beside the upscaler's
-    if (-not $FsrX -and -not $Fsr) { throw '-FrameGen needs -FsrX (Series X) or -Fsr (Series S): it is fed by the FSR upscale.' }
+    if (-not $FsrX -and -not $Fsr) { throw '-FrameGen needs -FsrX (Profile X) or -Fsr (Profile S): it is fed by the FSR upscale.' }
     foreach ($dll in 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_framegeneration_dx12.dll') {
         if (-not (Test-Path -LiteralPath (Join-Path $FfxDir $dll))) { throw "AMD frame generation needs $dll in $FfxDir" }
     }
@@ -199,14 +237,33 @@ if ($Bench) {
 }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
+if ($PrintEnv) {
+    $mode = if ($Fsr) { 'Profile S (run --console series-s), VICTORY_FSR_DLL=' + (Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll') } else { 'Profile X' }
+    Write-Output "mode: $mode"
+    $on = @(@('Fsr', 'FsrX', 'FrameGen', 'Hooks', 'TexTrim') | Where-Object { (Get-Variable $_).Value })
+    if ($FsrX) { $on += "FsrQuality=$FsrQuality" }
+    if ($Output) { $on += "Output=$Output" }
+    Write-Output ('switches: ' + ($on -join ' '))
+    foreach ($k in $set.Keys | Sort-Object) { Write-Output "$k=$($set[$k])" }
+    exit 0
+}
 
 # Shaders translated ahead, when needed: the mark holds what the translations depend on that this script knows of
 # (the build and the settings that change the translation).
 $rpf = Join-Path $Game 'shaders.rpf'
 $mark = Join-Path $Cache 'scarlett-shaders-ahead.txt'
-$built = Get-Item -LiteralPath $Victory
-$stamp = '{0}|{1}|{2}|probe={3}|rays={4}' -f $built.Length, $built.LastWriteTimeUtc.Ticks, $Build, $set['VICTORY_PROBE_RAYS'], $set['VICTORY_BVH_BUILDER']
+$stamp = Get-KlbfShaderStamp $Victory $Build $set['VICTORY_PROBE_RAYS'] $set['VICTORY_BVH_BUILDER']
 $have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -TotalCount 1 } else { '' }
+# From the setup window: "Prepare shaders", or Play with shaders to prepare (asked: Prepare now / Later).
+if ($menuAction -and -not $NoPrecompile -and ($menuAction -eq 'prepare' -or $have -ne $stamp)) {
+    if (-not (Test-Path -LiteralPath $rpf -PathType Leaf)) {
+        Write-Warning "No shaders.rpf in ${Game}: the shaders will be translated while playing."
+    } elseif ($menuAction -eq 'prepare' -or (Confirm-KlbfPrepare (Get-KlbfPrepareReason $have $stamp))) {
+        if (Show-KlbfPrepare $Victory $rpf) { Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8 }
+    }
+    if ($menuAction -eq 'prepare') { & $PSCommandPath -Setup @passOn; exit $LASTEXITCODE }
+    $have = $stamp
+}
 if (-not $NoPrecompile -and $have -ne $stamp) {
     if (Test-Path -LiteralPath $rpf -PathType Leaf) {
         Write-Host 'Translating the game''s shaders ahead (needed once per build and setting; a few minutes)...'
@@ -245,12 +302,12 @@ if ($Bench) {
     Write-Host "KLBF Lab Bench: cache ready ($made effects built, shaders translated)."
 }
 
-Write-Host ("KLBF Lab, Series X mode, {0} build, ray tracing {1}, memory hooks {2}" -f $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
-if ($FsrX) { Write-Host "AMD FSR (Series X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
+Write-Host ("KLBF Lab, Profile {0}, {1} build, ray tracing {2}, memory hooks {3}" -f $(if ($Fsr) { 'S' } else { 'X' }), $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
+if ($FsrX) { Write-Host "AMD FSR (Profile X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
 if ($FrameGen) { Write-Host 'AMD frame generation: on (two frames shown per real one; more latency at a low base frame rate)' }
 Write-Host "Cache: $Cache"
 Write-Host "Saves: $Data"
-# -Fsr (KLBF Lab): Series S mode, whose title upscales with FSR 4, the calls going to the PC's FSR DLL
+# -Fsr (KLBF Lab): Profile S, whose title upscales with FSR 4, the calls going to the PC's FSR DLL
 # (VICTORY_FSR_DLL, in -FfxDir).
 if ($Fsr) {
     $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
