@@ -571,7 +571,7 @@ fn finish(early: Option<&'static str>) {
         stamp,
         reason,
         serial: String::new(),
-        date: format!("{} {month} {}", t.wDay, t.wYear),
+        date: format!("{} {month} {} {:02}:{:02}", t.wDay, t.wYear, t.wHour, t.wMinute),
         date_short: format!("{:02}.{:02}.{:02}", t.wDay, t.wMonth, t.wYear % 100),
         date_iso: format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond),
         elapsed: elapsed.min(run_for()),
@@ -1746,11 +1746,12 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
         // (27/11) Longer runs: the template's "5 minutes at ..." line (between the dotted lines at 290
         // and 347) is covered with the background just above it; the run's own length is written below.
         if length().1 != 5 {
-            let ys = (294.0 * k * sy) as i32;
+            // Sampled just below the text, above the lower dotted line: the palm's leaf crosses the rows above it.
+            let ys = (344.0 * k * sy) as i32;
             for i in (90.0 * k) as i32..(420.0 * k) as i32 {
                 let p = texel(((i as f32 + 0.5) * sx) as i32, ys);
                 let rgb = [0, 1, 2].map(|n| (p[n] * 255.0 / p[3].max(1.0)).clamp(0.0, 255.0) as u8);
-                for j in (298.0 * k) as i32..(343.0 * k) as i32 {
+                for j in (318.0 * k) as i32..(344.0 * k) as i32 {
                     put(&mut bm, ox.round() as i32 + i, oy.round() as i32 + j, rgb, 255);
                 }
             }
@@ -1999,7 +2000,8 @@ mod tests {
         card.share = "[KLBF Lab Bench BM-v1] PastiiJay/klbf-lab@abc1234 | RX 9070 XT | Ryzen 7 7800X3D | avg 60.0 fps, 1% low 58.5 | CERTIFIED | 3b8db536".into();
         card.png_name = "bench-results/KLBF-Bench-BM-v1-20261126-2104-3b8db536.png".into();
         card.from = "PastiiJay/klbf-lab @ abc1234".into();
-        card.date = "26 Nov 2026".into();
+        card.date = "26 Nov 2026 21:04".into();
+        card.used = "peak RAM 18.5 GB · peak VRAM 12.2 / 13.4 GB · card busy 66 %".into();
         card.date_short = "26.11.26".into();
         card.set.draws_per_frame = 8731.0;
         let out = std::env::var("KLBF_CARD_PREVIEW").expect("KLBF_CARD_PREVIEW=<file.png>");
