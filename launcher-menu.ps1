@@ -1018,23 +1018,25 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.savesNote = & $white (& $label $savesPage '' 6 436 480 60)
 
     # Quick tab: the last bench card, to copy as an image or as a short text
-    $g = & $group $quickPage 'Last benchmark' 4 420
+    # (27/11) Heights from the content, top to bottom (nothing overlaps whatever the number of shortcut lines)
+    $g = & $group $quickPage 'Last benchmark' 4 226
     $c.benchPic = New-Object System.Windows.Forms.PictureBox; $c.benchPic.SizeMode = 'Zoom'
-    [void](& $add $g $c.benchPic 12 22 456 292)
-    $c.benchInfo = & $white (& $label $g '' 12 320 456 20)
-    $c.copyImage = & $btn $g 'Copy image' 12 346 150
-    $c.copyText = & $btn $g 'Copy text' 172 346 150
-    $c.quickNote = & $white (& $label $g '' 12 382 456 30)
+    [void](& $add $g $c.benchPic 12 22 456 140)
+    $c.benchInfo = & $white (& $label $g '' 12 166 456 20)
+    $c.copyImage = & $btn $g 'Copy image' 12 188 140
+    $c.copyText = & $btn $g 'Copy text' 158 188 140
+    $c.quickNote = & $white (& $label $g '' 304 186 164 34)
     # (27/11) Shortcuts: every key, and the in-game actions here (the game is not running: Restart is Play
     # with the settings this window opened with; Settings is this window)
-    $g = & $group $quickPage 'Shortcuts' 428 150
+    $lines = @(Get-KlbfShortcuts)
+    $g = & $group $quickPage 'Shortcuts' 236 (20 + 18 * $lines.Count + 4 + 28 + 10)
     $y = 20
-    foreach ($line in (Get-KlbfShortcuts)) { [void](& $white (& $label $g $line 12 $y 460 18)); $y += 18 }
-    $c.quickRestart = & $btn $g 'Restart (F11)' 12 ($y + 4) 140
-    $c.quickSettings = & $btn $g 'Settings (F10)' 158 ($y + 4) 140
-    $c.shortcut = & $btn $g 'Create desktop shortcut' 304 ($y + 4) 164
+    foreach ($line in $lines) { [void](& $white (& $label $g $line 12 $y 460 18)); $y += 18 }
+    $c.quickRestart = & $btn $g 'Restart (F11)' 12 ($y + 4) 130
+    $c.quickSettings = & $btn $g 'Settings (F10)' 147 ($y + 4) 130
+    $c.shortcut = & $btn $g 'Create desktop shortcut' 282 ($y + 4) 186
     $c.tips.SetToolTip($c.quickRestart, 'Play with the settings this window opened with.')
-    $g = & $group $quickPage 'Screenshots (F8)' 582 82
+    $g = & $group $quickPage 'Screenshots (F8)' (236 + $g.Height + 6) 84
     $c.shots = New-Object System.Windows.Forms.TextBox; $c.shots.ReadOnly = $true
     $c.shots.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.shots.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     [void](& $white (& $label $g 'Folder:' 12 25 50))
