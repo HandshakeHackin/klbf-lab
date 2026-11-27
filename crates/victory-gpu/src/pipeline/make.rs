@@ -236,6 +236,7 @@ impl Pending {
                 FAILED.fetch_add(1, Ordering::Relaxed);
             }
             MADE_RECENT.fetch_add(1, Ordering::Relaxed);
+            LAST_MADE_MS.store(since_start_ms(), Ordering::Relaxed);
             made
         });
         let (lock, done) = &DONE;
@@ -327,6 +328,26 @@ fn screens_first() -> bool {
 /// Pipelines queued and not made yet.
 static WAITING: AtomicU64 = AtomicU64::new(0);
 
+/// (27/11) When the last pipeline was made, ms since [`since_start_ms`]'s start.
+static LAST_MADE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn since_start_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// (27/11) Whether the queue is moving: pipelines wait and one was made within the last second.
+fn queue_moving() -> bool {
+    WAITING.load(Ordering::Relaxed) > 0 && since_start_ms().saturating_sub(LAST_MADE_MS.load(Ordering::Relaxed)) < 1000
+}
+
+/// (27/11) Whether a pipeline waited for `waited` ms in all is not waited for again: past the cap, and
+/// only while the queue is not moving (a pipeline that never gets made, #120); one still queued behind
+/// others being made keeps its frames' budget.
+fn capped(waited: u64, cap: u64, moving: bool) -> bool {
+    waited >= cap && !moving
+}
+
 /// Pipelines queued and not made yet (for the frame line).
 pub(crate) fn waiting() -> u64 {
     WAITING.load(Ordering::Relaxed)
@@ -369,7 +390,11 @@ fn variant<'a>(p: &'a Arc<Pending>, g: &GraphicsState, bound: &TargetFormats) ->
                 so_far,
                 "a pipeline is made again for the render target formats bound at its draw (eight render targets, then depth; VICTORY_TARGET_VARIANTS=0: the draw goes out with the title's pipeline)"
             );
-            Arc::new(Pending::new(p.shaders.clone(), Some(Box::new(g.with_formats(bound)))))
+            let made = Arc::new(Pending::new(p.shaders.clone(), Some(Box::new(g.with_formats(bound)))));
+            // (27/11) Written down like the title's own: made ahead by the next preparation (it was
+            // never, and compiled while playing at every start).
+            super::known::note(made.key(), &made.shaders, made.graphics.as_deref());
+            made
         });
         if next.formats == *bound {
             return next;
@@ -443,7 +468,10 @@ fn wait(p: &Pending, frame: u64) {
     // (27/11, #120) A pipeline already waited for longer than `VICTORY_PIPELINE_WAIT_CAP_MS` (5 s) in all
     // is not waited for again: one that never gets made (six ray-traced shadow pipelines on Proton)
     // otherwise took the whole budget of every frame, 1.8 fps. Its draws are dropped until it is made.
-    if !screen && p.waited_ms.load(Ordering::Relaxed) >= wait_cap_ms() {
+    // (27/11) Only while the queue is stalled: queued behind hundreds of others at the first scenes, a
+    // face's pipeline passed 5 s of waiting and its draws (the character bake's among them) were dropped,
+    // so faces stayed invisible until a restart.
+    if !screen && capped(p.waited_ms.load(Ordering::Relaxed), wait_cap_ms(), queue_moving()) {
         return;
     }
     // The frame the budget belongs to, and what was waited of it (or is
@@ -898,6 +926,16 @@ fn drained() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (27/11) The 5 s cap drops a pipeline's draws only while nothing is being made (#120), never while
+    /// it waits its turn in a moving queue (invisible faces).
+    #[test]
+    fn the_wait_cap_only_when_the_queue_is_stalled() {
+        assert!(!capped(4_999, 5_000, false), "under the cap");
+        assert!(capped(5_000, 5_000, false), "past it, nothing being made: dropped (#120)");
+        assert!(!capped(60_000, 5_000, true), "past it, the queue moving: still waited for");
+        assert!(!capped(60_000, u64::MAX, false), "no cap");
+    }
 
     #[test]
     fn worker_count_follows_the_processors_and_the_switch() {
