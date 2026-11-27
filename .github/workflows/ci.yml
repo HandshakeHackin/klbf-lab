@@ -18,25 +18,7 @@ jobs:
           'import sys,json; print(json.dumps(sys.argv[1:]))' | Set-Content capture.py
           foreach ($rev in @('HEAD^','HEAD')) {
             $line = (git show "${rev}:.github/workflows/release.yml" | Where-Object { $_ -match '^\s*gh release create ' }).Trim()
-            $line = $line.Replace('gh release create ', 'python capture.py ').Replace(('github.ref_name }}'),'v-test').Replace('${{ steps.pkg.outputs.zip }}'),'C:\build folder\artifact.zip').Replace('${{ steps.pkg.outputs.sha }}'),'abcd')
-            $argv = & ([scriptblock]::Create($line)) | ConvertFrom-Json
-            $ok = $argv.Count -eq 6 -and $argv[0] -eq 'v-test' -and $argv[1] -eq 'C:\build folder\artifact.zip' -and $argv[2] -eq '--title' -and $argv[3] -eq 'KLBF Lab v-test' -and $argv[4] -eq '--notes' -and $argv[5] -like '*KLBF Lab.cmd*abcd'
-            Write-Host "$rev argument count $($argv.Count), expected layout matched $ok"
-            if (($rev -eq 'HEAD') -ne $ok) { throw 'unexpected argument layout' }
-          }
- + '{{ github.ref_name }}'),'v-test').Replace(('steps.pkg.outputs.zip }}'),'C:\build folder\artifact.zip').Replace('${{ steps.pkg.outputs.sha }}'),'abcd')
-            $argv = & ([scriptblock]::Create($line)) | ConvertFrom-Json
-            $ok = $argv.Count -eq 6 -and $argv[0] -eq 'v-test' -and $argv[1] -eq 'C:\build folder\artifact.zip' -and $argv[2] -eq '--title' -and $argv[3] -eq 'KLBF Lab v-test' -and $argv[4] -eq '--notes' -and $argv[5] -like '*KLBF Lab.cmd*abcd'
-            Write-Host "$rev argument count $($argv.Count), expected layout matched $ok"
-            if (($rev -eq 'HEAD') -ne $ok) { throw 'unexpected argument layout' }
-          }
- + '{{ steps.pkg.outputs.zip }}'),'C:\build folder\artifact.zip').Replace(('steps.pkg.outputs.sha }}'),'abcd')
-            $argv = & ([scriptblock]::Create($line)) | ConvertFrom-Json
-            $ok = $argv.Count -eq 6 -and $argv[0] -eq 'v-test' -and $argv[1] -eq 'C:\build folder\artifact.zip' -and $argv[2] -eq '--title' -and $argv[3] -eq 'KLBF Lab v-test' -and $argv[4] -eq '--notes' -and $argv[5] -like '*KLBF Lab.cmd*abcd'
-            Write-Host "$rev argument count $($argv.Count), expected layout matched $ok"
-            if (($rev -eq 'HEAD') -ne $ok) { throw 'unexpected argument layout' }
-          }
- + '{{ steps.pkg.outputs.sha }}'),'abcd')
+            $line = $line.Replace('gh release create ', 'python capture.py ').Replace(([char]36 + '{{ github.ref_name }}'),'v-test').Replace(([char]36 + '{{ steps.pkg.outputs.zip }}'),'C:\build folder\artifact.zip').Replace(([char]36 + '{{ steps.pkg.outputs.sha }}'),'abcd')
             $argv = & ([scriptblock]::Create($line)) | ConvertFrom-Json
             $ok = $argv.Count -eq 6 -and $argv[0] -eq 'v-test' -and $argv[1] -eq 'C:\build folder\artifact.zip' -and $argv[2] -eq '--title' -and $argv[3] -eq 'KLBF Lab v-test' -and $argv[4] -eq '--notes' -and $argv[5] -like '*KLBF Lab.cmd*abcd'
             Write-Host "$rev argument count $($argv.Count), expected layout matched $ok"
