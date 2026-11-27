@@ -393,8 +393,37 @@ function Get-KlbfShortcuts {
         'F11  Restart: closes the game and starts it again with the same settings'
         'F10  during a benchmark: stops it (F8 and F11 do nothing during a run)'
         'Alt+Enter  borderless fullscreen on and off (in the game)'
+        'F9    lets the mouse go; a click in the game takes it again for the camera'
         'Shift  held while starting: opens these settings first'
     )
+}
+
+# (27/11) Keyboard and mouse: controls.json in KLBF Lab's home. The game makes it with its default keys at
+# its first start (and fills the keys in when the file has none), and reads it at each start.
+function Get-KlbfControlsPath { Join-Path (Get-KlbfHome) 'controls.json' }
+
+# @{ enabled; sensitivity; invertY; keys = @(@(input, target)...) } from the file; the defaults without one.
+function Read-KlbfControls([string]$Path = (Get-KlbfControlsPath)) {
+    $r = @{ enabled = $true; sensitivity = 1.0; invertY = $false; keys = @() }
+    $o = try { Get-Content -LiteralPath $Path -Raw -Encoding utf8 -ErrorAction Stop | ConvertFrom-Json } catch { $null }
+    if (-not $o) { return $r }
+    if ($o.enabled -is [bool]) { $r.enabled = $o.enabled }
+    if ($o.invert_y -is [bool]) { $r.invertY = $o.invert_y }
+    $n = $o.mouse_sensitivity -as [double]
+    if ($null -ne $n -and $n -ge 0) { $r.sensitivity = [math]::Min($n, 20) }
+    if ($o.keys) { $r.keys = @($o.keys.PSObject.Properties | ForEach-Object { , @($_.Name, [string]$_.Value) }) }
+    $r
+}
+
+# Writes the three settings into the file, its keys kept (-ResetKeys: dropped, the game puts the defaults back).
+function Save-KlbfControls([bool]$Enabled, [double]$Sensitivity, [bool]$InvertY, [string]$Path = (Get-KlbfControlsPath), [switch]$ResetKeys) {
+    $o = try { Get-Content -LiteralPath $Path -Raw -Encoding utf8 -ErrorAction Stop | ConvertFrom-Json } catch { $null }
+    if (-not $o -or $ResetKeys) { $o = New-Object psobject }
+    $o | Add-Member -NotePropertyName enabled -NotePropertyValue $Enabled -Force
+    $o | Add-Member -NotePropertyName mouse_sensitivity -NotePropertyValue ([math]::Round($Sensitivity, 2)) -Force
+    $o | Add-Member -NotePropertyName invert_y -NotePropertyValue $InvertY -Force
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    [IO.File]::WriteAllText($Path, ($o | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
 }
 
 # Whether $Path is a game folder play.ps1 can start: it has game_scarlett_master.exe.
@@ -1112,7 +1141,8 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $page = New-Object System.Windows.Forms.TabPage; $page.Text = 'Play'; $page.BackColor = $back; $page.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $savesPage = New-Object System.Windows.Forms.TabPage; $savesPage.Text = 'Saves'; $savesPage.BackColor = $back; $savesPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $quickPage = New-Object System.Windows.Forms.TabPage; $quickPage.Text = 'Quick'; $quickPage.BackColor = $back; $quickPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
-    $tabs.TabPages.AddRange(@($page, $savesPage, $quickPage))
+    $controlsPage = New-Object System.Windows.Forms.TabPage; $controlsPage.Text = 'Controls'; $controlsPage.BackColor = $back; $controlsPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    $tabs.TabPages.AddRange(@($page, $savesPage, $quickPage, $controlsPage))
 
     # Your PC: what was found, a verdict per line (green: fine, amber: works with less, red: not supported)
     # Game folder: where the player's copy is; checked, and the room the cache needs on its drive
@@ -1266,6 +1296,35 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.benchInfo.Text = 'No benchmark yet: Run benchmark makes one.'
         $c.copyImage.Enabled = $false; $c.copyText.Enabled = $false
     }
+
+    # (27/11) Controls tab: keyboard and mouse on or off, the mouse's settings, the keys (controls.json)
+    $c.controlsPath = if ($Info.controls) { $Info.controls } else { Get-KlbfControlsPath }
+    $ctl = Read-KlbfControls $c.controlsPath
+    $g = & $group $controlsPage 'Keyboard and mouse' 4 112
+    $c.kbmOn = New-Object System.Windows.Forms.CheckBox; $c.kbmOn.Text = 'Keyboard and mouse: on (works together with a controller)'
+    [void](& $white (& $add $g $c.kbmOn 12 18 460 22))
+    [void](& $white (& $label $g 'Mouse sensitivity:' 12 50 120))
+    $c.kbmSens = New-Object System.Windows.Forms.NumericUpDown
+    $c.kbmSens.DecimalPlaces = 1; $c.kbmSens.Increment = 0.1; $c.kbmSens.Minimum = 0.1; $c.kbmSens.Maximum = 20
+    [void](& $add $g $c.kbmSens 134 47 70 24)
+    $c.kbmInvert = New-Object System.Windows.Forms.CheckBox; $c.kbmInvert.Text = 'Invert mouse up and down'
+    [void](& $white (& $add $g $c.kbmInvert 230 48 240 22))
+    [void](& $white (& $label $g 'Click in the game to use the mouse as the camera; F9 lets it go (so does leaving the window).' 12 76 460 32))
+    $c.kbmOn.Checked = $ctl.enabled; $c.kbmInvert.Checked = $ctl.invertY
+    $c.kbmSens.Value = [decimal][math]::Max(0.1, [math]::Min(20, $ctl.sensitivity))
+    $g = & $group $controlsPage 'Keys' 122 500
+    $c.kbmKeys = New-Object System.Windows.Forms.ListView
+    $c.kbmKeys.View = 'Details'; $c.kbmKeys.FullRowSelect = $true; $c.kbmKeys.HeaderStyle = 'Nonclickable'
+    $c.kbmKeys.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.kbmKeys.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    [void]$c.kbmKeys.Columns.Add('Key or mouse', 160); [void]$c.kbmKeys.Columns.Add('Controller', 270)
+    [void](& $add $g $c.kbmKeys 12 20 456 370)
+    foreach ($k in $ctl.keys) { $it = New-Object System.Windows.Forms.ListViewItem($k[0]); [void]$it.SubItems.Add($k[1]); [void]$c.kbmKeys.Items.Add($it) }
+    $c.kbmNote = & $white (& $label $g ('Letters are key positions on a QWERTY keyboard (W A S D is Z Q S D on AZERTY). ' +
+        'To change a key, edit controls.json (its first line lists every name), then start the game.') 12 396 456 50)
+    if (-not $ctl.keys) { $c.kbmNote.Text = 'The keys appear here after the first start of the game (it makes controls.json with the defaults: W A S D move, mouse camera, left click fire, right click aim).' }
+    $c.kbmOpen = & $btn $g 'Open controls.json' 12 452 170
+    $c.kbmReset = & $btn $g 'Reset keys to defaults' 188 452 180
+    $c.kbmOpen.Enabled = Test-Path -LiteralPath $c.controlsPath
 
     # Under the tabs: the shaders' line, then a 3-column grid (156 px columns, 10 px apart): grey buttons on
     # the first row (room for more), Play alone in the right column of the second, violet.
@@ -1436,6 +1495,14 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $dir = & $fShotsDir @{ shotsDir = $c.shotsDir }
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         & $c.openUrl $dir
+    }.GetNewClosure())
+    $fSaveCtl = ${function:Save-KlbfControls}
+    $saveCtl = { & $fSaveCtl $c.kbmOn.Checked ([double]$c.kbmSens.Value) $c.kbmInvert.Checked $c.controlsPath }.GetNewClosure()
+    $c.kbmOn.add_CheckedChanged($saveCtl); $c.kbmInvert.add_CheckedChanged($saveCtl); $c.kbmSens.add_ValueChanged($saveCtl)
+    $c.kbmOpen.add_Click({ Start-Process notepad.exe -ArgumentList ('"{0}"' -f $c.controlsPath) }.GetNewClosure())
+    $c.kbmReset.add_Click({
+        & $fSaveCtl $c.kbmOn.Checked ([double]$c.kbmSens.Value) $c.kbmInvert.Checked $c.controlsPath -ResetKeys
+        $c.kbmKeys.Items.Clear(); $c.kbmNote.Text = 'The default keys come back at the next start of the game.'
     }.GetNewClosure())
     $fPrepSpace = ${function:Test-KlbfPrepareSpace}; $fClear = ${function:Clear-KlbfShaderCache}
     $c.tips.SetToolTip($c.prepare, 'About 7.2 GB once done. It grows again only after a change of ray tracing or probe rays; none of the choices here change the shaders.')

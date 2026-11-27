@@ -85,8 +85,17 @@ Good to know:
   (`%LOCALAPPDATA%\victory-scarlett\cache` unless you chose another).
 - **The first session still stutters a little** while the graphics driver builds its own pipelines; later
   sessions are smoother.
-- **Controls:** an Xbox controller works. On the keyboard: W A S D move, I J K L camera, Enter = A, Backspace = B,
-  X and Y, Z / C = left / right trigger, Q / E = LB / RB, arrows = D-pad, Esc = Menu, Tab = View.
+- **Controls:** an Xbox controller works, and so do keyboard and mouse, both at once. Click in the game to use
+  the mouse as the camera (the cursor is hidden and kept in the window); **F9** lets it go, and so does leaving
+  the window. Default keys: W A S D move, mouse = camera, left click = RT (fire), right click = LT (aim),
+  Shift = A (sprint), Space = X (jump), R = B (reload), F = Y, E = D-pad right (interact), C or Ctrl = left stick
+  press (crouch), Q = RB, Tab = LB, H or middle click = right stick press, mouse wheel = D-pad right / left,
+  1 2 3 4 = D-pad, arrows = D-pad, Esc or P = Menu, M = View (map), Enter = A, Backspace = B, I J K L = camera.
+  Letters are key positions on a QWERTY keyboard: on AZERTY, W A S D is Z Q S D. Everything is in
+  `%USERPROFILE%\Saved Games\KLBF Lab\controls.json` (made at the first start; its `help` line lists every
+  key and controller name; delete it for the defaults). KLBF Lab Settings, **Controls** tab: keyboard and mouse
+  on or off, mouse sensitivity, invert up and down, the keys. Off, the keyboard works as before (Tab = View,
+  Q / E = LB / RB, Z / C = triggers, X and Y).
 - **Do not use `Play-VIctory.cmd`** for this: that is the base's launcher, with Series S and other settings.
 - **Ray tracing** is off by default (the game's own, much slower). To turn it on, start it from PowerShell:
 
