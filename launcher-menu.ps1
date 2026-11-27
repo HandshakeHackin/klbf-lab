@@ -152,22 +152,33 @@ function Get-KlbfRestartArgs($Bound) {
     $a
 }
 
-# (27/11) The desktop shortcut that starts this build: hidden PowerShell running its play.ps1 with -Setup
-# (the settings window first), in the build's folder, with our icon.
+# (27/11) The desktop shortcut that starts this build with no console flashing: wscript.exe runs
+# "KLBF Lab.vbs" (beside play.ps1, written when the shortcut is made), which starts PowerShell hidden on the
+# folder's play.ps1 with -Setup (the settings window first; it shows itself, see Set-KlbfTheme).
 function Get-KlbfShortcutSpec([string]$BuildDir = $PSScriptRoot, [string]$Victory = '') {
-    if (-not $Victory) { $Victory = Join-Path $BuildDir 'victory.exe' }
     $ico = Join-Path $BuildDir 'klbf-lab.ico'
     if (-not (Test-Path -LiteralPath $ico)) { $ico = Join-Path $BuildDir 'apps\victory\klbf-lab.ico' }
     @{
-        target = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Victory "{1}" -Setup' -f (Join-Path $BuildDir 'play.ps1'), $Victory
+        target = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        arguments = '"{0}"' -f (Join-Path $BuildDir 'KLBF Lab.vbs')
         workdir = $BuildDir
         icon = $ico
+        vbs = Join-Path $BuildDir 'KLBF Lab.vbs'
     }
+}
+
+# The starter script: the folder from its own place, PowerShell hidden (window style 0), not waited for.
+function Get-KlbfVbsText {
+    @(
+        "' KLBF Lab: starts play.ps1 of this folder with no console window (the desktop shortcut runs this)."
+        'Dim d: d = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)'
+        'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & d & "\play.ps1"" -Victory """ & d & "\victory.exe"" -Setup", 0, False'
+    ) -join "`r`n"
 }
 
 # Desktop\KLBF Lab.lnk (the Desktop known folder) from a spec; $Path for tests.
 function New-KlbfShortcut($Spec, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
+    if ($Spec.vbs) { Set-Content -LiteralPath $Spec.vbs -Value (Get-KlbfVbsText) -Encoding ascii }
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
     $s.TargetPath = $Spec.target; $s.Arguments = $Spec.arguments; $s.WorkingDirectory = $Spec.workdir
     if (Test-Path -LiteralPath $Spec.icon) { $s.IconLocation = "$($Spec.icon),0" }
