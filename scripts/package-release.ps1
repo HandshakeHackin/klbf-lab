@@ -15,7 +15,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$name = "KLBF-Lab-$Tag-win64"
+# (27/11) The same name for every release: the extracted folder keeps it across updates (the version is
+# in VERSION, the release tag and the window)
+$name = 'KLBF-Lab-win64'
 $stage = Join-Path $Out $name
 $zip = Join-Path $Out "$name.zip"
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }

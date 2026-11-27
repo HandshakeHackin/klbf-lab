@@ -245,7 +245,7 @@ function Get-KlbfUpdate([string]$Current, [string]$Url = $(if ($env:KLBF_UPDATE_
             Invoke-RestMethod -UseBasicParsing -TimeoutSec 10 -Uri $Url }
     } catch { return $null }
     $new = & $ver ([string]$r.tag_name)
-    $asset = @($r.assets | Where-Object { $_.name -like 'KLBF-Lab-*-win64.zip' })[0]
+    $asset = @($r.assets | Where-Object { $_.name -eq 'KLBF-Lab-win64.zip' })[0]
     if (-not $new -or $new -le $have -or -not $asset) { return $null }
     @{ tag = [string]$r.tag_name; page = [string]$r.html_url; zip = [string]$asset.browser_download_url
         sha = $(if ([string]$r.body -match 'SHA-256 of the zip: ([0-9a-fA-F]{64})') { $Matches[1].ToLower() } else { '' }) }

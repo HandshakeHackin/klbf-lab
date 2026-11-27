@@ -21,8 +21,8 @@ try {
     $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zips['v26.11.2']).Hash.ToLower()
     $json = Join-Path $t 'latest.json'
     @{ tag_name = 'v26.11.2'; html_url = 'https://github.com/PastiiJay/klbf-lab/releases/tag/v26.11.2'
-        body = "Download KLBF-Lab-v26.11.2-win64.zip ... SHA-256 of the zip: $sha"
-        assets = @(@{ name = 'KLBF-Lab-v26.11.2-win64.zip'; browser_download_url = $zips['v26.11.2'] }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $json
+        body = "Download KLBF-Lab-win64.zip ... SHA-256 of the zip: $sha"
+        assets = @(@{ name = 'KLBF-Lab-win64.zip'; browser_download_url = $zips['v26.11.2'] }) } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $json
     # A fresh v26.11.1 build folder with the player's extras
     $n = 0
     $newBuild = {
