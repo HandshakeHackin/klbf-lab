@@ -709,21 +709,6 @@ pub fn before_present() {
     configure(api, &fg, frame, !paused() && PREPARED.load(Ordering::Acquire) == frame + 1);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fsr3_frame_generation_where_fsr4_is_not_offered() {
-        let v = |list: &[(u64, &str)]| list.iter().map(|&(i, n)| (i, n.to_owned())).collect::<Vec<_>>();
-        let built_in = v(&[(30, "3.1.5"), (31, "3.1.4")]);
-        assert_eq!(fsr3_of(&v(&[(40, "4.0.2"), (30, "3.1.5")]), &built_in), None, "RX 9000: FSR 4's, the SDK's pick");
-        assert_eq!(fsr3_of(&v(&[(30, "3.1.5")]), &built_in), Some(30), "RX 6000 / 7000: FSR 3.1's");
-        assert_eq!(fsr3_of(&v(&[(30, "FSR 3.1.5")]), &[]), Some(30));
-        assert_eq!(fsr3_of(&[], &built_in), None, "the SDK could not say: its own pick");
-        assert_eq!((kind_of("4.0.2"), kind_of("FSR 3.1.6"), kind_of("")), (4, 3, 0));
-    }
-}
 
 /// (27/11) Frames shown per second over the last second (real and generated), 0 before a second
 /// was measured or when the swap chain gives no present count; the window's caption.
@@ -771,4 +756,20 @@ pub fn after_present(presented: Option<u32>) {
         "frames rendered and frames shown (KLBF_FRAMEGEN=1: the extra ones are generated)"
     );
     *since = Some((std::time::Instant::now(), real, presented));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fsr3_frame_generation_where_fsr4_is_not_offered() {
+        let v = |list: &[(u64, &str)]| list.iter().map(|&(i, n)| (i, n.to_owned())).collect::<Vec<_>>();
+        let built_in = v(&[(30, "3.1.5"), (31, "3.1.4")]);
+        assert_eq!(fsr3_of(&v(&[(40, "4.0.2"), (30, "3.1.5")]), &built_in), None, "RX 9000: FSR 4's, the SDK's pick");
+        assert_eq!(fsr3_of(&v(&[(30, "3.1.5")]), &built_in), Some(30), "RX 6000 / 7000: FSR 3.1's");
+        assert_eq!(fsr3_of(&v(&[(30, "FSR 3.1.5")]), &[]), Some(30));
+        assert_eq!(fsr3_of(&[], &built_in), None, "the SDK could not say: its own pick");
+        assert_eq!((kind_of("4.0.2"), kind_of("FSR 3.1.6"), kind_of("")), (4, 3, 0));
+    }
 }
