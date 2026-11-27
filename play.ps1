@@ -270,6 +270,8 @@ if ($benchLabel) { $set.KLBF_BENCH_SAVE = $benchLabel }
 # (27/11) F8's screenshots: the folder chosen in Settings, else Pictures\KLBF Lab
 $saved = Read-KlbfSettings (Join-Path (Get-KlbfLauncherDir) 'settings.json')
 $set.KLBF_SHOTS_DIR = Get-KlbfShotsDir $saved
+# (27/11) Started by our launcher: the game says F8 / F10 / F11 in its caption (F10 and F11 come back here)
+$set.KLBF_LAUNCHER = '1'
 # (27/11) The Display chosen in Settings: the game window opens centred on that monitor (else the main one)
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }

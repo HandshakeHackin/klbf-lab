@@ -10390,6 +10390,8 @@ impl Meter {
         if !crate::klbf_bench::holds_title() {
             // While pipelines are being made: "· compiling N shaders" (the frame line's counter).
             let text = crate::klbf_bench::caption(fps, low1, draws, crate::pipeline::making());
+            // (KLBF Lab) The keys at the caption's right, before the window's buttons.
+            let text = crate::klbf_keys::with_hints(hwnd.0 as usize, text);
             let text: Vec<u16> = text.encode_utf16().chain([0]).collect();
             *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((hwnd.0 as usize, text));
         }
@@ -11293,7 +11295,7 @@ extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // (KLBF Lab) F8, F10, F11 and the menu bar's items.
+    // (KLBF Lab) F8, F10, F11.
     if crate::klbf_keys::on_message(message, wparam.0, lparam.0) {
         return LRESULT(0);
     }
@@ -11323,9 +11325,7 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             right: width as i32,
             bottom: height as i32,
         };
-        // (KLBF Lab) Our menu bar (Screenshot, Restart, Settings), the client size kept.
-        let menu = HMENU(crate::klbf_keys::menu());
-        AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, !menu.0.is_null())?;
+        AdjustWindowRect(&mut rect, WS_OVERLAPPEDWINDOW, false)?;
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
@@ -11336,7 +11336,7 @@ fn make_window(width: u32, height: u32) -> windows::core::Result<HWND> {
             rect.right - rect.left,
             rect.bottom - rect.top,
             None,
-            (!menu.0.is_null()).then_some(menu),
+            None,
             Some(instance.into()),
             None,
         )

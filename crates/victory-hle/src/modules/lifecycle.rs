@@ -110,17 +110,18 @@ pub extern "system" fn CreateWindowExW(
     instance: HINSTANCE,
     param: *const c_void,
 ) -> HWND {
-    let (menu, extra) = our_menu(parent, ex_style, style, menu, height);
-    let (x, y, width, height) = fit(parent, x, y, width, height, extra);
-    // SAFETY: the title's own arguments, forwarded (the size fitted, our menu bar's height added).
+    let main = main_window(parent, style, menu);
+    let (x, y, width, height) = fit(parent, x, y, width, height);
+    // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
         wm::CreateWindowExW(
-            ex_style, class, name, style, x, y, width, height + extra, parent, menu, instance, param,
+            ex_style, class, name, style, x, y, width, height, parent, menu, instance, param,
         )
     };
-    keep_client(hwnd, ex_style, style, height, extra);
     hook(hwnd);
-    borderless_at_start(hwnd, extra);
+    if main {
+        borderless_at_start(hwnd);
+    }
     hwnd
 }
 
@@ -139,17 +140,18 @@ pub extern "system" fn CreateWindowExA(
     instance: HINSTANCE,
     param: *const c_void,
 ) -> HWND {
-    let (menu, extra) = our_menu(parent, ex_style, style, menu, height);
-    let (x, y, width, height) = fit(parent, x, y, width, height, extra);
-    // SAFETY: the title's own arguments, forwarded (the size fitted, our menu bar's height added).
+    let main = main_window(parent, style, menu);
+    let (x, y, width, height) = fit(parent, x, y, width, height);
+    // SAFETY: the title's own arguments, forwarded (the size fitted).
     let hwnd = unsafe {
         wm::CreateWindowExA(
-            ex_style, class, name, style, x, y, width, height + extra, parent, menu, instance, param,
+            ex_style, class, name, style, x, y, width, height, parent, menu, instance, param,
         )
     };
-    keep_client(hwnd, ex_style, style, height, extra);
     hook(hwnd);
-    borderless_at_start(hwnd, extra);
+    if main {
+        borderless_at_start(hwnd);
+    }
     hwnd
 }
 
@@ -159,10 +161,9 @@ pub extern "system" fn CreateWindowExA(
 /// its proportions, and centred; what it shows is scaled to it (the swap
 /// chain stretches). `VICTORY_WINDOW_MAX=WIDTHxHEIGHT` applies a smaller
 /// limit without changing the title's render targets.
-/// `reserve`: the height our menu bar will add below it (kept free of the work area).
 /// (KLBF Lab, 27/11) `KLBF_WINDOW_MONITOR=<n>` (the launcher's Display, 0 = the first monitor Windows
 /// lists): that monitor's work area instead of the primary's, the window always centred on it.
-fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32, reserve: i32) -> (i32, i32, i32, i32) {
+fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32, i32) {
     let mut area = RECT::default();
     let chosen = chosen_monitor();
     // SAFETY: `area` receives the primary monitor's work area.
@@ -173,7 +174,6 @@ fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32, reserve: i32) -> (
         }
         None => unsafe { wm::SystemParametersInfoW(wm::SPI_GETWORKAREA, 0, (&raw mut area).cast(), 0) },
     };
-    area.bottom -= reserve;
     let limit = window_limit();
     let fitted = fit_with_limit(&area, width, height, limit);
     if !parent.is_null() || known == 0 || width <= 0 || height <= 0 || (fitted == (width, height) && chosen.is_none()) {
@@ -263,66 +263,14 @@ fn fit_into(area: &RECT, width: i32, height: i32) -> (i32, i32) {
     )
 }
 
-/// (KLBF Lab, 27/11) The title's main window gets our menu bar (Screenshot, Restart, Settings at its
-/// right, `klbf_keys::menu`), and is made taller by the bar's height so its client area, which the swap
-/// chain fills, keeps the size the title asked for. Only the first top-level window with a caption and no
-/// menu of its own; none during a bench run. Returns the menu to create it with and the height added.
-fn our_menu(parent: HWND, ex_style: u32, style: u32, menu: HMENU, height: i32) -> (HMENU, i32) {
-    static GIVEN: AtomicBool = AtomicBool::new(false);
-    let top = parent.is_null() && style & wm::WS_CHILD == 0 && style & wm::WS_CAPTION == wm::WS_CAPTION;
-    if !top || !menu.is_null() || GIVEN.load(Ordering::Relaxed) {
-        return (menu, 0);
-    }
-    let ours = victory_gpu::klbf_keys::menu();
-    if ours.is_null() {
-        return (menu, 0);
-    }
-    GIVEN.store(true, Ordering::Relaxed);
-    if height == wm::CW_USEDEFAULT {
-        return (ours, 0);
-    }
-    let frame = |with: bool| {
-        let mut r = RECT::default();
-        // SAFETY: `r` receives the frame around an empty client area.
-        unsafe { wm::AdjustWindowRectEx(&mut r, style, i32::from(with), ex_style) };
-        r.bottom - r.top
-    };
-    (ours, frame(true) - frame(false))
+/// (KLBF Lab, 27/11) The title's main window: the first top-level window with a caption and no menu.
+fn main_window(parent: HWND, style: u32, menu: HMENU) -> bool {
+    static SEEN: AtomicBool = AtomicBool::new(false);
+    let top = parent.is_null() && style & wm::WS_CHILD == 0 && style & wm::WS_CAPTION == wm::WS_CAPTION && menu.is_null();
+    top && !SEEN.swap(true, Ordering::Relaxed)
 }
 
-/// After the window is made with our menu (`extra` > 0): if the bar took another height than planned
-/// (it wraps on a narrow window, or another scale), the window is resized so the client area is the
-/// one `height` (the title's window height) gives without a menu.
-fn keep_client(hwnd: HWND, ex_style: u32, style: u32, height: i32, extra: i32) {
-    if hwnd.is_null() || extra == 0 {
-        return;
-    }
-    let mut frame = RECT::default();
-    let (mut client, mut window) = (RECT::default(), RECT::default());
-    // SAFETY: a window this thread just created; rects of ours.
-    unsafe {
-        wm::AdjustWindowRectEx(&mut frame, style, 0, ex_style);
-        let want = height - (frame.bottom - frame.top);
-        if wm::GetClientRect(hwnd, &mut client) == 0 || wm::GetWindowRect(hwnd, &mut window) == 0 {
-            return;
-        }
-        let off = want - (client.bottom - client.top);
-        if off != 0 {
-            tracing::info!(off, "KLBF Lab: the window resized for its menu bar");
-            wm::SetWindowPos(
-                hwnd,
-                std::ptr::null_mut(),
-                0,
-                0,
-                window.right - window.left,
-                window.bottom - window.top + off,
-                wm::SWP_NOMOVE | wm::SWP_NOZORDER | wm::SWP_NOACTIVATE,
-            );
-        }
-    }
-}
-
-/// (KLBF Lab, 27/11) Borderless fullscreen: the window without its frame and menu bar, on its monitor,
+/// (KLBF Lab, 27/11) Borderless fullscreen: the window without its frame, on its monitor,
 /// keeping the picture's proportions (`letterbox`; black bars from a backdrop window behind it). The
 /// swap chain and output keep their size (scaled into the window). Alt+Enter toggles it; the window's
 /// place, style and menu come back. `KLBF_BORDERLESS=1` (the launcher's Display mode) starts in it.
@@ -335,9 +283,8 @@ struct Borderless {
 
 static BORDERLESS: Mutex<Option<Borderless>> = Mutex::new(None);
 
-fn borderless_at_start(hwnd: HWND, extra: i32) {
-    // Only the window that got our menu (the title's main one), once.
-    if extra > 0 && std::env::var("KLBF_BORDERLESS").is_ok_and(|v| v.trim() == "1") && !victory_gpu::klbf_bench::active() {
+fn borderless_at_start(hwnd: HWND) {
+    if std::env::var("KLBF_BORDERLESS").is_ok_and(|v| v.trim() == "1") && !victory_gpu::klbf_bench::active() {
         toggle_borderless(hwnd);
     }
 }
@@ -474,7 +421,7 @@ extern "system" fn window_proc(
     // Alt or F10 puts a window into menu mode: the system runs a modal menu
     // loop on the thread that owns the window, which is the title's. The
     // title then stops (no frames, no input) until a key ends the loop, and
-    // nothing shows it (our menu bar's items are commands, not menus);
+    // nothing shows it, since the window has no menu bar;
     // the title aborts itself about half a minute later. A console has no window
     // menu. The mouse still opens it from the title bar.
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
@@ -490,7 +437,7 @@ extern "system" fn window_proc(
         }
         return 0;
     }
-    // KLBF Lab: F8, F10, F11 and our menu bar's items.
+    // KLBF Lab: F8, F10, F11.
     if victory_gpu::klbf_keys::on_message(message, wparam, lparam) {
         return 0;
     }
