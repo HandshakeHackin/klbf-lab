@@ -4,7 +4,8 @@
 //! image (`klbf_bench::save_screenshot`). The same three are items of the window's menu bar, at its
 //! right. The keys come as window messages (`on_message`, from the title window's procedure), so a short
 //! tap is never missed between two frames. During a bench run none of them acts (F10 is the bench's:
-//! it stops the run) and the window gets no menu.
+//! it stops the run) and the window gets no menu. Started by another launcher (no `KLBF_LAUNCHER`,
+//! [`launcher`]), nobody restarts the game: F10 / F11 are the title's and there is no menu bar (F8 stays).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,6 +68,17 @@ fn action_of(message: u32, wparam: usize, lparam: isize) -> Option<Action> {
     }
 }
 
+/// Whether our launcher (play.ps1, `KLBF_LAUNCHER`) started the game: it acts on exit codes 10 and 11.
+pub fn launcher() -> bool {
+    static OURS: OnceLock<bool> = OnceLock::new();
+    *OURS.get_or_init(|| std::env::var_os("KLBF_LAUNCHER").is_some_and(|v| !v.is_empty()))
+}
+
+/// Whether `action` acts for this start: F10 / F11 only under our launcher.
+fn acts(action: Action, launcher: bool) -> bool {
+    launcher || action.exit_code().is_none()
+}
+
 static EXIT: OnceLock<fn(i32)> = OnceLock::new();
 static SHOT: AtomicBool = AtomicBool::new(false);
 
@@ -80,7 +92,7 @@ pub fn on_message(message: u32, wparam: usize, lparam: isize) -> bool {
     if crate::klbf_bench::active() {
         return false;
     }
-    let Some(action) = action_of(message, wparam, lparam) else { return false };
+    let Some(action) = action_of(message, wparam, lparam).filter(|&a| acts(a, launcher())) else { return false };
     match action.exit_code() {
         None => SHOT.store(true, Ordering::Relaxed),
         Some(code) => {
@@ -94,9 +106,9 @@ pub fn on_message(message: u32, wparam: usize, lparam: isize) -> bool {
     true
 }
 
-/// The game window's menu bar: our three items at its right. Null during a bench run.
+/// The game window's menu bar: our three items at its right. Null during a bench run or without our launcher.
 pub fn menu() -> HMENU {
-    if crate::klbf_bench::active() {
+    if crate::klbf_bench::active() || !launcher() {
         return std::ptr::null_mut();
     }
     // SAFETY: a new menu and NUL-terminated texts.
@@ -229,6 +241,13 @@ mod tests {
         assert_eq!(Action::Screenshot.exit_code(), None);
         let labels: Vec<_> = ALL.iter().map(|a| a.0.label()).collect();
         assert_eq!(labels, ["Screenshot (F8)", "Restart (F11)", "Settings (F10)"]);
+    }
+
+    #[test]
+    fn f10_f11_only_under_our_launcher() {
+        assert!(acts(Action::Screenshot, false), "F8 always");
+        assert!(!acts(Action::Settings, false) && !acts(Action::Restart, false));
+        assert!(acts(Action::Settings, true) && acts(Action::Restart, true));
     }
 
     #[test]
