@@ -6,6 +6,10 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## Unreleased
+
+- Fix: the run no longer ends with "write to 0x0 at +0x2215c35" (or "+0x23cf683") a minute or two in. That is the title's own hang watchdog: when its main loop does not move for 30 s (here: pipelines built one after another on a cold shader cache, during the opening movies) it crashes on purpose. It is now turned off at load; `KLBF_TITLE_WATCHDOG=1` keeps it. Thanks to the testers of #69 and #116.
+
 ## v26.11.3 (27 Nov 2026)
 
 - The launcher starts from "KLBF Lab.cmd" instead of "KLBF Lab.vbs": Windows Defender's cloud check flagged the .vbs (a script starting a hidden PowerShell) as a trojan, a false positive. An existing desktop shortcut is repaired automatically.

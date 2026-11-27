@@ -176,6 +176,11 @@ pub fn run(
         // off without them), from avatarmanz/VIctory-7900XTX.
         // SAFETY: the image stays mapped and nothing of it has run yet.
         unsafe { victory_loader::resolution::apply_asked(image.base(), size) };
+        // The title's own hang watchdog off (KLBF_TITLE_WATCHDOG=1 keeps it): a 30 s stall of its main
+        // loop on a cold shader cache made it crash the run on purpose (#69, #116).
+        // SAFETY: the image stays mapped and nothing of it has run yet.
+        #[cfg(windows)]
+        unsafe { victory_loader::watchdog::apply_asked(image.base(), size) };
     }
     #[cfg(windows)]
     if execute && let Some(ms) = victory_loader::frame_rate::asked_interval_ms() {
