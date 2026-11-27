@@ -95,9 +95,9 @@ if (-not $explicit) {
     $settingsFile = Join-Path (Get-KlbfLauncherDir) 'settings.json'
     $choice = Read-KlbfSettings $settingsFile
     $ask = -not $NoMenu -and -not $PrintEnv -and ($Setup -or -not $choice -or (Test-KlbfShift))
-    # (27/11) No settings yet: what this PC's hardware calls for (the owner's setting on an RDNA 4 16 GB card),
-    # or the owner's setting if the hardware cannot be read
-    if (-not $choice) { $choice = try { Get-KlbfRecommended (Get-KlbfHardware) } catch { Get-KlbfDefaults } }
+    # (27/11) No settings yet: the window starts from the setting that works for everyone (built-in upscaler,
+    # output fitting the screen); -NoMenu keeps the owner's setting, so scripts and benches are unchanged
+    if (-not $choice) { $choice = if ($ask) { try { Get-KlbfUniversal (Get-KlbfHardware) } catch { Get-KlbfDefaults } } else { Get-KlbfDefaults } }
     if ($ask) {
         # One line on the shaders: prepared for this build or not (the window's choices do not change them).
         $status = ''

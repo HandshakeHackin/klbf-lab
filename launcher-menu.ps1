@@ -2,6 +2,12 @@
 # Settings: %LOCALAPPDATA%\KLBF-Lab\launcher\settings.json (the current choice) and presets\<name>.json
 # (KLBF_LAUNCHER_DIR moves that folder, for tests).
 
+# (27/11) Hardware we have tested: on it the window marks the suggested options "(recommended for your
+# hardware)" (without picking them). Add a line as players' reports come in: gen as Get-KlbfGpuKind names it.
+$script:KlbfTested = @(
+    @{ gen = 'RDNA 4'; minVramGB = 16 }
+)
+
 $script:KlbfModes = '1280x720', '1664x936', '1920x1080', '2560x1440', '3840x2160'
 # AMD's presets: play.ps1's -FsrQuality values and their names (no Native AA: at 1.0 the Profile X memory
 # plan overflows, victory-loader resolution.rs).
@@ -189,6 +195,24 @@ function Get-KlbfUpscalerName($Hw, [string]$Cache) {
     $ran = Join-Path $Cache 'klbf-upscaler.txt'
     if (Test-Path -LiteralPath $ran) { $t = (Get-Content -LiteralPath $ran -TotalCount 1).Trim(); if ($t -match '^AMD FSR [\d.]+$') { return $t } }
     if ((Get-KlbfGpuKind $Hw.gpu).gen -eq 'RDNA 4') { 'AMD FSR 4' } else { 'AMD FSR 3.1' }
+}
+
+# (27/11, the owner) The first start's setting, the same for every PC until players' reports say more:
+# Profile X, the built-in (console) upscaler, the largest title mode not above the screen, no frame
+# generation, hooks and texture trim. The Your PC panel's button applies the hardware table instead.
+function Get-KlbfUniversal($Hw) {
+    $c = Get-KlbfDefaults
+    $c.upscaler = 'title'; $c.frameGen = $false
+    $w, $h = ([string]$Hw.screen -split 'x') + @(0, 0) | Select-Object -First 2 | ForEach-Object { [int]$_ }
+    $fit = @($script:KlbfModes | Where-Object { $m = $_ -split 'x'; [int]$m[0] -le $w -and [int]$m[1] -le $h })
+    $c.output = if ($fit) { $fit[-1] } else { $script:KlbfModes[0] }
+    $c
+}
+
+# Whether this PC's card is in $KlbfTested.
+function Test-KlbfTested($Hw) {
+    $gen = (Get-KlbfGpuKind $Hw.gpu).gen
+    [bool]@($script:KlbfTested | Where-Object { $_.gen -eq $gen -and $Hw.vramGB -ge $_.minVramGB }).Count
 }
 
 # The settings for this PC (27/11): Profile X only for RDNA 3 and 4 with 16 GB or more (RDNA 4: the owner's
@@ -427,6 +451,46 @@ function Get-KlbfBenchGuide {
     ) -join "`r`n"
 }
 
+# The newest bench result beside victory.exe (bench-results\*.png and its .json): @{ png; json } or $null.
+function Get-KlbfLastBench([string]$Victory) {
+    if (-not $Victory) { return $null }
+    $dir = Join-Path (Split-Path -Parent $Victory) 'bench-results'
+    $png = Get-ChildItem -LiteralPath $dir -Filter 'KLBF-Bench-*.png' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $png) { return $null }
+    $json = [IO.Path]::ChangeExtension($png.FullName, '.json')
+    @{ png = $png.FullName; json = $(if (Test-Path -LiteralPath $json) { $json } else { '' }) }
+}
+
+# (27/11) A short text to paste anywhere about a bench result (its JSON): figures, settings, card generation
+# and memory, the verdict, the build's commit and the repository. Nothing that names the player or the PC:
+# no player, paths, serial, share line, computer or user names.
+function Get-KlbfBenchShareText($Result) {
+    $fps = $Result.fps.avg; $set = $Result.settings
+    $en = [Globalization.CultureInfo]::InvariantCulture
+    $fg = [bool]$set.frame_generation
+    $head = if ($fg) { [string]::Format($en, '{0:0} FPS (base {1:0})', $fps * 2, $fps) } else { [string]::Format($en, '{0:0.0} FPS', $fps) }
+    $up = switch ($set.upscaler_kind) {
+        'fsr' {
+            $v = [string]$set.upscaler_version
+            $name = if ($v -match '^(4|5)\.') { "AMD FSR $($Matches[1])" } elseif ($v -match '^(\d+)\.(\d+)') { "AMD FSR $($Matches[1]).$($Matches[2])" } else { 'AMD FSR' }
+            ($name, $set.upscaler_preset | Where-Object { $_ }) -join ' '
+        }
+        'title' { 'Built-in (console) upscaler' }
+        default { 'Native' }
+    }
+    $rows = { param($wh) if (-not $wh) { return '' }; $h = [int](($wh -split 'x')[1]); if ($h -eq 2160) { '4K' } else { "${h}p" } }
+    $res = if ($set.render_size -and $set.render_size -ne $set.output_size) { "$(& $rows $set.render_size) -> $(& $rows $set.output_size)" } else { & $rows $set.output_size }
+    $k = Get-KlbfGpuKind ([string]$Result.gpu)
+    $card = if ($k.gen) { $k.gen } else { 'GPU' }
+    @(
+        "KLBF Lab Bench BM-v1: $head, 1% low $([string]::Format($en, '{0:0.0}', $Result.fps.low_1pct))"
+        (@("Profile $($set.profile)", $up, $res, "frame generation $(if ($fg) { 'on' } else { 'off' })") | Where-Object { $_ }) -join ' - '
+        "$card, $([math]::Round([double]$Result.gpu_vram_gb)) GB VRAM, $([math]::Round([double]$Result.ram_gb)) GB RAM"
+        "$($Result.stamp) - KLBF Lab $($Result.sha)"
+        $script:KlbfRepo
+    ) -join "`r`n"
+}
+
 # The play.ps1 switches of a bench run: the player's settings, then -Bench (and -BenchPlayer).
 function Get-KlbfBenchSwitches($Choice, [string]$Player) {
     $s = Get-KlbfSwitches $Choice
@@ -487,10 +551,11 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     Set-KlbfTheme $f
     $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
     $f.StartPosition = 'CenterScreen'
-    $f.ClientSize = New-Object System.Drawing.Size(520, 884)
+    $f.ClientSize = New-Object System.Drawing.Size(520, 906)
     $soft = Get-KlbfColor $script:KlbfTheme.soft
     $back = Get-KlbfColor $script:KlbfTheme.back
-    $c = @{ recommended = (Get-KlbfRecommended $Hardware); info = $Info; hw = $Hardware; openUrl = { param($u) Start-Process $u }; clipboard = { param($t) [System.Windows.Forms.Clipboard]::SetText($t) } }
+    $c = @{ recommended = (Get-KlbfRecommended $Hardware); info = $Info; hw = $Hardware; openUrl = { param($u) Start-Process $u }
+        clipboard = { param($t) [System.Windows.Forms.Clipboard]::SetText($t) }; clipboardImage = { param($i) [System.Windows.Forms.Clipboard]::SetImage($i) } }
     $add = { param($parent, $ctl, $x, $y, $w, $h) $ctl.SetBounds($x, $y, $w, $h); $parent.Controls.Add($ctl); $ctl }
     $label = { param($parent, $text, $x, $y, $w, $h = 20) $l = New-Object System.Windows.Forms.Label; $l.Text = $text; & $add $parent $l $x $y $w $h }
     $radio = { param($parent, $text, $x, $y, $w) $r = New-Object System.Windows.Forms.RadioButton; $r.Text = $text; & $add $parent $r $x $y $w 22 }
@@ -523,11 +588,12 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     [void](& $add $f $rule 16 70 488 2)
 
     $tabs = New-Object System.Windows.Forms.TabControl
-    [void](& $add $f $tabs 12 80 496 672)
+    [void](& $add $f $tabs 12 80 496 694)
     $c.tabs = $tabs
     $page = New-Object System.Windows.Forms.TabPage; $page.Text = 'Play'; $page.BackColor = $back; $page.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     $savesPage = New-Object System.Windows.Forms.TabPage; $savesPage.Text = 'Saves'; $savesPage.BackColor = $back; $savesPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
-    $tabs.TabPages.AddRange(@($page, $savesPage))
+    $quickPage = New-Object System.Windows.Forms.TabPage; $quickPage.Text = 'Quick'; $quickPage.BackColor = $back; $quickPage.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    $tabs.TabPages.AddRange(@($page, $savesPage, $quickPage))
 
     # Your PC: what was found, a verdict per line (green: fine, amber: works with less, red: not supported)
     # Game folder: where the player's copy is; checked, and the room the cache needs on its drive
@@ -555,42 +621,47 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.pc[$v.what] = & $white (& $label $g ('{0}: {1}' -f $v.what, $v.text) 30 $y 444)
         $y += 20
     }
-    $c.recommend = & $btn $g 'Recommended settings for this PC' 12 ($y + 4) 260
+    $c.recommend = & $btn $g 'Try suggested settings for my PC' 12 ($y + 4) 260
 
     $g = & $group $page 'Profile' 248 52
-    # "(recommended for your PC)" on what Get-KlbfRecommended picks for this hardware
-    $mark = { param($text, $on) if ($on) { "$text (recommended for your PC)" } else { $text } }
+    # On tested hardware, the suggested options marked (not picked)
     $rec = $c.recommended
-    $c.profX = & $white (& $radio $g (& $mark 'Profile X' ($rec.profile -eq 'X')) 12 20 270)
-    $c.profS = & $white (& $radio $g (& $mark 'Profile S' ($rec.profile -eq 'S')) 286 20 190)
+    $tested = Test-KlbfTested $Hardware
+    $mark = { param($text, $on) if ($tested -and $on) { "$text (recommended for your hardware)" } else { $text } }
+    $c.profX = & $white (& $radio $g (& $mark 'Profile X' ($rec.profile -eq 'X')) 12 20 330)
+    $c.profS = & $white (& $radio $g (& $mark 'Profile S' ($rec.profile -eq 'S')) 346 20 130)
 
-    $g = & $group $page 'Upscaler' 304 96
-    $c.upFsr = & $white (& $radio $g (& $mark (Get-KlbfUpscalerName $Hardware $Info.cache) ($rec.upscaler -eq 'fsr')) 12 20 270)
-    $c.upTitle = & $white (& $radio $g "The title's own upscaler" 286 20 190)
-    [void](& $white (& $label $g 'Preset:' 12 46 120))
+    $g = & $group $page 'Upscaler' 304 118
+    $c.upFsr = & $white (& $radio $g (& $mark (Get-KlbfUpscalerName $Hardware $Info.cache) ($rec.upscaler -eq 'fsr')) 12 20 460)
+    $c.upTitle = & $white (& $radio $g 'Built-in (console) upscaler' 12 42 460)
+    $c.tips = New-Object System.Windows.Forms.ToolTip
+    $c.tips.SetToolTip($c.upTitle, "The game's own upscaler, translated: works on every card; softer image, no frame generation.")
+    $c.tips.SetToolTip($c.upFsr, 'AMD FSR (FSR 4 on RX 9000, FSR 3.1 elsewhere): sharper, presets, frame generation.')
+    [void](& $white (& $label $g $(if ($tested) { "Preset (recommended for your hardware: $($script:KlbfPresets[$rec.preset])):" } else { 'Preset:' }) 12 68 460))
     $p = New-Object System.Windows.Forms.Panel
-    [void](& $add $g $p 8 64 466 26)
+    [void](& $add $g $p 8 86 466 26)
     $c.presets = @{}
     $at = @{ quality = 4, 92; balanced = 100, 96; performance = 200, 118; ultraperformance = 322, 140 }
     foreach ($k in $script:KlbfPresets.Keys) {
         $c.presets[$k] = & $white (& $radio $p $script:KlbfPresets[$k] $at[$k][0] 2 $at[$k][1])
     }
 
-    $g = & $group $page 'Output resolution' 404 78
+    $g = & $group $page 'Output resolution' 426 78
     $c.output = & $combo $g 12 22 140
     foreach ($m in $script:KlbfModes) { [void]$c.output.Items.Add($m) }
-    $c.screen = & $white (& $label $g "Your screen: $Screen" 170 25 300)
+    $c.screen = & $white (& $label $g "Your screen: $Screen" 170 25 304)
+    $c.outputRec = if ($tested -and $rec.profile -eq 'X') { "Recommended for your hardware: $($rec.output)" } else { '' }
     $c.outputNote = & $white (& $label $g '' 12 52 460)
 
-    $g = & $group $page 'Options' 486 74
+    $g = & $group $page 'Options' 508 74
     $c.fg = New-Object System.Windows.Forms.CheckBox
-    $c.fg.Text = 'Frame generation (FG x2)'
+    $c.fg.Text = & $mark 'Frame generation (FG x2)' $rec.frameGen
     [void](& $white (& $add $g $c.fg 12 20 460 22))
     $c.adv = New-Object System.Windows.Forms.CheckBox
     $c.adv.Text = 'Advanced: memory hooks and texture trim (faster, uses less RAM)'
     [void](& $white (& $add $g $c.adv 12 44 462 22))
 
-    $g = & $group $page 'Saved profiles' 564 60
+    $g = & $group $page 'Saved profiles' 586 60
     $c.saved = & $combo $g 12 24 196
     foreach ($n in (Get-KlbfPresetNames)) { [void]$c.saved.Items.Add($n) }
     if ($c.saved.Items.Count) { $c.saved.SelectedIndex = 0 }
@@ -617,17 +688,34 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.copy = & $btn $g 'Copy' 380 24 88
     $c.savesNote = & $white (& $label $savesPage '' 6 436 480 60)
 
+    # Quick tab: the last bench card, to copy as an image or as a short text
+    $g = & $group $quickPage 'Last benchmark' 4 420
+    $c.benchPic = New-Object System.Windows.Forms.PictureBox; $c.benchPic.SizeMode = 'Zoom'
+    [void](& $add $g $c.benchPic 12 22 456 292)
+    $c.benchInfo = & $white (& $label $g '' 12 320 456 20)
+    $c.copyImage = & $btn $g 'Copy image' 12 346 150
+    $c.copyText = & $btn $g 'Copy text' 172 346 150
+    $c.quickNote = & $white (& $label $g '' 12 382 456 30)
+    $c.lastBench = Get-KlbfLastBench $Info.victory
+    if ($c.lastBench) {
+        $c.benchPic.Image = [System.Drawing.Image]::FromStream((New-Object IO.MemoryStream(, [IO.File]::ReadAllBytes($c.lastBench.png))))
+        $c.benchInfo.Text = 'The newest card from the bench-results folder.'
+    } else {
+        $c.benchInfo.Text = 'No benchmark yet: Run benchmark makes one.'
+        $c.copyImage.Enabled = $false; $c.copyText.Enabled = $false
+    }
+
     # Under the tabs: the shaders' line, then a 3-column grid (156 px columns, 10 px apart): grey buttons on
     # the first row (room for more), Play alone in the right column of the second, violet.
-    $c.status = & $label $f $ShaderStatus 16 758 488 22
+    $c.status = & $label $f $ShaderStatus 16 780 488 22
     $c.status.ForeColor = $soft
     $col = { param($i) 16 + 166 * $i }
-    $c.prepare = & $btn $f 'Prepare shaders' (& $col 0) 784 156 36
-    $c.bench = & $btn $f 'Run benchmark' (& $col 1) 784 156 36
-    $c.bug = & $btn $f 'Report a bug' (& $col 2) 784 156 36
-    $c.bugNote = & $label $f '' (& $col 0) 830 322 44
+    $c.prepare = & $btn $f 'Prepare shaders' (& $col 0) 806 156 36
+    $c.bench = & $btn $f 'Run benchmark' (& $col 1) 806 156 36
+    $c.bug = & $btn $f 'Report a bug' (& $col 2) 806 156 36
+    $c.bugNote = & $label $f '' (& $col 0) 852 322 44
     $c.bugNote.ForeColor = $soft
-    $c.play = & $btn $f 'Play' (& $col 2) 828 156 44
+    $c.play = & $btn $f 'Play' (& $col 2) 850 156 44
     Set-KlbfButton $c.play $true
     $c.play.Font = New-KlbfFont 12 'Bold'
 
@@ -714,6 +802,16 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         & $fSaves $c
         $c.savesNote.Text = 'Copied. The saves before it are backed up.' 
     }.GetNewClosure())
+    $fShare = ${function:Get-KlbfBenchShareText}
+    $c.copyImage.add_Click({
+        try { & $c.clipboardImage $c.benchPic.Image; $c.quickNote.Text = 'Card copied: paste it anywhere.' } catch { $c.quickNote.Text = 'Could not copy the image.' }
+    }.GetNewClosure())
+    $c.copyText.add_Click({
+        if (-not $c.lastBench.json) { $c.quickNote.Text = 'No result file beside this card.'; return }
+        $text = & $fShare (Get-Content -LiteralPath $c.lastBench.json -Raw | ConvertFrom-Json)
+        $c.lastShare = $text
+        try { & $c.clipboard $text; $c.quickNote.Text = 'Text copied: paste it anywhere.' } catch { $c.quickNote.Text = 'Could not copy the text.' }
+    }.GetNewClosure())
     $c.play.add_Click({ $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
     $c.prepare.add_Click({ $c.form.Tag = 'prepare'; $c.form.Close() }.GetNewClosure())
     @{ form = $f; c = $c }
@@ -768,7 +866,7 @@ function Update-KlbfForm($c) {
     $c.upFsr.Enabled = -not $s; $c.upTitle.Enabled = -not $s
     foreach ($k in $c.presets.Keys) { $c.presets[$k].Enabled = -not $s -and $fsr }
     $c.output.Enabled = -not $s
-    $c.outputNote.Text = $(if ($s) { 'Profile S: the title sets its own render size and output.' } else { '' })
+    $c.outputNote.Text = $(if ($s) { 'Profile S: the title sets its own render size and output.' } else { [string]$c.outputRec })
     $c.fg.Enabled = $fsr
     # Play, bench and shaders need the game files
     $ok = Test-KlbfGameFolder $c.gamePath
