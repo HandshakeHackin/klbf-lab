@@ -115,11 +115,65 @@ struct Run {
     /// (27/11, #124) Whether a frame that was not black has been presented in the run: black frames count only
     /// from then on, so the title's opening fade (seconds of black on slower cards) does not invalidate a run.
     lit: bool,
+    /// (27/11, #124) Black frames of mid-run fades (see [`FADE_STEPS`]), not counted in `black`.
+    fade: u64,
+    /// The black stretch going on: when it began, its frames, and whether the frames before it faded out.
+    dark: Option<(Instant, u64, bool)>,
     /// [`counters`] at the start.
     base: [u64; 4],
 }
 
-static RUN_STATE: Mutex<Run> = Mutex::new(Run { phase: Phase::Waiting, last: None, ms: Vec::new(), black: 0, lit: false, base: [0; 4] });
+/// (27/11, #124, reported by ParaNyx) A black stretch after lit frames is a fade (a scene or camera cut), left
+/// out of the black frames and shown on the card, when the `FADE_STEPS` probed levels before its first frame
+/// each went darker and a lit frame comes back within `FADE_MAX`. A drop to black at once, a black that lasts
+/// longer, or one still going at the end counts in full.
+const FADE_STEPS: usize = 3;
+const FADE_MAX: Duration = Duration::from_secs(20);
+
+impl Run {
+    /// One measured frame; `levels` (the brightest probed channel of the last frames, this one last) is read
+    /// only when a black stretch begins.
+    fn frame(&mut self, black: bool, now: Instant, levels: impl FnOnce() -> Vec<u8>) {
+        if !black {
+            self.lit = true;
+            if let Some((began, n, faded)) = self.dark.take() {
+                if faded && now.duration_since(began) <= FADE_MAX {
+                    self.fade += n;
+                } else {
+                    self.black += n;
+                }
+            }
+        } else if let Some(d) = &mut self.dark {
+            d.1 += 1;
+        } else if self.lit {
+            self.dark = Some((now, 1, faded_out(&levels())));
+        }
+    }
+
+    /// The black frames, a stretch still black at the end included.
+    fn black_frames(&self) -> u64 {
+        self.black + self.dark.map_or(0, |d| d.1)
+    }
+}
+
+/// Whether the levels darkened step by step into the last one (each of the last `FADE_STEPS` + 1 below the one
+/// before), as a fade does; a glitch drops at once.
+fn faded_out(levels: &[u8]) -> bool {
+    levels.len() > FADE_STEPS && levels[levels.len() - 1 - FADE_STEPS..].windows(2).all(|w| w[0] > w[1])
+}
+
+#[cfg(feature = "diagnostics")]
+fn probed_levels() -> Vec<u8> {
+    crate::capture::recent_levels()
+}
+
+/// Without the probe no frame is black.
+#[cfg(not(feature = "diagnostics"))]
+fn probed_levels() -> Vec<u8> {
+    Vec::new()
+}
+
+static RUN_STATE: Mutex<Run> = Mutex::new(Run { phase: Phase::Waiting, last: None, ms: Vec::new(), black: 0, lit: false, fade: 0, dark: None, base: [0; 4] });
 /// Presses the lock kept from the game.
 static BLOCKED: AtomicU64 = AtomicU64::new(0);
 static CARD: OnceLock<(Card, Instant)> = OnceLock::new();
@@ -420,7 +474,7 @@ fn shown() -> Shown {
     Shown { output, render, upscaler, fsr: String::new(), fg, screen }
 }
 
-/// (27/11) The window's caption outside a run, refreshed once a second (owner layout): "KLBF Lab | 14 FPS (FG 28)
+/// (27/11) The window's caption outside a run, refreshed once a second (owner layout): "KLBF Lab | 28 FPS (base 14)
 /// | 1% 8 | 60 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 +
 /// 6.3 shared) [| compiling N shaders]". `low1`: the 1 % low of the last second's frames, fps (0: not known).
 pub(crate) fn caption(fps: f64, low1: f64, draws: f64, making: u64) -> String {
@@ -444,7 +498,7 @@ fn fg_fps(fg: bool, fps: f64, measured: f64) -> f64 {
 fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown_fps: f64, mem: [u64; 4], making: u64) -> String {
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
     let fg = if fps > 0.0 { fg_fps(s.fg, fps, shown_fps) } else { 0.0 };
-    let mut parts = vec!["KLBF Lab".to_owned(), if fg > 0.0 { format!("{fps:.0} FPS (FG {fg:.0})") } else { format!("{fps:.0} FPS") }];
+    let mut parts = vec!["KLBF Lab".to_owned(), if fg > 0.0 { format!("{fg:.0} FPS (base {fps:.0})") } else { format!("{fps:.0} FPS") }];
     if low1 > 0.0 {
         parts.push(format!("1% {low1:.0}"));
     }
@@ -630,8 +684,7 @@ pub(crate) fn on_present(black: bool, world_frame: u64) {
         r.ms.push(now.duration_since(last).as_secs_f64() * 1000.0);
     }
     r.last = Some(now);
-    r.lit |= !black;
-    r.black += u64::from(black && r.lit);
+    r.frame(black, now, probed_levels);
     drop(r);
     if START.get().is_some_and(|s| now.duration_since(*s) >= run_for()) {
         finish(None);
@@ -791,7 +844,7 @@ struct Settings {
     /// (27/11) Sizes, upscaler, frame generation and screen at the end of the run.
     shown: Shown,
     /// Frames shown per real one with frame generation since the start (`framegen::shown_ratio`, 0: not
-    /// known): the card's "(FG N)". Not in the result's JSON (its serial and checker stay as they are).
+    /// known): the card's shown figure. Not in the result's JSON (its serial and checker stay as they are).
     fg_ratio: f64,
 }
 
@@ -902,13 +955,16 @@ fn finish(early: Option<&'static str>) {
     }
     r.phase = Phase::Done;
     let ms = std::mem::take(&mut r.ms);
-    let (black, base) = (r.black, r.base);
+    let (black, fade, base) = (r.black_frames(), r.fade, r.base);
     drop(r);
     let elapsed = START.get().map_or(Duration::ZERO, Instant::elapsed);
     let early = early.filter(|_| elapsed < run_for());
     let removed = device_removed();
     let s = summarize(&ms);
-    let (stamp, reason) = verdict(early.is_some(), elapsed.min(run_for()), &s, black, removed);
+    let (stamp, mut reason) = verdict(early.is_some(), elapsed.min(run_for()), &s, black, removed);
+    if fade > 0 {
+        reason += &format!(" \u{b7} fade {fade} frames");
+    }
     let now = counters();
     let set = Settings::read(s.frames, now[2].saturating_sub(base[2]), now[3].saturating_sub(base[3]));
     let t = local_time();
@@ -940,6 +996,7 @@ fn finish(early: Option<&'static str>) {
     let peak_vram = PEAK[1].load(Ordering::Relaxed).max(vram.0);
     let extra = Extra {
         black,
+        fade,
         removed,
         compiled: [now[0].saturating_sub(base[0]), now[1].saturating_sub(base[1])],
         vram,
@@ -981,6 +1038,8 @@ fn finish(early: Option<&'static str>) {
 
 struct Extra {
     black: u64,
+    /// Written as "fade_frames" only when there was one, so earlier results keep their form.
+    fade: u64,
     removed: bool,
     compiled: [u64; 2],
     vram: (u64, u64),
@@ -1148,7 +1207,7 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
     let s = &c.s;
     let t = &c.set;
-    J::obj([
+    let mut doc = J::obj([
         ("bench", J::S("KLBF Lab Bench".into())),
         ("test", J::S("Bayside Morning v1".into())),
         ("test_id", J::S(id())),
@@ -1218,7 +1277,11 @@ fn result_json(c: &Card, x: &Extra, per_second: &[f64]) -> J {
                 ("frame_generation", J::B(t.shown.fg)),
             ]),
         ),
-    ])
+    ]);
+    if let (J::O(m), true) = (&mut doc, x.fade > 0) {
+        m.insert("fade_frames", J::I(x.fade));
+    }
+    doc
 }
 
 /// "2560x1440", or null when not known.
@@ -1247,7 +1310,7 @@ fn write_results(c: &Card, x: &Extra, json: &str) {
         ),
         format!("Time >= 12 fps: {:.1} %", s.pct12),
         format!("Freezes (>200 ms): {} (longest frame {:.0} ms)", s.freezes, s.longest_ms),
-        format!("Black frames: {} \u{b7} device removed: {}", x.black, if x.removed { "yes" } else { "no" }),
+        format!("Black frames: {} (fades left out: {}) \u{b7} device removed: {}", x.black, x.fade, if x.removed { "yes" } else { "no" }),
         format!("Inputs blocked: {}", c.blocked),
         format!("Compiled during the run: {} shaders, {} pipelines", x.compiled[0], x.compiled[1]),
         format!("At the end: VRAM {:.0} / {:.0} MB \u{b7} RAM {:.0} MB", x.vram.0 as f64 / MB, x.vram.1 as f64 / MB, x.ram as f64 / MB),
@@ -2182,11 +2245,12 @@ fn render_card_boxes(c: &Card, w: usize, h: usize, framed: bool) -> (Bitmap, Vec
     }
     pen.text(ARIAL, 13.0, &c.used, 180.0, 490.0 + 18.0 * 4.0, false, 290.0, ink);
     // The average, big, and the four tiles.
-    pen.text(IMPACT, 64.0, &format!("{:.1}", c.s.avg), 535.0, 380.0, false, 135.0, ink);
-    // (27/11) With frame generation, the frames shown after "FPS average": "30 FPS (FG 60)".
+    // (27/11) With frame generation the big figure is the frames shown, the real ones after "FPS
+    // average": "34 FPS (base 17)". The tiles and the JSON stay the real ones.
     let fg = c.set.fg_fps(c.s.avg);
+    pen.text(IMPACT, 64.0, &format!("{:.1}", if fg > 0.0 { fg } else { c.s.avg }), 535.0, 380.0, false, 135.0, ink);
     if fg > 0.0 {
-        pen.text(ARIAL_BOLD, 16.0, &format!("(FG {fg:.0})"), 748.0, 372.0, false, 200.0, ink);
+        pen.text(ARIAL_BOLD, 16.0, &format!("(base {:.1})", c.s.avg), 748.0, 372.0, false, 200.0, ink);
     }
     let tiles = [format!("{:.1}", c.s.median), format!("{:.1}", c.s.low1), format!("{:.1}", c.s.max), format!("{:.0} %", c.s.pct12)];
     for (i, value) in tiles.iter().enumerate() {
@@ -2329,10 +2393,10 @@ mod tests {
         let mem = [(11.6 * GB) as u64, (14.0 * GB) as u64, (15.2 * GB) as u64, (6.3 * GB) as u64];
         let x4 = Shown { output: [3840, 2160], render: [1920, 1080], ..sample_shown() };
         // the owner layout; frame generation with no count from the swap chain: twice the real rate.
-        let full = "KLBF Lab | 14 FPS (FG 28) | 1% 8 | 71 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 + 6.3 shared)";
+        let full = "KLBF Lab | 28 FPS (base 14) | 1% 8 | 71 ms | 8.4k draws | Profile X FSR 4 Performance (1080p -> 4K) | VRAM 11.6/14.0 GB | RAM 21.5 GB (15.2 + 6.3 shared)";
         assert_eq!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 0), full);
         // The swap chain's measured count when there is one.
-        assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 26.6, mem, 0).starts_with("KLBF Lab | 14 FPS (FG 27) | 1% 8 |"));
+        assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 26.6, mem, 0).starts_with("KLBF Lab | 27 FPS (base 14) | 1% 8 |"));
         let compiling = caption_text(14.0, 8.0, 8_400.0, "Profile X", &x4, 0.0, mem, 12_345);
         assert_eq!(compiling, full.replace(" (15.2 + 6.3 shared)", "") + " | compiling 12345 shaders", "over 160: the RAM's detail goes");
         assert!(compiling.chars().count() <= 160);
@@ -2480,7 +2544,7 @@ mod tests {
     #[test]
     fn result_matches_the_checker_fixture() {
         let card = sample_card();
-        let extra = Extra { black: 0, removed: false, compiled: [3, 7], vram: (9000 << 20, 15000 << 20), ram: 12345 << 20, peaks: (13000 << 20, 9500 << 20), why: "5:00 reached" };
+        let extra = Extra { black: 0, fade: 0, removed: false, compiled: [3, 7], vram: (9000 << 20, 15000 << 20), ram: 12345 << 20, peaks: (13000 << 20, 9500 << 20), why: "5:00 reached" };
         let mut doc = result_json(&card, &extra, &[60.0, 57.3, 61.2]);
         let J::O(m) = &mut doc else { unreachable!() };
         // The build's own project and commit, replaced by the fixture's.
@@ -2497,6 +2561,73 @@ mod tests {
             std::fs::write(out, doc.canonical()).unwrap();
         }
         assert_eq!(doc.canonical(), include_str!("../tests/fixtures/KLBF-Bench-BM-v1-33a2e19f.json"));
+    }
+
+    fn running(lit: bool) -> Run {
+        Run { phase: Phase::Running, last: None, ms: Vec::new(), black: 0, lit, fade: 0, dark: None, base: [0; 4] }
+    }
+
+    /// (#124, ParaNyx's run) Lit, a fade to black 21 s in (levels 226 -> 5), 54 black frames at ~6.6 fps,
+    /// lit again: left out of the black frames, the run stays CERTIFIED.
+    #[test]
+    fn a_fade_after_lit_frames_is_left_out() {
+        let t0 = Instant::now();
+        let at = |f: u64| t0 + Duration::from_millis(f * 150);
+        let fading = [226, 221, 213, 203, 182, 159, 133, 102, 72, 43, 21, 5];
+        let mut r = running(false);
+        // The opening black, before the first lit frame: not counted.
+        for f in 0..20 {
+            r.frame(true, at(f), Vec::new);
+        }
+        for f in 20..140 {
+            r.frame(false, at(f), Vec::new);
+        }
+        for f in 140..194 {
+            r.frame(true, at(f), || fading.to_vec());
+        }
+        for f in 194..1980 {
+            r.frame(false, at(f), Vec::new);
+        }
+        assert_eq!((r.black_frames(), r.fade), (0, 54));
+        let s = summarize(&[1000.0 / 6.6; 1980]);
+        assert_eq!(verdict(false, Duration::from_secs(300), &s, r.black_frames(), false).0, Stamp::Certified);
+        // A drop at once (the opening's 44, 44, 44, 0) is not a fade.
+        assert!(!faded_out(&[44, 44, 44, 44, 0]));
+        assert!(faded_out(&[72, 43, 21, 5]));
+        assert!(!faded_out(&[21, 5]));
+    }
+
+    /// Black that lasts past `FADE_MAX`, never comes back, or drops at once still invalidates.
+    #[test]
+    fn a_long_or_sudden_black_still_invalidates() {
+        let t0 = Instant::now();
+        let at = |f: u64| t0 + Duration::from_millis(f * 150);
+        let fading = [102, 72, 43, 21, 5];
+        let s = summarize(&[150.0; 2000]);
+        let full = Duration::from_secs(300);
+        // Faded out, then 200 black frames (30 s) before lit again.
+        let mut r = running(true);
+        for f in 0..200 {
+            r.frame(true, at(f), || fading.to_vec());
+        }
+        r.frame(false, at(200), Vec::new);
+        assert_eq!((r.black_frames(), r.fade), (200, 0));
+        assert_eq!(verdict(false, full, &s, r.black_frames(), false).0, Stamp::Invalid);
+        // Faded out and never lit again: black to the end.
+        let mut r = running(true);
+        for f in 0..54 {
+            r.frame(true, at(f), || fading.to_vec());
+        }
+        assert_eq!((r.black_frames(), r.fade), (54, 0));
+        assert_eq!(verdict(false, full, &s, r.black_frames(), false).0, Stamp::Invalid);
+        // A sudden drop for 54 frames, lit again soon: counted.
+        let mut r = running(true);
+        for f in 0..54 {
+            r.frame(true, at(f), || vec![44, 44, 44, 44, 0]);
+        }
+        r.frame(false, at(54), Vec::new);
+        assert_eq!((r.black_frames(), r.fade), (54, 0));
+        assert_eq!(verdict(false, full, &s, r.black_frames(), false).0, Stamp::Invalid);
     }
 
     #[test]
