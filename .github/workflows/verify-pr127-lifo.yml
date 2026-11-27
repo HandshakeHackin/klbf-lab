@@ -1,0 +1,20 @@
+name: Verify PR 127 LIFO trim
+
+on:
+  push:
+    branches:
+      - verify/pr127-keep-recent-idle
+
+permissions:
+  contents: read
+
+jobs:
+  focused-windows-test:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Keep newest idle objects regression
+        run: cargo test -p victory-gpu list::tests::tight_pool_trim_keeps_the_newest_lifo_entries --locked -- --exact
