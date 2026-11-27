@@ -295,9 +295,11 @@ fn borderless_at_start(hwnd: HWND) {
     }
 }
 
-/// (KLBF Lab, 27/11) Once the game window shows, it comes in front with the focus: started by a hidden
-/// launcher, Windows lets a new process take the foreground only through the foreground's own input
-/// (attached for the call). Else the desktop kept the focus and Alt+F4 asked to shut Windows down.
+/// (KLBF Lab, 27/11) Once the game window shows, it comes in front with the keyboard focus. Started by a
+/// hidden launcher, Windows' foreground lock kept the focus elsewhere: F8, F10, F11 and Alt+F4 did nothing
+/// until a click in the game (play.ps1 now lets us take the foreground, `AllowSetForegroundWindow`). Tried
+/// for a few seconds (the title may show or activate its window later); the log says how it went. The
+/// game also ends above its borderless backdrop (a backdrop above it hid the picture).
 fn come_forward(hwnd: HWND) {
     let at = hwnd as usize;
     let _ = std::thread::Builder::new().name("klbf-forward".into()).spawn(move || {
@@ -313,32 +315,115 @@ fn come_forward(hwnd: HWND) {
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            to_front(hwnd);
+            let mut focus = false;
+            for _ in 0..50 {
+                to_front(hwnd);
+                std::thread::sleep(Duration::from_millis(100));
+                focus = has_focus(hwnd);
+                if focus {
+                    break;
+                }
+            }
+            if focus {
+                tracing::info!("KLBF Lab: game window has the keyboard focus");
+            } else {
+                tracing::warn!("KLBF Lab: game window has NOT the keyboard focus (Windows kept it elsewhere): click in the game for F8, F10 and F11");
+            }
+            above_backdrop(hwnd);
         }
     });
 }
 
-/// `hwnd` in front with the focus, through the foreground window's thread input.
+/// Whether the keyboard goes to `hwnd`: the foreground window, with the focus on it or one of its children.
+///
+/// # Safety
+/// `hwnd` is a window handle (a stale one fails).
+unsafe fn has_focus(hwnd: HWND) -> bool {
+    // SAFETY: plain queries.
+    unsafe {
+        let thread = wm::GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+        let mut info = wm::GUITHREADINFO { cbSize: size_of::<wm::GUITHREADINFO>() as u32, ..std::mem::zeroed() };
+        let known = thread != 0 && wm::GetGUIThreadInfo(thread, &mut info) != 0;
+        known && focused(wm::GetForegroundWindow(), info.hwndFocus, hwnd, wm::IsChild(hwnd, info.hwndFocus) != 0)
+    }
+}
+
+/// The keyboard reaches `game`: it is in front and holds the focus (itself or a child, `child`).
+fn focused(front: HWND, focus: HWND, game: HWND, child: bool) -> bool {
+    !game.is_null() && front == game && (focus == game || child)
+}
+
+/// The threads whose input a call from `me` attaches to: the window's and the foreground window's, each
+/// once and never `me` itself (0: none).
+fn to_attach(me: u32, window: u32, front: u32) -> [u32; 2] {
+    let keep = |t: u32| if t != me { t } else { 0 };
+    [keep(window), if front != window { keep(front) } else { 0 }]
+}
+
+/// `hwnd` in front with the keyboard focus, from any thread: this one's input is attached for the call
+/// to the window's thread and to the foreground window's (a thread sharing the foreground's input may
+/// take it, and SetFocus works only on its own input), then detached.
 ///
 /// # Safety
 /// `hwnd` is a window handle (a stale one fails).
 unsafe fn to_front(hwnd: HWND) {
-    use windows_sys::Win32::System::Threading::AttachThreadInput;
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     // SAFETY: plain window calls; the threads' input is detached again.
     unsafe {
-        let front = wm::GetForegroundWindow();
-        if front == hwnd {
-            return;
-        }
-        let theirs = wm::GetWindowThreadProcessId(front, std::ptr::null_mut());
-        let ours = wm::GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
-        let attached = theirs != 0 && theirs != ours && AttachThreadInput(theirs, ours, 1) != 0;
+        let me = GetCurrentThreadId();
+        let window = wm::GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+        let front = wm::GetWindowThreadProcessId(wm::GetForegroundWindow(), std::ptr::null_mut());
+        let attached = to_attach(me, window, front).map(|t| if t != 0 && AttachThreadInput(me, t, 1) != 0 { t } else { 0 });
         wm::BringWindowToTop(hwnd);
         wm::SetForegroundWindow(hwnd);
-        if attached {
-            AttachThreadInput(theirs, ours, 0);
+        SetFocus(hwnd);
+        for t in attached.into_iter().filter(|&t| t != 0) {
+            AttachThreadInput(me, t, 0);
         }
     }
+}
+
+/// (KLBF Lab, 27/11) The borderless backdrop, if any, is below the game in the z-order: checked, put back
+/// right behind the game when it is not, and logged.
+///
+/// # Safety
+/// `game` is a window handle (a stale one fails).
+unsafe fn above_backdrop(game: HWND) {
+    let backdrop = BORDERLESS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |b| b.backdrop) as HWND;
+    if backdrop.is_null() {
+        return;
+    }
+    // SAFETY: plain window calls on our windows.
+    unsafe {
+        if !below(game, backdrop) {
+            tracing::warn!("KLBF Lab: the borderless backdrop was above the game window; put back behind it");
+            wm::SetWindowPos(backdrop, game, 0, 0, 0, 0, wm::SWP_NOMOVE | wm::SWP_NOSIZE | wm::SWP_NOACTIVATE);
+        }
+        if below(game, backdrop) {
+            tracing::info!("KLBF Lab: game window above its borderless backdrop");
+        } else {
+            tracing::warn!("KLBF Lab: game window still under its borderless backdrop");
+        }
+    }
+}
+
+/// Whether `lower` comes after `upper` in the z-order (top to bottom).
+///
+/// # Safety
+/// Both are window handles.
+unsafe fn below(upper: HWND, lower: HWND) -> bool {
+    // SAFETY: plain queries along the z-order.
+    unsafe {
+        let mut w = wm::GetWindow(upper, wm::GW_HWNDNEXT);
+        while !w.is_null() {
+            if w == lower {
+                return true;
+            }
+            w = wm::GetWindow(w, wm::GW_HWNDNEXT);
+        }
+    }
+    false
 }
 
 /// The game window behind the backdrop: a click on the bars gives it the focus back.
@@ -372,7 +457,8 @@ fn letterbox(area: &RECT, (aw, ah): (i32, i32)) -> RECT {
     RECT { left, top, right: left + fw, bottom: top + fh }
 }
 
-/// A black, inert window covering `area`, just behind `game`.
+/// A black, inert window covering `area`, just behind `game`. Not owned by it: an owned window always
+/// stays above its owner, which would hide the game.
 fn backdrop(game: HWND, area: &RECT) -> HWND {
     use windows_sys::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject};
     const CLASS: PCWSTR = w!("KLBF Lab backdrop");
@@ -391,7 +477,7 @@ fn backdrop(game: HWND, area: &RECT) -> HWND {
             wm::WS_EX_TOOLWINDOW | wm::WS_EX_NOACTIVATE,
             CLASS,
             w!("KLBF Lab"),
-            wm::WS_POPUP | wm::WS_VISIBLE,
+            wm::WS_POPUP,
             area.left,
             area.top,
             area.right - area.left,
@@ -403,7 +489,8 @@ fn backdrop(game: HWND, area: &RECT) -> HWND {
         );
         if !b.is_null() {
             BACKDROP_FOR.store(game as usize, Ordering::Relaxed);
-            wm::SetWindowPos(b, game, 0, 0, 0, 0, wm::SWP_NOMOVE | wm::SWP_NOSIZE | wm::SWP_NOACTIVATE);
+            // Made hidden (a visible new window goes to the top, over the game), shown right behind it.
+            wm::SetWindowPos(b, game, 0, 0, 0, 0, wm::SWP_NOMOVE | wm::SWP_NOSIZE | wm::SWP_NOACTIVATE | wm::SWP_SHOWWINDOW);
         }
         b
     }
@@ -448,7 +535,15 @@ fn toggle_borderless(hwnd: HWND) {
         let backdrop = if bars { backdrop(hwnd, &screen) as usize } else { 0 };
         to_front(hwnd);
         *state = Some(Borderless { style, rect, menu: menu as usize, backdrop });
+        drop(state);
         tracing::info!(left = fit.left, top = fit.top, right = fit.right, bottom = fit.bottom, "KLBF Lab: borderless fullscreen");
+        // Shown already (toggled from the keyboard): the same checks as at the start.
+        if wm::IsWindowVisible(hwnd) != 0 {
+            above_backdrop(hwnd);
+            if has_focus(hwnd) {
+                tracing::info!("KLBF Lab: game window has the keyboard focus");
+            }
+        }
     }
 }
 
@@ -676,6 +771,37 @@ mod tests {
         assert!(!main_window(null, wm::WS_POPUP, null), "no caption");
         assert!(main_window(null, wm::WS_OVERLAPPEDWINDOW, null));
         assert!(!main_window(null, wm::WS_OVERLAPPEDWINDOW, null), "once");
+    }
+
+    /// (KLBF Lab, 27/11) The keyboard reaches the game only in front with the focus on it (or a child); the
+    /// input attached for the call is the window's and the foreground's threads', each once, never ours.
+    #[test]
+    fn the_game_gets_the_keyboard_only_in_front_with_the_focus() {
+        let (game, other) = (0x10 as HWND, 0x20 as HWND);
+        assert!(focused(game, game, game, false));
+        assert!(focused(game, other, game, true), "a child of the game has it");
+        assert!(!focused(other, game, game, false), "another window in front");
+        assert!(!focused(game, std::ptr::null_mut(), game, false), "in front without the focus (the bug)");
+        assert!(!focused(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), false));
+        assert_eq!(to_attach(1, 2, 3), [2, 3]);
+        assert_eq!(to_attach(1, 2, 2), [2, 0], "the same thread once");
+        assert_eq!(to_attach(2, 2, 3), [0, 3], "never our own thread");
+        assert_eq!(to_attach(1, 2, 0), [2, 0], "no foreground window");
+    }
+
+    /// (KLBF Lab, 27/11) The z-order walk: a window made after another, then put behind it, is below it.
+    #[test]
+    fn the_backdrop_is_found_below_the_game() {
+        // SAFETY: two hidden windows of a system class, made and destroyed here.
+        unsafe {
+            let make = || wm::CreateWindowExW(0, w!("STATIC"), w!("t"), wm::WS_POPUP, 0, 0, 10, 10, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null());
+            let (game, back) = (make(), make());
+            assert!(!game.is_null() && !back.is_null());
+            wm::SetWindowPos(back, game, 0, 0, 0, 0, wm::SWP_NOMOVE | wm::SWP_NOSIZE | wm::SWP_NOACTIVATE);
+            assert!(below(game, back) && !below(back, game));
+            wm::DestroyWindow(back);
+            wm::DestroyWindow(game);
+        }
     }
 
     /// (KLBF Lab) Borderless fullscreen keeps the picture's proportions: bars at the sides of a wide
