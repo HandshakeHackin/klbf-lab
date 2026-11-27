@@ -1,0 +1,14 @@
+name: Verify BM-v1 JSON on Windows
+on:
+  push:
+    branches: [verify/bm-json-certificate]
+permissions:
+  contents: read
+jobs:
+  certificate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p victory-gpu --lib klbf_bench::tests -- --nocapture
