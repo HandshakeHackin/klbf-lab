@@ -1,6 +1,6 @@
 # KLBF Lab v26.11.1 — stable (branch `stable-amd`)
 
-**Download the ready-to-play zip from the [Releases](https://github.com/PastiiJay/klbf-lab/releases/latest)** (extract, double-click "KLBF Lab", choose your game folder, Play). What changed: [CHANGELOG.md](CHANGELOG.md). The notes below are the earlier beta history.
+**Download the ready-to-play zip from the [Releases](https://github.com/PastiiJay/klbf-lab/releases/latest)** (download KLBF-Lab.zip, extract, open the "KLBF Lab" folder, double-click "KLBF Lab", choose your game folder, Play; to build it yourself, see [BUILD.md](BUILD.md)). What changed: [CHANGELOG.md](CHANGELOG.md). The notes below are the earlier beta history.
 
 
 **Beta v12 (2026-11-27).** Based on Op-lite's victory-scarlett (no longer public) (itself on

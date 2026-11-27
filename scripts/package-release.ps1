@@ -5,15 +5,17 @@
 #   .\scripts\package-release.ps1 -Tag v1.0.0 -Victory target\diag\victory.exe -Out dist
 #
 # The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.cmd", klbf-lab.ico, README.txt, LICENSE, VERSION and
-# SHA256SUMS.txt, at its root (Windows' "Extract All" makes the folder).
+# SHA256SUMS.txt, at its root (the updater's zip). KLBF-Lab.zip beside it: the same files in a "KLBF Lab" folder.
 param(
     [Parameter(Mandatory)][string]$Tag,
     [Parameter(Mandatory)][string]$Victory,
     [Parameter(Mandatory)][string]$Out,
     # Where play.ps1, launcher-menu.ps1, LICENSE and the icon come from (default: this repository)
-    [string]$Source = (Split-Path -Parent $PSScriptRoot)
+    [string]$Source
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 leaves $PSScriptRoot empty in param defaults (BUILD.md runs it with powershell -File)
+if (-not $Source) { $Source = Split-Path -Parent $PSScriptRoot }
 
 # (27/11) The same name for every release: the extracted folder keeps it across updates (the version is
 # in VERSION, the release tag and the window)
@@ -36,7 +38,7 @@ Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding ascii -Value 
 KLBF Lab $Tag (Windows, 64-bit)
 
 1. Extract anywhere.
-2. Double-click "KLBF Lab.cmd" (Windows may hide the ".cmd" part). Later, use the desktop shortcut it can create.
+2. Open the "KLBF Lab" folder and double-click "KLBF Lab.cmd" (Windows may hide the ".cmd" part). Later, use the desktop shortcut it can create.
 3. Choose your game folder (your own copy).
 4. Play.
 
@@ -50,6 +52,7 @@ upscaler is used; start again online to get it.
 
 Nothing of the game is included: KLBF Lab only runs your own copy. KLBF Lab itself: see LICENSE.
 Source and help: https://github.com/PastiiJay/klbf-lab
+Prefer to build it yourself? See BUILD.md in the repository.
 "@
 # (low-end beta) A beta tag (v26.11.3-lowend-beta1) says so at the top: untested, experimental switches off
 if ($Tag -match '-beta') {
@@ -67,4 +70,15 @@ $sums = $files | ForEach-Object { '{0} *{1}' -f (Get-FileHash -Algorithm SHA256 
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
+
+# (v26.11.4) KLBF-Lab.zip, for people: the same files inside a top folder "KLBF Lab\" (extracting the flat zip
+# spills them loose). KLBF-Lab-win64.zip stays flat: the updater (v26.11.2 on) downloads that one.
+$folderRoot = Join-Path $Out 'folder'
+$folder = Join-Path $folderRoot 'KLBF Lab'
+$zip2 = Join-Path $Out 'KLBF-Lab.zip'
+foreach ($p in $folderRoot, $zip2) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force } }
+New-Item -ItemType Directory -Force -Path $folderRoot | Out-Null
+Copy-Item -LiteralPath $stage -Destination $folder -Recurse
+[IO.Compression.ZipFile]::CreateFromDirectory($folder, $zip2, [IO.Compression.CompressionLevel]::Optimal, $true)
+# Only the flat zip's path is returned (release.yml and tests use it); KLBF-Lab.zip is beside it.
 $zip
