@@ -299,9 +299,9 @@ impl Shown {
         (self.upscaler == Upscaler::Fsr && self.render[1] > 0).then(|| preset(self.render[1], self.output[1])).flatten()
     }
 
-    /// "frame generation on · screen 2560x1440".
+    /// "frame generation x2 · screen 2560x1440".
     fn extras(&self) -> String {
-        let fg = format!("frame generation {}", if self.fg { "on" } else { "off" });
+        let fg = format!("frame generation {}", if self.fg { "x2" } else { "off" });
         if self.screen[1] == 0 { fg } else { format!("{fg} \u{b7} screen {}", wxh(self.screen)) }
     }
 }
@@ -430,7 +430,8 @@ fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, mem: 
         parts.push(format!("{profile} {label}"));
     }
     if s.fg {
-        parts.push("FG".into());
+        // (27/11) "FG x2": one generated frame per real one; AMD's multi-frame would read "MFG x3".
+        parts.push("FG x2".into());
     }
     let screen = (s.screen[1] > 0).then(|| parts.len());
     if screen.is_some() {
@@ -442,7 +443,8 @@ fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, mem: 
     if mem[2] > 0 {
         parts.push(format!("RAM {:.1} GB", mem[2] as f64 / GB));
     }
-    let text = |p: &[String]| crate::shell::compiling(p.join(" \u{b7} "), " \u{b7} ", making);
+    // The title's window is ANSI: "→" showed as "?" there (27/11), so the caption says "->".
+    let text = |p: &[String]| crate::shell::compiling(p.join(" \u{b7} ").replace('\u{2192}', "->"), " \u{b7} ", making);
     let full = text(&parts);
     match screen {
         Some(i) if full.chars().count() > 160 => {
@@ -2265,7 +2267,7 @@ mod tests {
         assert_eq!(Shown { upscaler: Upscaler::Title, render: [2560, 1440], output: [3840, 2160], ..sample_shown() }.label(), "Title upscaler 1440p \u{2192} 4K");
         assert_eq!(Shown { upscaler: Upscaler::Native, ..sample_shown() }.label(), "Native 1440p");
         assert_eq!(Shown::default().label(), "", "nothing presented yet");
-        assert_eq!(fsr.extras(), "frame generation on \u{b7} screen 2560x1440");
+        assert_eq!(fsr.extras(), "frame generation x2 \u{b7} screen 2560x1440");
         assert_eq!(Shown::default().extras(), "frame generation off");
     }
 
@@ -2275,17 +2277,17 @@ mod tests {
         set.profile = "X";
         let lines = set.lines();
         assert_eq!(lines[0], "Series X \u{b7} FSR 4 Quality 960p \u{2192} 1440p");
-        assert_eq!(lines[1], "frame generation on \u{b7} screen 2560x1440");
+        assert_eq!(lines[1], "frame generation x2 \u{b7} screen 2560x1440");
         set.shown = Shown::default();
         assert_eq!(set.lines()[0], "Series X \u{b7} FSR", "before the first present: the upscaler alone");
-        assert!(sample_card().set.line().starts_with("Series S \u{b7} FSR 4 Quality 960p \u{2192} 1440p \u{b7} frame generation on \u{b7} screen 2560x1440 \u{b7} "));
+        assert!(sample_card().set.line().starts_with("Series S \u{b7} FSR 4 Quality 960p \u{2192} 1440p \u{b7} frame generation x2 \u{b7} screen 2560x1440 \u{b7} "));
     }
 
     #[test]
     fn window_caption() {
         const GB: f64 = 1024.0 * 1024.0 * 1024.0;
         let mem = [(11.6 * GB) as u64, (14.0 * GB) as u64, (15.2 * GB) as u64];
-        let full = "KLBF Lab \u{b7} 16 FPS \u{b7} 63 ms \u{b7} 1% 9 \u{b7} 9.8k draws \u{b7} Series X FSR 4 Quality 960p \u{2192} 1440p \u{b7} FG \u{b7} screen 2560x1440 \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB";
+        let full = "KLBF Lab \u{b7} 16 FPS \u{b7} 63 ms \u{b7} 1% 9 \u{b7} 9.8k draws \u{b7} Series X FSR 4 Quality 960p -> 1440p \u{b7} FG x2 \u{b7} screen 2560x1440 \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB";
         assert_eq!(caption_text(15.9, 9.4, 9_800.0, "Series X", &sample_shown(), mem, 0), full);
         // Compiling: over 160 characters, so the screen goes.
         let compiling = caption_text(15.9, 9.4, 9_800.0, "Series X", &sample_shown(), mem, 12_345);
@@ -2295,7 +2297,7 @@ mod tests {
         assert_eq!(caption_text(0.0, 0.0, 0.0, "Series S", &Shown::default(), [0; 3], 1), "KLBF Lab \u{b7} 0 FPS \u{b7} \u{2013} ms \u{b7} compiling 1 shader");
         assert_eq!(
             caption_text(30.0, 25.0, 812.0, "Series S", &Shown { upscaler: Upscaler::Title, render: [1280, 720], output: [1920, 1080], fg: false, screen: [0; 2], ..sample_shown() }, mem, 0),
-            "KLBF Lab \u{b7} 30 FPS \u{b7} 33 ms \u{b7} 1% 25 \u{b7} 812 draws \u{b7} Series S Title upscaler 720p \u{2192} 1080p \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB"
+            "KLBF Lab \u{b7} 30 FPS \u{b7} 33 ms \u{b7} 1% 25 \u{b7} 812 draws \u{b7} Series S Title upscaler 720p -> 1080p \u{b7} VRAM 11.6/14.0 GB \u{b7} RAM 15.2 GB"
         );
     }
 
