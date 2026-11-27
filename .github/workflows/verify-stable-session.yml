@@ -1,0 +1,23 @@
+name: Verify stable benchmark session cleanup
+
+on:
+  push:
+    branches:
+      - verify/stable-bench-restore-session
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  session:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Exercise accepted and rejected benchmark launches
+        shell: pwsh
+        run: '& ${{ matrix.shell }} -NoProfile -ExecutionPolicy Bypass -File .github/workflows/verify-stable-session.ps1'
