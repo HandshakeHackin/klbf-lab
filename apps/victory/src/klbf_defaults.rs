@@ -55,6 +55,8 @@ const SET: &[(&str, &str)] = &[
     // v12: every written descriptor slot passed on in the same frame (Yaekai's 8 GB caps: black textures)
     ("VICTORY_HEAP_CHANGED_MAX", "0"),
     ("VICTORY_HEAP_PASS_MAX", "0"),
+    // Pipelines written down for `victory warm` (the launcher makes them ahead before the game starts)
+    ("VICTORY_PIPELINE_BOOK", "1"),
     // Picture
     ("VICTORY_BAKE_TEXTURES_MS", "10000"),
     ("VICTORY_PLANE_NOW", "1"),

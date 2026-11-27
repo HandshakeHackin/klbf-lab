@@ -125,6 +125,9 @@ $set = [ordered]@{
     # 8 GB caps left textures black and roads dark on a 16 GB card)
     VICTORY_HEAP_CHANGED_MAX = '0'; VICTORY_HEAP_PASS_MAX = '0'
 
+    # (KLBF Lab, 27/11) Every pipeline the title creates is written down, so the launcher makes them ahead next time
+    VICTORY_PIPELINE_BOOK = '1'
+
     # (KLBF Lab v12, 27/11) Left off after a real play session showed characters in a T-pose, black textures
     # and missing buildings with them on, and a clean picture with them off (one of them is the cause; being
     # narrowed down): VICTORY_LIST_HOLD, VICTORY_WINDOWS_BAR_MB, VICTORY_PORT_CONSTANTS, VICTORY_SOFT_VIEWS,
@@ -179,6 +182,15 @@ if (-not $NoPrecompile -and $have -ne $stamp) {
     } else {
         Write-Warning "No shaders.rpf in ${Game}: the shaders will be translated while playing."
     }
+}
+# (27/11) Effects made on the loading side, never while playing: every pipeline the title created in earlier runs
+# (written down by VICTORY_PIPELINE_BOOK) is made ahead by `victory warm` into the driver's cache, before the game
+# starts. Only new ones are made; it goes on where it stopped. -NoPrecompile skips it.
+$book = Join-Path $Cache 'pipelines\known-pipelines.bin'
+if (-not $NoPrecompile -and (Test-Path -LiteralPath $book)) {
+    Write-Host 'Making the effects of earlier runs ahead, so they do not compile while playing (only new ones; resumes where it stopped)...'
+    & $Victory warm
+    if ($LASTEXITCODE -ne 0) { Write-Warning 'Making effects ahead stopped early; the rest are made while playing.' }
 }
 if ($OnlyPrecompile) { exit 0 }
 # (27/11) The bench starts only on a ready cache: the shaders translated for this build, and the effects made by
