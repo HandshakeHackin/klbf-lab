@@ -1220,7 +1220,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $note.ForeColor = $soft
     $c.backup = & $btn $savesPage 'Back up all' 6 322 150
     $c.restore = & $btn $savesPage "Restore a backup$([char]0x2026)" 166 322 170
-    $c.showNamesBtn = & $btn $savesPage "$([char]::ConvertFromUtf32(0x1F441)) Show names" 346 322 140
+    $c.showNamesBtn = & $btn $savesPage "Show names" 346 322 140
     $g = & $group $savesPage 'Copy a save over another (all saves are backed up first)' 362 64
     $c.copyFrom = & $combo $g 12 26 170
     [void](& $white (& $label $g 'over' 190 30 36))
@@ -1465,7 +1465,7 @@ function Update-KlbfSavesTab($c) {
         [void]$c.savesList.Items.Add($it)
         [void]$c.copyFrom.Items.Add((Get-KlbfSaveName $s)); [void]$c.copyTo.Items.Add((Get-KlbfSaveName $s))
     }
-    $c.showNamesBtn.Text = "$([char]::ConvertFromUtf32(0x1F441)) $(if ($c.showNames) { 'Hide names' } else { 'Show names' })" 
+    $c.showNamesBtn.Text = "$(if ($c.showNames) { 'Hide names' } else { 'Show names' })" 
     if (-not $c.saves) { $c.savesNote.Text = $(if ($c.savesRoot) { 'No saves yet.' } else { 'No saves folder yet: it appears after the first save in the game.' }) }
 }
 
@@ -1527,7 +1527,7 @@ function Get-KlbfOutputNote([bool]$ProfileS, [string]$Output, [string]$Screen) {
     if ($ProfileS) { return 'Profile S: the title sets its own render size and output.' }
     if ($Output -ne '3840x2160') { return "Below 3840x2160 the game's HUD gets bigger (known issue)." }
     $sw, $sh = ($Screen -split 'x') + @(0, 0) | Select-Object -First 2 | ForEach-Object { [int]$_ }
-    if ($Screen -and $sh -lt 2160) { return "3840x2160 recommended: the game's HUD is only the right size at 4K; it is scaled down to your $Screen screen (sharper image, the cost depends on the FSR preset)." }
+    if ($Screen -and $sh -lt 2160) { return "3840x2160 recommended: the game's HUD is only the right size at 4K; scaled down to your $Screen screen (sharper; cost set by the FSR preset)." }
     '3840x2160 recommended: the size the game''s HUD is made for.'
 }
 
