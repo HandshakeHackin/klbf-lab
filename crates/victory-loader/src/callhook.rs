@@ -219,6 +219,8 @@ mod tests {
     use std::sync::Mutex;
 
     static SEEN: Mutex<Vec<Regs>> = Mutex::new(Vec::new());
+    // The two hook tests share SEEN: run one at a time (tests run in parallel; a busy machine made one clear the other's calls).
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
     static RETURNED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
     static STUB: AtomicUsize = AtomicUsize::new(0);
 
@@ -277,6 +279,7 @@ mod tests {
 
     #[test]
     fn a_redirected_call_runs_the_routine_then_the_target_with_the_same_registers() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         let t = target as *const () as usize;
         // sub rsp,0x28; call target; add rsp,0x28; ret
         let mut code = vec![0x48, 0x83, 0xEC, 0x28, 0xE8, 0, 0, 0, 0, 0x48, 0x83, 0xC4, 0x28, 0xC3];
@@ -306,6 +309,7 @@ mod tests {
 
     #[test]
     fn an_entry_hook_sees_the_arguments_and_the_return() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         // push rsi; push rdi; push rbx; sub rsp,0x20 | lea rax,[rcx+rdx] |
         // add rsp,0x20; pop rbx; pop rdi; pop rsi; ret
         let prologue = [0x56, 0x57, 0x53, 0x48, 0x83, 0xEC, 0x20];
