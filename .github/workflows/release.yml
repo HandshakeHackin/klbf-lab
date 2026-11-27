@@ -1,0 +1,53 @@
+name: Release
+
+# A v* tag pushed: the players' zip (only our own files, scripts/package-release.ps1) built and published as
+# that tag's release. Run by hand: the same zip, kept as a workflow artifact; it is published only when the
+# run is started on a tag (ref_type tag), never from a branch.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # The version and components pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
+      - name: Build
+        # The build every version is measured and certified with (nuit/compiler-distant.sh PROFILE=diag):
+        # the diag profile and the diagnostics feature (bench black-frame detection), play.ps1's -Build default.
+        run: cargo build --profile diag --features diagnostics --locked -p victory
+      - name: Package
+        id: pkg
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}
+        run: |
+          $zip = ./scripts/package-release.ps1 -Tag $env:TAG -Victory target/diag/victory.exe -Out dist
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "sha=$((Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLower())" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: klbf-lab-win64
+          path: ${{ steps.pkg.outputs.zip }}
+          compression-level: 0
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" "${{ steps.pkg.outputs.zip }}" --title "KLBF Lab ${{ github.ref_name }}" --notes "Download KLBF-Lab-${{ github.ref_name }}-win64.zip, extract it, double-click KLBF Lab, choose your own game folder. No game files are included. SHA-256 of the zip: ${{ steps.pkg.outputs.sha }}"
