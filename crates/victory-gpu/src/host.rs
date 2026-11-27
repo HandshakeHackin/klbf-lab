@@ -1411,8 +1411,7 @@ fn give_prelude(prelude: Prelude) {
 pub(crate) fn trim_preludes() {
     let gone: Vec<IdlePrelude> = {
         let mut idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
-        let keep = idle.len().min(PRELUDES_MOST.1);
-        idle.split_off(keep)
+        crate::list::take_oldest(&mut idle, PRELUDES_MOST.1)
     };
     // (Outside the lock: freeing lists takes the graphics kernel's time.)
     drop(gone);
