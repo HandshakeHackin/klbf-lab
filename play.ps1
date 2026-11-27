@@ -151,74 +151,88 @@ if ($AutoStart) {
     $set.VICTORY_AUTO_INPUT = 'd>=15,rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w1.5,A,w0.7,Down,w0.5,A,w0.7,Down,w0.5,A'
 }
 if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'open' } else { $SkipMovies }) }
-# -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
-# screens and Continue pressed by themselves (your morning save in slot 1 must be the last one); touch nothing.
+# A bench and the following ordinary launch may share a PowerShell process.
+# Preserve the caller's manual input sequence and benchmark settings even if preflight throws.
+$beforeBench = @{}
 if ($Bench) {
-    $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer; $env:KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $env:KLBF_BENCH_LENGTH) { $env:KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
-    if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
-    $set.VICTORY_AUTO_INPUT = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A,d>=1000'
-    Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing until the card shows. Your card is saved in bench-results beside victory.exe;'
-    Write-Host 'post it with the form: https://github.com/PastiiJay/klbf-lab/issues/new?template=bench-bm-v1.yml'
-}
-foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
-foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
-
-# Shaders translated ahead, when needed: the mark holds what the translations depend on that this script knows of
-# (the build and the settings that change the translation).
-$rpf = Join-Path $Game 'shaders.rpf'
-$mark = Join-Path $Cache 'scarlett-shaders-ahead.txt'
-$built = Get-Item -LiteralPath $Victory
-$stamp = '{0}|{1}|{2}|probe={3}|rays={4}' -f $built.Length, $built.LastWriteTimeUtc.Ticks, $Build, $set['VICTORY_PROBE_RAYS'], $set['VICTORY_BVH_BUILDER']
-$have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -TotalCount 1 } else { '' }
-if (-not $NoPrecompile -and $have -ne $stamp) {
-    if (Test-Path -LiteralPath $rpf -PathType Leaf) {
-        Write-Host 'Translating the game''s shaders ahead (needed once per build and setting; a few minutes)...'
-        & $Victory shaders $rpf
-        if ($LASTEXITCODE -eq 0) {
-            Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8
-        } else {
-            Write-Warning 'Translating ahead failed; the shaders will be translated while playing instead.'
-        }
-    } else {
-        Write-Warning "No shaders.rpf in ${Game}: the shaders will be translated while playing."
+    foreach ($name in 'KLBF_BENCH', 'KLBF_BENCH_PLAYER', 'KLBF_BENCH_LENGTH', 'VICTORY_AUTO_INPUT') {
+        $beforeBench[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
 }
-# (27/11) Effects made on the loading side, never while playing: every pipeline the title created in earlier runs
-# (written down by VICTORY_PIPELINE_BOOK) is made ahead by `victory warm` into the driver's cache, before the game
-# starts. Only new ones are made; it goes on where it stopped. -NoPrecompile skips it.
-$book = Join-Path $Cache 'pipelines\known-pipelines.bin'
-if (-not $NoPrecompile -and (Test-Path -LiteralPath $book)) {
-    Write-Host 'Making the effects of earlier runs ahead, so they do not compile while playing (only new ones; resumes where it stopped)...'
-    & $Victory warm
-    if ($LASTEXITCODE -ne 0) { Write-Warning 'Making effects ahead stopped early; the rest are made while playing.' }
-}
-if ($OnlyPrecompile) { exit 0 }
-# (27/11) The bench starts only on a ready cache: the shaders translated for this build, and the effects made by
-# about ten minutes of play (otherwise they compile during the run and the figures are not comparable).
-if ($Bench) {
+try {
+    # -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
+    # screens and Continue pressed by themselves (your morning save in slot 1 must be the last one); touch nothing.
+    if ($Bench) {
+        $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer; $env:KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $env:KLBF_BENCH_LENGTH) { $env:KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
+        if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
+        $set.VICTORY_AUTO_INPUT = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A,d>=1000'
+        Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing until the card shows. Your card is saved in bench-results beside victory.exe;'
+        Write-Host 'post it with the form: https://github.com/PastiiJay/klbf-lab/issues/new?template=bench-bm-v1.yml'
+    }
+    foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
+    foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
+
+    # Shaders translated ahead, when needed: the mark holds what the translations depend on that this script knows of
+    # (the build and the settings that change the translation).
+    $rpf = Join-Path $Game 'shaders.rpf'
+    $mark = Join-Path $Cache 'scarlett-shaders-ahead.txt'
+    $built = Get-Item -LiteralPath $Victory
+    $stamp = '{0}|{1}|{2}|probe={3}|rays={4}' -f $built.Length, $built.LastWriteTimeUtc.Ticks, $Build, $set['VICTORY_PROBE_RAYS'], $set['VICTORY_BVH_BUILDER']
     $have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -TotalCount 1 } else { '' }
-    if ($have -ne $stamp) {
-        throw 'KLBF Lab Bench: the game''s shaders are not translated for this build yet. Start once without -Bench (the launcher translates them, a few minutes), then run the bench.'
+    if (-not $NoPrecompile -and $have -ne $stamp) {
+        if (Test-Path -LiteralPath $rpf -PathType Leaf) {
+            Write-Host 'Translating the game''s shaders ahead (needed once per build and setting; a few minutes)...'
+            & $Victory shaders $rpf
+            if ($LASTEXITCODE -eq 0) {
+                Set-Content -LiteralPath $mark -Value $stamp -Encoding utf8
+            } else {
+                Write-Warning 'Translating ahead failed; the shaders will be translated while playing instead.'
+            }
+        } else {
+            Write-Warning "No shaders.rpf in ${Game}: the shaders will be translated while playing."
+        }
     }
-    $early = Join-Path $Cache 'pipelines\early-pipelines.txt'
-    $made = if (Test-Path -LiteralPath $early) { @(Get-Content -LiteralPath $early).Count } else { 0 }
-    if ($made -lt 1000) {
-        throw "KLBF Lab Bench: only $made effects are built so far. Play about 10 minutes first (same build, without -Bench) so they are made before the bench; it does not start until then."
+    # (27/11) Effects made on the loading side, never while playing: every pipeline the title created in earlier runs
+    # (written down by VICTORY_PIPELINE_BOOK) is made ahead by `victory warm` into the driver's cache, before the game
+    # starts. Only new ones are made; it goes on where it stopped. -NoPrecompile skips it.
+    $book = Join-Path $Cache 'pipelines\known-pipelines.bin'
+    if (-not $NoPrecompile -and (Test-Path -LiteralPath $book)) {
+        Write-Host 'Making the effects of earlier runs ahead, so they do not compile while playing (only new ones; resumes where it stopped)...'
+        & $Victory warm
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'Making effects ahead stopped early; the rest are made while playing.' }
     }
-    Write-Host "KLBF Lab Bench: cache ready ($made effects built, shaders translated)."
-}
+    if ($OnlyPrecompile) { exit 0 }
+    # (27/11) The bench starts only on a ready cache: the shaders translated for this build, and the effects made by
+    # about ten minutes of play (otherwise they compile during the run and the figures are not comparable).
+    if ($Bench) {
+        $have = if (Test-Path -LiteralPath $mark) { Get-Content -LiteralPath $mark -TotalCount 1 } else { '' }
+        if ($have -ne $stamp) {
+            throw 'KLBF Lab Bench: the game''s shaders are not translated for this build yet. Start once without -Bench (the launcher translates them, a few minutes), then run the bench.'
+        }
+        $early = Join-Path $Cache 'pipelines\early-pipelines.txt'
+        $made = if (Test-Path -LiteralPath $early) { @(Get-Content -LiteralPath $early).Count } else { 0 }
+        if ($made -lt 1000) {
+            throw "KLBF Lab Bench: only $made effects are built so far. Play about 10 minutes first (same build, without -Bench) so they are made before the bench; it does not start until then."
+        }
+        Write-Host "KLBF Lab Bench: cache ready ($made effects built, shaders translated)."
+    }
 
-Write-Host ("KLBF Lab, Series X mode, {0} build, ray tracing {1}, memory hooks {2}" -f $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
-Write-Host "Cache: $Cache"
-Write-Host "Saves: $Data"
-# -Fsr (KLBF Lab): Series S mode, whose title upscales with FSR 4, the calls going to the PC's FSR DLL
-# (VICTORY_FSR_DLL, in -FfxDir).
-if ($Fsr) {
-    $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
-    if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
-    $env:VICTORY_FSR_DLL = $fsrDll
-    & $Victory run $exe --execute --console series-s
-} else {
-    & $Victory run $exe --execute
+    Write-Host ("KLBF Lab, Series X mode, {0} build, ray tracing {1}, memory hooks {2}" -f $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
+    Write-Host "Cache: $Cache"
+    Write-Host "Saves: $Data"
+    # -Fsr (KLBF Lab): Series S mode, whose title upscales with FSR 4, the calls going to the PC's FSR DLL
+    # (VICTORY_FSR_DLL, in -FfxDir).
+    if ($Fsr) {
+        $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
+        if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
+        $env:VICTORY_FSR_DLL = $fsrDll
+        & $Victory run $exe --execute --console series-s
+    } else {
+        & $Victory run $exe --execute
+    }
+    exit $LASTEXITCODE
+} finally {
+    foreach ($name in $beforeBench.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $beforeBench[$name], 'Process')
+    }
 }
-exit $LASTEXITCODE
