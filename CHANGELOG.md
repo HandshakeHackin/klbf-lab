@@ -6,6 +6,10 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## Unreleased (low-end branch, all off by default)
+
+- `KLBF_HEAP_SKIP=1`: the heap's buffer pass keeps a written slot's range when its record did not change (`KLBF_HEAP_SKIP_VERIFY=1` checks each one anyway and logs any mismatch). Idea from Paradoxo321 (rodrion-vi).
+
 ## v26.11.3 (27 Nov 2026)
 
 - The launcher starts from "KLBF Lab.cmd" instead of "KLBF Lab.vbs": Windows Defender's cloud check flagged the .vbs (a script starting a hidden PowerShell) as a trojan, a false positive. An existing desktop shortcut is repaired automatically.

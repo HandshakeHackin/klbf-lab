@@ -1396,6 +1396,8 @@ pub(crate) struct BufferSweep {
     unwatched: std::collections::HashMap<u64, (u64, u64, u64)>,
     // Written slots a pass did not get to, for the next one.
     pending: Vec<u32>,
+    // (KLBF_HEAP_SKIP) Per slot, the record its kept range was found from, and whether it is an unordered view.
+    records: Vec<Option<([u32; 3], bool)>>,
 }
 
 impl Default for BufferSweep {
@@ -1405,8 +1407,37 @@ impl Default for BufferSweep {
             ranges: HeapRanges(Vec::new()),
             unwatched: Default::default(),
             pending: Vec::new(),
+            records: Vec::new(),
         }
     }
+}
+
+/// `KLBF_HEAP_SKIP=1` (off by default): the heap's buffer pass keeps the range of a written slot whose record
+/// (tag, entry, generation) is still the one that range was found from, without finding its copy again.
+/// Slots forgotten for the round (`forget_part`) are always looked at. Idea from Paradoxo321's rodrion-vi.
+/// `KLBF_HEAP_SKIP_VERIFY=1` (with it): each such slot is looked at anyway, what was found is used, and a
+/// difference with the kept range is counted and logged (it should never happen).
+fn heap_skip() -> (bool, bool) {
+    static ON: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = |name| std::env::var_os(name).is_some_and(|v| v == "1");
+        (on("KLBF_HEAP_SKIP"), on("KLBF_HEAP_SKIP_VERIFY"))
+    })
+}
+
+/// (`KLBF_HEAP_SKIP`) Slots kept without a look; of those checked by `KLBF_HEAP_SKIP_VERIFY`, the ones whose
+/// look found something else.
+pub(crate) static HEAP_SKIPPED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// What a slot keeps from the last pass (`KLBF_HEAP_SKIP`): its range and unordered flag, if the record it
+/// holds `now` is the one they were found from.
+fn kept_if_same<T: Clone>(
+    range: Option<&(T, u64, u64)>,
+    was: Option<&([u32; 3], bool)>,
+    now: Option<[u32; 3]>,
+) -> Option<((T, u64, u64), bool)> {
+    let ((record, written), range) = (was?, range?);
+    (now? == *record).then(|| (range.clone(), *written))
 }
 
 impl<T> HeapRanges<T> {
@@ -1419,6 +1450,10 @@ impl<T> HeapRanges<T> {
             self.0.resize_with(slot + 1, || None);
         }
         self.0[slot] = range;
+    }
+
+    fn get(&self, slot: u32) -> Option<&(T, u64, u64)> {
+        self.0.get(slot as usize)?.as_ref()
     }
 
     /// Forgets the slots of one of `parts` parts
@@ -1434,7 +1469,23 @@ impl<T> HeapRanges<T> {
 
 #[cfg(test)]
 mod heap_range_tests {
-    use super::{HEAP_ROUND, HeapRanges};
+    use super::{HEAP_ROUND, HeapRanges, kept_if_same};
+
+    /// (`KLBF_HEAP_SKIP`) A slot keeps its range only when its record is the one the range was found from,
+    /// and it still has a range (not forgotten for the round).
+    #[test]
+    fn a_slot_keeps_its_range_only_with_the_same_record() {
+        let mut ranges = HeapRanges(Vec::new());
+        ranges.set(4, Some(("copy", 16, 32)));
+        let was = ([7, 1, 2], true);
+        assert_eq!(kept_if_same(ranges.get(4), Some(&was), Some([7, 1, 2])), Some((("copy", 16, 32), true)));
+        assert_eq!(kept_if_same(ranges.get(4), Some(&was), Some([7, 1, 3])), None, "a new generation");
+        assert_eq!(kept_if_same(ranges.get(4), Some(&was), None), None, "no view any more");
+        assert_eq!(kept_if_same(ranges.get(4), None, Some([7, 1, 2])), None, "no record kept");
+        ranges.forget_part(0, 4);
+        assert_eq!(kept_if_same(ranges.get(4), Some(&was), Some([7, 1, 2])), None, "forgotten for the round");
+        assert_eq!(kept_if_same(ranges.get(99), Some(&was), Some([7, 1, 2])), None, "past the end");
+    }
 
     /// Round by round every slot is looked at again once, whatever was
     /// written between, and what a slot holds is what was found last.
@@ -1665,7 +1716,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     } else {
         changed
     };
-    let BufferSweep { passes, ranges, unwatched, pending, .. } = &mut *kept;
+    let BufferSweep { passes, ranges, unwatched, pending, records } = &mut *kept;
     let all = !spread && (*passes == 0 || *passes % parts == 0);
     let slots = if all {
         ranges.0.clear();
@@ -1704,23 +1755,53 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         }
     }
     let heap = Shared(heap);
+    let (skip, verify) = heap_skip();
+    let (kept_ranges, kept_records) = (&*ranges, &*records);
     // What a slot of the title's shows: its copy and range, and whether it is
-    // an unordered view.
+    // an unordered view; with `KLBF_HEAP_SKIP`, the record they were found from.
     let look = |index: u32| {
         // A draw's table's: the draw brings what it reads up to date.
         if host.copied_tabled(index, frame) {
-            return None;
+            return (None, None);
         }
-        let view = host.mirror(index, heap.handle(index)?, true)?;
-        // The copy the slot shows (`buffer_copy`), not the one the
-        // view's range alone would find.
-        let (shadow, address, len) = crate::descriptor::host::buffer_copy(&view)?;
-        #[cfg(feature = "diagnostics")]
-        if host.shows(index, &shadow.buffer) == Some(false) {
-            HEAP_VIEWS_ELSEWHERE.fetch_add(1, Ordering::Relaxed);
+        let Some(handle) = heap.handle(index) else { return (None, None) };
+        let record = if skip { crate::descriptor::record_at(handle) } else { None };
+        let again = if skip {
+            kept_if_same(kept_ranges.get(index), kept_records.get(index as usize).and_then(Option::as_ref), record)
+        } else {
+            None
+        };
+        // The host slot is still made (cheap when it already shows this record): only finding its copy is saved.
+        let Some(view) = host.mirror(index, handle, true) else { return (None, record) };
+        if again.is_some() {
+            HEAP_SKIPPED[0].fetch_add(1, Ordering::Relaxed);
+            if !verify {
+                return (again, record);
+            }
         }
-        let written = crate::picked::on() && view_kind(&view) == Some(ResourceType::Uav);
-        Some(((shadow, address, address + len), written))
+        let found = 'found: {
+            // The copy the slot shows (`buffer_copy`), not the one the
+            // view's range alone would find.
+            let Some((shadow, address, len)) = crate::descriptor::host::buffer_copy(&view) else { break 'found None };
+            #[cfg(feature = "diagnostics")]
+            if host.shows(index, &shadow.buffer) == Some(false) {
+                HEAP_VIEWS_ELSEWHERE.fetch_add(1, Ordering::Relaxed);
+            }
+            let written = crate::picked::on() && view_kind(&view) == Some(ResourceType::Uav);
+            Some(((shadow, address, address + len), written))
+        };
+        if let Some(((kept, from, to), written)) = &again {
+            let same = found.as_ref().is_some_and(|((shadow, f, t), w)| {
+                std::sync::Arc::ptr_eq(shadow, kept) && (f, t, w) == (from, to, written)
+            });
+            if !same {
+                let n = HEAP_SKIPPED[1].fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::warn!(n, index, "KLBF_HEAP_SKIP_VERIFY: a slot with the same record would have kept a range that changed");
+                }
+            }
+        }
+        (found, record)
     };
     // Some slots at a time, on several threads.
     const AT_A_TIME: usize = 256;
@@ -1743,7 +1824,14 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         }
         let _ = found[n].set(looked);
     });
-    for (index, shows) in found.into_iter().filter_map(std::sync::OnceLock::into_inner).flatten() {
+    for (index, (shows, record)) in found.into_iter().filter_map(std::sync::OnceLock::into_inner).flatten() {
+        if skip {
+            let slot = index as usize;
+            if records.len() <= slot {
+                records.resize(slot + 1, None);
+            }
+            records[slot] = record.zip(shows.as_ref().map(|(_, written)| *written));
+        }
         let range = shows.map(|(range, written)| {
             if written {
                 unordered.push(range.clone());
@@ -1811,6 +1899,7 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
         tracing::info!(
             slots = slots.len(),
             views,
+            skipped = HEAP_SKIPPED[0].load(Ordering::Relaxed),
             copies = spans.len(),
             mb = bytes >> 20,
             ms = started.elapsed().as_millis(),
