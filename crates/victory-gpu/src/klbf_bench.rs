@@ -150,6 +150,10 @@ fn tree_settings() -> [u64; 3] {
     [0; 3]
 }
 
+/// (27/11, #121) Whether this tree reports draws asked, pipelines skipped and denied and the texture cap. Not on
+/// this base: `counters()` and `tree_settings()` above give zeros, so the card says "not measured" instead.
+const TREE_COUNTS: bool = false;
+
 /// The process's working set, bytes.
 fn ram_bytes() -> u64 {
     use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -500,6 +504,14 @@ impl Settings {
     /// The card's short block.
     fn lines(&self) -> [String; 4] {
         let textures = if self.texture_max_dim > 0 { format!("textures \u{2264} {} px", self.texture_max_dim) } else { "textures uncapped".into() };
+        if !TREE_COUNTS {
+            return [
+                format!("profile {} \u{b7} {}", self.profile, self.upscaler),
+                "texture cap: not reported by this build".into(),
+                format!("{:.0} draws/frame \u{b7} dropped: not measured", self.draws_per_frame),
+                "pipelines skipped / denied: not measured".into(),
+            ];
+        }
         [
             format!("profile {} \u{b7} {}", self.profile, self.upscaler),
             textures,
@@ -510,6 +522,12 @@ impl Settings {
 
     fn line(&self) -> String {
         let textures = if self.texture_max_dim > 0 { format!("textures \u{2264} {} px", self.texture_max_dim) } else { "textures uncapped".into() };
+        if !TREE_COUNTS {
+            return format!(
+                "profile {} \u{b7} {} \u{b7} {:.0} draws/frame \u{b7} dropped, skipped, denied and texture cap not measured by this build",
+                self.profile, self.upscaler, self.draws_per_frame
+            );
+        }
         format!(
             "profile {} \u{b7} {} \u{b7} {textures} \u{b7} {:.0} draws/frame \u{b7} {:.1} % dropped \u{b7} {} skipped \u{b7} {} denied",
             self.profile, self.upscaler, self.draws_per_frame, self.dropped_pct, self.skipped, self.denied
