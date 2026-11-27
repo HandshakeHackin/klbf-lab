@@ -132,7 +132,7 @@ fn measure(hwnd: usize, caption: &str) -> Option<([i32; 3], f32)> {
             return None;
         }
         let mut buttons = RECT::default();
-        let left_of_buttons = if DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, (&raw mut buttons).cast(), size_of::<RECT>() as u32) >= 0 && buttons.left > 0 {
+        let left_of_buttons = if DwmGetWindowAttribute(hwnd, DWMWA_CAPTION_BUTTON_BOUNDS as u32, (&raw mut buttons).cast(), size_of::<RECT>() as u32) >= 0 && buttons.left > 0 {
             buttons.left
         } else {
             window.right - window.left - 3 * GetSystemMetrics(SM_CXSIZE)
