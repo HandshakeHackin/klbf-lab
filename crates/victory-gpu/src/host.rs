@@ -1147,7 +1147,7 @@ pub(crate) fn rdna2_safe_defaults() -> bool {
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
 /// Reject it before creating a device in diagnostics' software-only mode.
 /// (27/11) The first adapter in DXGI's high-performance order that is not software, if DXGI 1.6 can say.
-fn high_performance_adapter() -> Option<IDXGIAdapter1> {
+pub(crate) fn high_performance_adapter() -> Option<IDXGIAdapter1> {
     // SAFETY: plain DXGI adapter queries.
     unsafe {
         let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;

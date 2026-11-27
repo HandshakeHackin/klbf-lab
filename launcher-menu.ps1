@@ -470,8 +470,10 @@ function Get-KlbfUpscalerName($Hw, [string]$Cache) {
 # Profile X, the built-in (console) upscaler, the largest title mode not above the screen, no frame
 # generation, hooks and texture trim. The Your PC panel's button applies the hardware table instead.
 function Get-KlbfUniversal($Hw) {
+    # (27/11, owner) Every PC: Profile X, AMD FSR (FSR 4 on RDNA 4, FSR 3.1 elsewhere) Ultra Performance, no
+    # frame generation, Advanced on. Where FSR cannot start, the game falls back to its own upscaler by itself.
     $c = Get-KlbfDefaults
-    $c.upscaler = 'title'; $c.frameGen = $false
+    $c.upscaler = 'fsr'; $c.preset = 'ultraperformance'; $c.frameGen = $false; $c.advanced = $true
     # (27/11) Profile X: output 3840x2160 on every screen (Windows scales the window down). Below it the
     # title's HUD and menus get too big and their texts overlap (known issue); the cost is the upscaler's.
     $c.output = '3840x2160'
