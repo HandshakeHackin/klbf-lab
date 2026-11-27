@@ -1,0 +1,17 @@
+name: Repeat launcher calls in one PowerShell session
+on:
+  push:
+    branches: [verify/stable-bench-to-play]
+permissions:
+  contents: read
+jobs:
+  sequence:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run an ordinary launch after a completed stable benchmark
+        shell: pwsh
+        run: '& ${{ matrix.shell }} -NoProfile -ExecutionPolicy Bypass -File .github/workflows/verify-session.ps1'
