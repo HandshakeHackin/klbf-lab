@@ -1,0 +1,14 @@
+name: Test PR 123 with the depth bounds fix
+on:
+  push:
+    branches: [verify/pr123-with-depth-bounds]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --workspace --no-fail-fast
