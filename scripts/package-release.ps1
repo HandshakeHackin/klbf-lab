@@ -4,7 +4,7 @@
 #
 #   .\scripts\package-release.ps1 -Tag v1.0.0 -Victory target\diag\victory.exe -Out dist
 #
-# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.vbs", klbf-lab.ico, README.txt, LICENSE, VERSION and
+# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.cmd", klbf-lab.ico, README.txt, LICENSE, VERSION and
 # SHA256SUMS.txt, at its root (Windows' "Extract All" makes the folder).
 param(
     [Parameter(Mandatory)][string]$Tag,
@@ -30,13 +30,13 @@ Copy-Item -LiteralPath (Join-Path $Source 'apps\victory\klbf-lab.ico') -Destinat
 
 # The starter, the same text the launcher writes beside a desktop shortcut
 . (Join-Path $Source 'launcher-menu.ps1')
-Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.vbs') -Value (Get-KlbfVbsText) -Encoding ascii
+Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.cmd') -Value (Get-KlbfStarterText) -Encoding ascii
 
 Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding ascii -Value @"
 KLBF Lab $Tag (Windows, 64-bit)
 
 1. Extract anywhere.
-2. Double-click "KLBF Lab.vbs" (Windows may hide the ".vbs" part: it is the file with the script icon). Later, use the desktop shortcut it can create.
+2. Double-click "KLBF Lab.cmd" (Windows may hide the ".cmd" part). Later, use the desktop shortcut it can create.
 3. Choose your game folder (your own copy).
 4. Play.
 
