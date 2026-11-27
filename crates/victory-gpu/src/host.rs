@@ -995,7 +995,19 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
         } else {
-            D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            // (27/11) The high-performance card, not Windows' default adapter: on a laptop with an
+            // integrated GPU the default can be that one (#47). Windows' default if DXGI cannot say.
+            let fast = high_performance_adapter();
+            if let Some(adapter) = &fast
+                && D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_ok()
+            {
+                if let Ok(desc) = adapter.GetDesc1() {
+                    let name = String::from_utf16_lossy(&desc.Description[..desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len())]);
+                    tracing::info!(adapter = %name, "host device on the high-performance adapter");
+                }
+            } else {
+                D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
+            }
             // Whether a GPU hang ends the run or freezes the PC (#1054).
             crate::tdr::log();
         }
@@ -1134,6 +1146,17 @@ pub(crate) fn rdna2_safe_defaults() -> bool {
 
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
 /// Reject it before creating a device in diagnostics' software-only mode.
+/// (27/11) The first adapter in DXGI's high-performance order that is not software, if DXGI 1.6 can say.
+fn high_performance_adapter() -> Option<IDXGIAdapter1> {
+    // SAFETY: plain DXGI adapter queries.
+    unsafe {
+        let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        let adapter: IDXGIAdapter1 = factory.EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE).ok()?;
+        let desc = adapter.GetDesc1().ok()?;
+        (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0).then_some(adapter)
+    }
+}
+
 pub(crate) fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
     // SAFETY: plain DXGI adapter queries.
     unsafe {
