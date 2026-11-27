@@ -37,7 +37,7 @@ try {
     # (27/11) The fallback starter in the zip, the README says what to do if it doesn't start
     $probe = & $newBuild
     $cmd = Join-Path $probe 'KLBF Lab.cmd'
-    Check 'zip: KLBF Lab.cmd starts play.ps1 hidden with -Setup' ((Test-Path -LiteralPath $cmd) -and (Get-Content -LiteralPath $cmd -Raw) -match '^@start "" powershell\.exe .*-WindowStyle Hidden -File "%~dp0play\.ps1" -Victory "%~dp0victory\.exe" -Setup')
+    Check 'zip: KLBF Lab.cmd starts play.ps1 hidden with -Setup' ((Test-Path -LiteralPath $cmd) -and (Get-Content -LiteralPath $cmd -Raw) -match 'start "" /min powershell\.exe .*-WindowStyle Hidden -File "%~dp0play\.ps1" -Victory "%~dp0victory\.exe" -Setup')
     Check "zip: README's if it doesn't start" ((Get-Content -LiteralPath (Join-Path $probe 'README.txt') -Raw) -match "If it doesn't start" )
     # (27/11) The internet mark goes from the folder's files
     $marked = Join-Path $probe 'play.ps1'

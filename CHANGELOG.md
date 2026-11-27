@@ -22,12 +22,19 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
   "Report a bug" points there, the user's profile hidden.
 - Beside the version: "Up to date", "Update available: ..." or "Couldn't check for updates".
 - The first-run desktop shortcut offer says whether the shortcut was created, and asks again after a failure.
-- "KLBF Lab.cmd" beside "KLBF Lab.vbs", for PCs where the .vbs does nothing; the README says what to do if it
-  doesn't start (Unblock the zip, the .cmd, or play.ps1 with PowerShell). The launcher unblocks its own files.
-- A failed start is never silent: the .vbs says when PowerShell could not start (with those steps), and any
-  launcher error is shown in a message box in front of everything and written to `logs\launcher-error.txt`
+- The README says what to do if it doesn't start (Unblock the zip, or play.ps1 with PowerShell). The launcher
+  unblocks its own files.
+- A failed start is never silent: any launcher error is shown in a message box in front of everything and
+  written to `logs\launcher-error.txt`
   (PowerShell version, execution policy, language mode, files still marked as downloaded).
 - The pipelines step runs only when runs wrote down new pipelines: the bench no longer prepares again.
+## v26.11.3 (27 Nov 2026)
+
+- The launcher starts from "KLBF Lab.cmd" instead of "KLBF Lab.vbs": Windows Defender's cloud check flagged the .vbs (a script starting a hidden PowerShell) as a trojan, a false positive. An existing desktop shortcut is repaired automatically.
+
+## v26.11.2 (27 Nov 2026)
+
+- Hotfix: the launcher opened nothing on PCs where the small screen helper is blocked (antivirus, restricted Windows); it now opens with a fallback. Thanks to the testers who sent the error.
 
 ## v26.11.1 (27 Nov 2026)
 

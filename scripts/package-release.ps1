@@ -4,7 +4,7 @@
 #
 #   .\scripts\package-release.ps1 -Tag v1.0.0 -Victory target\diag\victory.exe -Out dist
 #
-# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.vbs", "KLBF Lab.cmd", klbf-lab.ico, README.txt, LICENSE, VERSION and
+# The zip: victory.exe, play.ps1, launcher-menu.ps1, "KLBF Lab.cmd", klbf-lab.ico, README.txt, LICENSE, VERSION and
 # SHA256SUMS.txt, at its root (Windows' "Extract All" makes the folder).
 param(
     [Parameter(Mandatory)][string]$Tag,
@@ -30,25 +30,22 @@ Copy-Item -LiteralPath (Join-Path $Source 'apps\victory\klbf-lab.ico') -Destinat
 
 # The starter, the same text the launcher writes beside a desktop shortcut
 . (Join-Path $Source 'launcher-menu.ps1')
-Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.vbs') -Value (Get-KlbfVbsText) -Encoding ascii
-# (27/11) The fallback starter where the .vbs does nothing
-Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.cmd') -Value (Get-KlbfCmdText) -Encoding ascii
+Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.cmd') -Value (Get-KlbfStarterText) -Encoding ascii
 
 Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding ascii -Value @"
 KLBF Lab $Tag (Windows, 64-bit)
 
 1. Extract anywhere.
-2. Double-click "KLBF Lab.vbs" (Windows may hide the ".vbs" part: it is the file with the script icon). Later, use the desktop shortcut it can create.
+2. Double-click "KLBF Lab.cmd" (Windows may hide the ".cmd" part). Later, use the desktop shortcut it can create.
 3. Choose your game folder (your own copy).
 4. Play.
 
 Windows SmartScreen: KLBF Lab is not signed. If Windows says it protected your PC, click
 "More info" then "Run anyway". If it asks whether to open "KLBF Lab", click Open.
 
-If it doesn't start (nothing happens after double-clicking "KLBF Lab.vbs"):
+If it doesn't start (nothing happens after double-clicking "KLBF Lab.cmd"):
 1. Right-click the zip, Properties, tick "Unblock", OK, then extract it again.
-2. Double-click "KLBF Lab.cmd" (the same start, without VBScript).
-3. Or right-click play.ps1, "Run with PowerShell".
+2. Or right-click play.ps1, "Run with PowerShell".
 When the launcher itself fails, a message says why, and the details are in
 Saved Games\KLBF Lab\logs\launcher-error.txt (attach it to a bug report).
 

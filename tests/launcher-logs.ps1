@@ -82,12 +82,10 @@ try {
     Check 'the bench translates as Play does (same settings but -Bench)' ((@($bench.Keys | Where-Object { $_ -notin 'Bench', 'BenchPlayer' }) -join ',') -eq (@($play.Keys) -join ','))
 
     # (27/11) A failed start is never silent: play.ps1 stopped early (no game folder) writes launcher-error.txt
-    # with what helps, says it, exits 3, and has left the mark the .vbs reads
+    # with what helps, says it and exits 3
     # In a folder with spaces and accented letters, as testers have
     $empty = Join-Path $t "Jeux $([char]0xE4)$([char]0xE9) PC\KLBF Lab"; New-Item -ItemType Directory -Path $empty | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'play.ps1'), (Join-Path $repo 'launcher-menu.ps1') -Destination $empty
-    $startMark = Join-Path $env:TEMP 'klbf-lab-started.txt'
-    Remove-Item -LiteralPath $startMark -ErrorAction SilentlyContinue
     $env:KLBF_NO_DIALOG = '1'; $env:KLBF_OLD_HOMES = Join-Path $t 'no-older-home'; $env:KLBF_HOME = Join-Path $t 'failhome'; $env:KLBF_LAUNCHER_DIR = Join-Path $t 'faillauncher'
     $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $empty 'play.ps1') -NoMenu -NoPrecompile 2>&1
     $rc = $LASTEXITCODE
@@ -98,17 +96,7 @@ try {
     $errText = if (Test-Path -LiteralPath $errFile) { Get-Content -LiteralPath $errFile -Raw } else { '' }
     Check 'failed start: the error, PowerShell, policy, language mode, internet mark' ($errText -match 'Say where your dump is' -and $errText -match 'PowerShell: 5\.1' -and $errText -match 'Execution policy: ' -and $errText -match 'Language mode: FullLanguage' -and $errText -match 'internet mark: none')
     Check 'failed start: no user profile path' (-not $errText.Contains($env:USERPROFILE))
-    Check 'started mark for the .vbs' (Test-Path -LiteralPath $startMark)
-    Check 'the .vbs waits and has the fallback steps' ((Get-KlbfVbsText) -match ', 0, True\)' -and (Get-KlbfVbsText) -match 'KLBF Lab\.cmd' -and (Get-KlbfVbsText) -match 'rc <> 3')
-    $env:KLBF_HOME = Join-Path $t 'home'
-    # The .vbs from that folder starts its play.ps1 (a stand-in that writes what it was given), hidden
-    $vbsDir = Join-Path $t "Spi$([char]0xE8)le $([char]0xE4) test\KLBF Lab"; New-Item -ItemType Directory -Path $vbsDir | Out-Null
-    Set-Content -LiteralPath (Join-Path $vbsDir 'KLBF Lab.vbs') -Value (Get-KlbfVbsText) -Encoding ascii
-    Set-Content -LiteralPath (Join-Path $vbsDir 'play.ps1') -Encoding utf8 -Value "Set-Content -LiteralPath (Join-Path `$env:TEMP 'klbf-lab-started.txt') -Value 1; Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'ran.txt') -Value (`$args -join '|') -Encoding utf8"
-    $p = Start-Process cscript.exe -ArgumentList '//nologo', "`"$vbsDir\KLBF Lab.vbs`"" -NoNewWindow -Wait -PassThru
-    $ran = Join-Path $vbsDir 'ran.txt'
-    Check 'accented folder with spaces: the .vbs starts play.ps1 with the right exe' ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $ran) -and (Get-Content -LiteralPath $ran -Raw).Trim() -eq "-Victory|$vbsDir\victory.exe|-Setup")
-    Check 'the .cmd quotes its folder' ((Get-KlbfCmdText) -match '-File "%~dp0play\.ps1" -Victory "%~dp0victory\.exe"')
+    Check 'the starter quotes its folder (spaces, accented letters)' ((Get-KlbfStarterText) -match '-File "%~dp0play\.ps1" -Victory "%~dp0victory\.exe"')
 
     # The first-run shortcut offer: a yes makes it and says so; a failure is said and asked again; a no is remembered
     $env:KLBF_LAUNCHER_DIR = Join-Path $t 'launcher'
@@ -122,7 +110,7 @@ try {
     Check 'failure said' ($r -like 'Desktop shortcut not created: *')
     Check 'failure not remembered as yes' (-not (Test-Path -LiteralPath $mark))
     $r = Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $build) $yes $lnk
-    Check 'asked again after a failure, then made' ($r -eq 'Desktop shortcut created.' -and $script:asked -eq 2 -and (Test-Path -LiteralPath $lnk) -and (Test-Path -LiteralPath (Join-Path $build 'KLBF Lab.vbs')))
+    Check 'asked again after a failure, then made' ($r -eq 'Desktop shortcut created.' -and $script:asked -eq 2 -and (Test-Path -LiteralPath $lnk) -and (Test-Path -LiteralPath (Join-Path $build 'KLBF Lab.cmd')))
     Check 'yes remembered once made' ((Get-Content -LiteralPath $mark -TotalCount 1) -eq 'yes')
     Check 'never asked twice' ((Invoke-KlbfShortcutOffer (Get-KlbfShortcutSpec $build) $yes $lnk) -eq '' -and $script:asked -eq 2)
     Remove-Item -LiteralPath $mark, $lnk

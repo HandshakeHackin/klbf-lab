@@ -154,51 +154,46 @@ function Get-KlbfRestartArgs($Bound) {
     $a
 }
 
-# (27/11) The desktop shortcut that starts this build with no console flashing: wscript.exe runs
-# "KLBF Lab.vbs" (beside play.ps1, written when the shortcut is made), which starts PowerShell hidden on the
-# folder's play.ps1 with -Setup (the settings window first; it shows itself, see Set-KlbfTheme).
+# (27/11) The desktop shortcut that starts this build: "KLBF Lab.cmd" (beside play.ps1, written when the
+# shortcut is made), run minimized, starts PowerShell hidden on the folder's play.ps1 with -Setup (the settings
+# window first; it shows itself, see Set-KlbfTheme). v26.11.3: a .cmd, not a .vbs, which Windows Defender's
+# cloud heuristics flagged as a trojan (a script starting a hidden PowerShell).
 function Get-KlbfShortcutSpec([string]$BuildDir = $PSScriptRoot, [string]$Victory = '') {
     $ico = Join-Path $BuildDir 'klbf-lab.ico'
     if (-not (Test-Path -LiteralPath $ico)) { $ico = Join-Path $BuildDir 'apps\victory\klbf-lab.ico' }
     @{
-        target = Join-Path $env:SystemRoot 'System32\wscript.exe'
-        arguments = '"{0}"' -f (Join-Path $BuildDir 'KLBF Lab.vbs')
+        target = Join-Path $BuildDir 'KLBF Lab.cmd'
+        arguments = ''
         workdir = $BuildDir
         icon = $ico
-        vbs = Join-Path $BuildDir 'KLBF Lab.vbs'
+        starter = Join-Path $BuildDir 'KLBF Lab.cmd'
     }
 }
 
-# (27/11) The other starter, for PCs where the .vbs does nothing (VBScript turned off on newer Windows 11,
-# Smart App Control or an antivirus stopping wscript -> PowerShell): the same start from a .cmd.
-function Get-KlbfCmdText {
-    '@start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0play.ps1" -Victory "%~dp0victory.exe" -Setup'
-}
-
 # (27/11) The files of the launcher's folder lose the downloaded-from-the-internet mark (Mark of the Web) a
-# zip extracted without "Unblock" gives them, which can stop the .vbs and warn on victory.exe. Silent, at
+# zip extracted without "Unblock" gives them, which can stop the starter and warn on victory.exe. Silent, at
 # every start (a file already unblocked costs nothing).
 function Unblock-KlbfFolder([string]$Dir) {
     try { Get-ChildItem -LiteralPath $Dir -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch {}
 }
 
-# The starter script: the folder from its own place, PowerShell hidden (window style 0). (27/11) It waits for
-# PowerShell (no window: harmless) and, when PowerShell could not start or never reached play.ps1 (the mark
-# play.ps1 writes first in %TEMP%), says so with the fallback steps; play.ps1's own failures it leaves to
-# play.ps1's box (exit code 3).
-function Get-KlbfVbsText {
+# (v26.11.3) A desktop shortcut made by v26.11.1/.2 runs wscript on "KLBF Lab.vbs", which an update moves
+# away: pointed again at this folder's "KLBF Lab.cmd" (written if missing). Only our own shortcut is touched.
+function Repair-KlbfShortcut([string]$BuildDir, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return }
+        $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
+        if ($s.TargetPath -notlike '*wscript.exe' -or $s.Arguments -notlike "*$BuildDir*KLBF Lab.vbs*") { return }
+        New-KlbfShortcut (Get-KlbfShortcutSpec $BuildDir) $Path | Out-Null
+    } catch {}
+}
+
+# The starter script: the folder from its own place (%~dp0), PowerShell hidden, not waited for.
+function Get-KlbfStarterText {
     @(
-        "' KLBF Lab: starts play.ps1 of this folder with no console window (the desktop shortcut runs this)."
-        'Dim sh, fs, d, mark, rc'
-        'Set sh = CreateObject("WScript.Shell"): Set fs = CreateObject("Scripting.FileSystemObject")'
-        'd = fs.GetParentFolderName(WScript.ScriptFullName)'
-        'mark = sh.ExpandEnvironmentStrings("%TEMP%") & "\klbf-lab-started.txt"'
-        'If fs.FileExists(mark) Then fs.DeleteFile mark, True'
-        'On Error Resume Next'
-        'rc = sh.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & d & "\play.ps1"" -Victory """ & d & "\victory.exe"" -Setup", 0, True)'
-        'If Err.Number <> 0 Or (rc <> 0 And rc <> 3 And Not fs.FileExists(mark)) Then'
-        '    MsgBox "KLBF Lab could not start PowerShell (error " & Err.Number & ", code " & rc & ")." & vbCrLf & vbCrLf & "Try:" & vbCrLf & "1. Right-click the zip, Properties, tick Unblock, OK, then extract it again." & vbCrLf & "2. Double-click KLBF Lab.cmd in this folder." & vbCrLf & "3. Or right-click play.ps1, Run with PowerShell.", vbCritical + vbSystemModal, "KLBF Lab"'
-        'End If'
+        '@echo off'
+        'rem KLBF Lab: starts play.ps1 of this folder (double-click this file, or the desktop shortcut).'
+        'start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0play.ps1" -Victory "%~dp0victory.exe" -Setup'
     ) -join "`r`n"
 }
 
@@ -411,9 +406,9 @@ function Set-KlbfUpdateLine($c, $Update) {
 
 # Desktop\KLBF Lab.lnk (the Desktop known folder) from a spec; $Path for tests.
 function New-KlbfShortcut($Spec, [string]$Path = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'KLBF Lab.lnk')) {
-    if ($Spec.vbs) { Set-Content -LiteralPath $Spec.vbs -Value (Get-KlbfVbsText) -Encoding ascii }
+    if ($Spec.starter) { Set-Content -LiteralPath $Spec.starter -Value (Get-KlbfStarterText) -Encoding ascii }
     $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
-    $s.TargetPath = $Spec.target; $s.Arguments = $Spec.arguments; $s.WorkingDirectory = $Spec.workdir
+    $s.TargetPath = $Spec.target; $s.Arguments = $Spec.arguments; $s.WorkingDirectory = $Spec.workdir; $s.WindowStyle = 7
     if (Test-Path -LiteralPath $Spec.icon) { $s.IconLocation = "$($Spec.icon),0" }
     $s.Save()
     $Path
@@ -1702,6 +1697,7 @@ function Show-KlbfMenu($Choice, [string]$ShaderStatus = '', [string]$Victory = '
     # (27/11) Updates: GitHub's latest release asked in a runspace (never blocking; offline or rate-limited:
     # nothing shown); a newer one puts the update line in the header. Installed only on its Update link.
     $dir = if ($Victory) { Split-Path -Parent $Victory } else { '' }
+    if ($dir) { Repair-KlbfShortcut $dir }
     if ($dir -and $m.c.version) {
         $defs = (('Get-KlbfVersion', 'Get-KlbfUpdateCheck', 'Get-KlbfUpdate', 'Read-KlbfSums', 'Test-KlbfSums', 'Test-KlbfRunning', 'Switch-KlbfBuild', 'Install-KlbfUpdate') |
             ForEach-Object { "function $_ {$((Get-Item "function:$_").ScriptBlock)}" }) -join "`n"

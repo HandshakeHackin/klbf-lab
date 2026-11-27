@@ -89,11 +89,11 @@ param(
     [switch]$SkipShaderCheck
 )
 $ErrorActionPreference = 'Stop'
-# (27/11) Started hidden (the .vbs, the .cmd, the shortcut), a failure showed nothing: any error that stops
+# (27/11) Started hidden (KLBF Lab.cmd, the shortcut), a failure showed nothing: any error that stops
 # this script is written to Saved Games\KLBF Lab\logs\launcher-error.txt with what helps to understand it
 # (PowerShell's version, execution policy, language mode, files still carrying the internet mark), and shown
 # in a message box in front of everything. Self-contained: it works even if launcher-menu.ps1 does not load.
-# Exit code 3: said already (the .vbs then says nothing more). KLBF_NO_DIALOG=1: no box (tests).
+# Exit code 3: said already. KLBF_NO_DIALOG=1: no box (tests).
 trap {
     $err = $_
     $file = ''
@@ -132,8 +132,6 @@ trap {
     }
     exit 3
 }
-# (27/11) Read by the .vbs: PowerShell reached this script (if it then fails, the box above says why)
-try { Set-Content -LiteralPath (Join-Path $env:TEMP 'klbf-lab-started.txt') -Value $PID -Encoding ascii } catch {}
 . (Join-Path $PSScriptRoot 'launcher-menu.ps1')
 if (-not $env:KLBF_LAUNCHER_DIR) { $null = Set-KlbfAppId }
 # (27/11) This folder's files without the internet mark of an extracted zip (silent)
