@@ -554,6 +554,26 @@ fn bury(finished: u64) {
         }
         retired.drain(..n).collect()
     };
+    if crate::cores::klbf_priority() {
+        // (KLBF_PRIORITY, after eikkapine/victory-amd) COM releases on a thread below normal,
+        // not on the thread that waits for the card.
+        static TO: OnceLock<Option<std::sync::mpsc::Sender<Vec<(u64, Retired)>>>> = OnceLock::new();
+        let to = TO.get_or_init(|| {
+            let (to, from) = std::sync::mpsc::channel::<Vec<(u64, Retired)>>();
+            std::thread::Builder::new()
+                .name("victory-bury".into())
+                .spawn(move || {
+                    crate::cores::priority_if_asked("victory-bury", windows_sys::Win32::System::Threading::THREAD_PRIORITY_BELOW_NORMAL);
+                    from.iter().for_each(drop);
+                })
+                .ok()
+                .map(|_| to)
+        });
+        if let Some(to) = to {
+            let _ = to.send(done);
+            return;
+        }
+    }
     drop(done);
 }
 
@@ -3867,6 +3887,7 @@ struct RelayFetch {
 /// lists and looking at what queues hold are left to [`late_helper`].
 fn relay_worker() {
     crate::cores::keep_on_fast_cores("victory-relay");
+    crate::cores::priority_if_asked("victory-relay", windows_sys::Win32::System::Threading::THREAD_PRIORITY_ABOVE_NORMAL);
     let Some(host) = host() else {
         return;
     };
