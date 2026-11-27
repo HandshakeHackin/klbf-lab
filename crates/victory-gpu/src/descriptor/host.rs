@@ -1205,13 +1205,11 @@ impl TextureQueue {
     ///   (run 52: 98% of the drawn pixels had no colour texture in the
     ///   first 3D frames).
     fn due(&self, frame: u64, max: usize) -> Vec<(u32, u64)> {
-        let mut again: Vec<(u64, u32, u64)> = Vec::new();
-        let mut fresh: Vec<(u64, u32, u64)> = Vec::new();
+        let mut due = Due::default();
         for (&index, w) in self.slots.iter().filter(|(_, w)| w.due <= frame) {
-            let class = if w.looks > 0 || w.mapped > 0 { &mut again } else { &mut fresh };
-            class.push((w.written, index, w.write));
+            due.push(index, w);
         }
-        Due { again, fresh }.order(max)
+        due.order(max)
     }
 
     /// (`VICTORY_QUEUE_MARKS`, foxhound 2de963d) [`TextureQueue::due`]'s
@@ -1229,8 +1227,7 @@ impl TextureQueue {
             if w.due <= frame {
                 c[1] += 1;
                 c[4] = c[4].max(frame.saturating_sub(w.written));
-                let class = if w.looks > 0 || w.mapped > 0 { &mut due.again } else { &mut due.fresh };
-                class.push((w.written, index, w.write));
+                due.push(index, w);
             }
         }
         (due, c)
@@ -1239,29 +1236,79 @@ impl TextureQueue {
 
 /// The slots due ([`TextureQueue::due_and_census`]): (frame written, slot,
 /// write number) of those looked at before and of the others.
+/// With `KLBF_TEX_FIFO=1` the first key of `urgent` and `again` is the frame they fell due.
 #[derive(Default)]
 struct Due {
     again: Vec<(u64, u32, u64)>,
     fresh: Vec<(u64, u32, u64)>,
+    /// (`KLBF_TEX_FIFO`) Textures mapped in part (mip levels still to come).
+    urgent: Vec<(u64, u32, u64)>,
+}
+
+/// `KLBF_TEX_FIFO=1` (off): textures mapped in part first, longest due first; then slots
+/// waiting for their memory, longest due first, one for every three never looked at, so
+/// thousands of them cannot hold back what was just streamed in. (Before: every slot
+/// looked at before went first, newest first, and old ones waited for seconds.) After
+/// eikkapine/victory-amd (GPL-3.0), rewritten.
+fn tex_fifo() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_TEX_FIFO").is_some_and(|v| v == "1"))
 }
 
 impl Due {
+    fn push(&mut self, index: u32, w: &Waiting) {
+        let fifo = tex_fifo();
+        if fifo && w.mapped > 0 {
+            self.urgent.push((w.due, index, w.write));
+        } else if w.looks > 0 || w.mapped > 0 {
+            self.again.push((if fifo { w.due } else { w.written }, index, w.write));
+        } else {
+            self.fresh.push((w.written, index, w.write));
+        }
+    }
+
     /// Up to `max` of them, in the order [`TextureQueue::due`] serves them.
     fn order(self, max: usize) -> Vec<(u32, u64)> {
-        let Due { mut again, mut fresh } = self;
+        let Due { mut again, mut fresh, mut urgent } = self;
         // By the number of the write, counted over the run.
         let newest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| b.2.cmp(&a.2);
-        again.sort_unstable_by(newest_first);
         fresh.sort_unstable_by(newest_first);
-        let mut order: Vec<(u32, u64)> = again.iter().map(|&(_, index, write)| (index, write)).collect();
+        // The fresh ones: the newest write and the oldest in turns.
+        let mut turns = Vec::with_capacity(fresh.len());
         let (mut new, mut old) = (0, fresh.len());
-        while new < old && order.len() < max {
-            order.push((fresh[new].1, fresh[new].2));
+        while new < old {
+            turns.push((fresh[new].1, fresh[new].2));
             new += 1;
-            if new < old && order.len() < max {
+            if new < old {
                 old -= 1;
-                order.push((fresh[old].1, fresh[old].2));
+                turns.push((fresh[old].1, fresh[old].2));
             }
+        }
+        let mut order: Vec<(u32, u64)>;
+        if tex_fifo() {
+            let oldest_due_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| (a.0, a.2).cmp(&(b.0, b.2));
+            urgent.sort_unstable_by(oldest_due_first);
+            again.sort_unstable_by(oldest_due_first);
+            order = urgent.iter().take(max).map(|&(_, index, write)| (index, write)).collect();
+            let (mut a, mut f) = (again.iter(), turns.into_iter());
+            loop {
+                let mut any = false;
+                if let Some(&(_, index, write)) = a.next() {
+                    order.push((index, write));
+                    any = true;
+                }
+                for x in f.by_ref().take(3) {
+                    order.push(x);
+                    any = true;
+                }
+                if !any || order.len() >= max {
+                    break;
+                }
+            }
+        } else {
+            again.sort_unstable_by(newest_first);
+            order = again.iter().map(|&(_, index, write)| (index, write)).collect();
+            order.extend(turns);
         }
         order.truncate(max);
         order
