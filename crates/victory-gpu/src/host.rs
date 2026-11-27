@@ -241,6 +241,34 @@ fn short_flags() -> D3D12_HEAP_FLAGS {
     if short_no_wait() { D3D12_HEAP_FLAG_NONE } else { not_resident() }
 }
 
+/// `KLBF_REFRESH_COALESCE=1` (off by default): a refresh asked right after one of the same host copy whose
+/// range it touches or overlaps widens that one instead of being a step of its own
+/// ([`HostList::defer_refresh`]). Idea from gleaf-6.
+fn refresh_coalesce() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_REFRESH_COALESCE").is_some_and(|v| v == "1"))
+}
+
+/// The range (address, bytes) covering `last` and `new` if they touch or overlap.
+fn coalesced(last: (usize, usize), new: (usize, usize)) -> Option<(usize, usize)> {
+    let (last_end, new_end) = (last.0 + last.1, new.0 + new.1);
+    (new.0 <= last_end && last.0 <= new_end).then(|| {
+        let from = last.0.min(new.0);
+        (from, last_end.max(new_end) - from)
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn refreshes_coalesce_only_when_they_touch() {
+    assert_eq!(coalesced((100, 50), (150, 10)), Some((100, 60)), "right after");
+    assert_eq!(coalesced((100, 50), (80, 20)), Some((80, 70)), "right before");
+    assert_eq!(coalesced((100, 50), (120, 10)), Some((100, 50)), "inside");
+    assert_eq!(coalesced((100, 50), (90, 100)), Some((90, 100)), "around");
+    assert_eq!(coalesced((100, 50), (151, 10)), None, "a gap after");
+    assert_eq!(coalesced((100, 50), (0, 99)), None, "a gap before");
+}
+
 /// `KLBF_REBAR_UPLOAD=1` (off by default): [`Host::upload_buffer`] makes its buffers in the card's own memory,
 /// written by the CPU through a resizable BAR (`D3D12_HEAP_TYPE_GPU_UPLOAD`, [`Host::mapped_card_buffer`]), so
 /// the card reads them without crossing the bus; the upload heap stays the fallback (no ReBAR / SAM, too big,
@@ -7600,9 +7628,20 @@ impl HostList {
         let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
         let new = deferred.refreshed.insert(key);
         if new {
-            deferred
-                .copies
-                .push(Step::Refresh(shadow.clone(), address, len));
+            // (KLBF_REFRESH_COALESCE) Touching or overlapping the last step's range of the same copy: that step
+            // grows to cover both. Only the last step: a `Copy` or `Run` after it keeps the two apart (refreshes
+            // spliced in later by `take_coming` are refreshes too, whose order does not matter).
+            if refresh_coalesce()
+                && let Some(Step::Refresh(last, at, bytes)) = deferred.copies.last_mut()
+                && std::sync::Arc::ptr_eq(last, shadow)
+                && let Some((from, to)) = coalesced((*at, *bytes), (address, len))
+            {
+                (*at, *bytes) = (from, to);
+            } else {
+                deferred
+                    .copies
+                    .push(Step::Refresh(shadow.clone(), address, len));
+            }
         }
         #[cfg(feature = "diagnostics")]
         refresh_asked(new, len);

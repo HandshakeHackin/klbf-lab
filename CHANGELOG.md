@@ -10,6 +10,7 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
 
 - `KLBF_HEAP_SKIP=1`: the heap's buffer pass keeps a written slot's range when its record did not change (`KLBF_HEAP_SKIP_VERIFY=1` checks each one anyway and logs any mismatch). Idea from Paradoxo321 (rodrion-vi).
 - `KLBF_REBAR_UPLOAD=1`: upload buffers up to 32 MiB go straight into the card's memory (`D3D12_HEAP_TYPE_GPU_UPLOAD`) when ReBAR / SAM is on and the card's memory stays under 80 % of its budget; the upload heap otherwise. Idea from Paradoxo321 (rodrion-vi).
+- `KLBF_REFRESH_COALESCE=1`: a buffer refresh that touches or overlaps the previous one of the same copy widens it instead of adding a step. Idea from gleaf-6.
 
 ## v26.11.3 (27 Nov 2026)
 
