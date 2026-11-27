@@ -309,6 +309,9 @@ struct Shown {
     /// The PC FSR DLL's file version ("4.1.2"); empty if unread.
     fsr: String,
     fg: bool,
+    /// (27/11) Which frame generation runs: 3 (FSR 3.1), 4 (FSR 4), 0 not known; whether F7 paused it.
+    fg_kind: u8,
+    fg_paused: bool,
     /// The desktop mode of the monitor the window is on; 0 x 0: not known.
     screen: [u32; 2],
 }
@@ -374,9 +377,18 @@ impl Shown {
         (self.upscaler == Upscaler::Fsr && self.render[1] > 0).then(|| preset(self.render[1], self.output[1])).flatten()
     }
 
-    /// "frame generation x2 · screen 2560x1440".
+    /// "frame generation x2 (FG3)", "frame generation off".
+    fn fg_line(&self) -> String {
+        match (self.fg, self.fg_kind) {
+            (false, _) => "frame generation off".into(),
+            (true, 0) => "frame generation x2".into(),
+            (true, k) => format!("frame generation x2 (FG{k})"),
+        }
+    }
+
+    /// "frame generation x2 (FG4) · screen 2560x1440".
     fn extras(&self) -> String {
-        let fg = format!("frame generation {}", if self.fg { "x2" } else { "off" });
+        let fg = self.fg_line();
         if self.screen[1] == 0 { fg } else { format!("{fg} \u{b7} screen {}", wxh(self.screen)) }
     }
 }
@@ -501,12 +513,14 @@ fn shown() -> Shown {
             upscaler: Upscaler::Fsr,
             fsr: fsr_shown(),
             fg,
+            fg_kind: crate::framegen::kind(),
+            fg_paused: crate::framegen::paused(),
             screen,
         };
     }
     let s = title_scale();
     let (upscaler, render) = if s >= 0.999 { (Upscaler::Native, output) } else { (Upscaler::Title, output.map(|v| (v as f32 * s) as u32)) };
-    Shown { output, render, upscaler, fsr: String::new(), fg, screen }
+    Shown { output, render, upscaler, fsr: String::new(), fg, fg_kind: crate::framegen::kind(), fg_paused: crate::framegen::paused(), screen }
 }
 
 /// (27/11) The window's caption outside a run, refreshed once a second (owner layout): "KLBF Lab | 28 FPS (base 14)
@@ -539,8 +553,17 @@ const NOT_OURS: &str = " | Full settings: github.com/PastiiJay/klbf-lab";
 #[allow(clippy::too_many_arguments)]
 fn caption_text(fps: f64, low1: f64, draws: f64, profile: &str, s: &Shown, shown_fps: f64, mem: [u64; 4], making: u64, tail: &str) -> String {
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
-    let fg = if fps > 0.0 { fg_fps(s.fg, fps, shown_fps) } else { 0.0 };
-    let mut parts = vec!["KLBF Lab".to_owned(), if fg > 0.0 { format!("{fg:.0} FPS (base {fps:.0})") } else { format!("{fps:.0} FPS") }];
+    let fg = if fps > 0.0 && !s.fg_paused { fg_fps(s.fg, fps, shown_fps) } else { 0.0 };
+    // (27/11) Which frame generation: "56 FPS (FG3, base 28)"; F7's pause: "28 FPS (FG paused)".
+    let kind = if s.fg_kind > 0 { format!("FG{}, ", s.fg_kind) } else { String::new() };
+    let head = if fg > 0.0 {
+        format!("{fg:.0} FPS ({kind}base {fps:.0})")
+    } else if s.fg && s.fg_paused {
+        format!("{fps:.0} FPS (FG paused)")
+    } else {
+        format!("{fps:.0} FPS")
+    };
+    let mut parts = vec!["KLBF Lab".to_owned(), head];
     if low1 > 0.0 {
         parts.push(format!("1% {low1:.0}"));
     }
@@ -979,7 +1002,7 @@ impl Settings {
     /// fullscreen · screen 2560x1440", "memory hooks on · texture trim off", "exp: night-lights, fps-cap=30".
     fn launch_lines(&self) -> Vec<String> {
         let l = &self.launch;
-        let fg = format!("frame generation {}", if self.shown.fg { "x2" } else { "off" });
+        let fg = self.shown.fg_line();
         let fsr = if self.shown.upscaler == Upscaler::Fsr && !self.shown.fsr.is_empty() { format!("FSR {} \u{b7} ", self.shown.fsr) } else { String::new() };
         let screen = if self.shown.screen[1] == 0 { String::new() } else { format!(" \u{b7} screen {}", wxh(self.shown.screen)) };
         let mut v = vec![format!("{fsr}{fg}"), format!("{}{screen}", l.display), l.advanced()];
@@ -2658,7 +2681,7 @@ mod tests {
 
     /// Series X's FSR 4.1.2 in quality at 2560x1440, with frame generation, on a 2560x1440 screen.
     fn sample_shown() -> Shown {
-        Shown { output: [2560, 1440], render: [1706, 960], upscaler: Upscaler::Fsr, fsr: "4.1.2".into(), fg: true, screen: [2560, 1440] }
+        Shown { output: [2560, 1440], render: [1706, 960], upscaler: Upscaler::Fsr, fsr: "4.1.2".into(), fg: true, fg_kind: 0, fg_paused: false, screen: [2560, 1440] }
     }
 
     #[test]
@@ -2680,6 +2703,8 @@ mod tests {
         assert_eq!(Shown::default().label(), "", "nothing presented yet");
         assert_eq!(fsr.extras(), "frame generation x2 \u{b7} screen 2560x1440");
         assert_eq!(Shown::default().extras(), "frame generation off");
+        assert_eq!(Shown { fg_kind: 3, ..sample_shown() }.extras(), "frame generation x2 (FG3) \u{b7} screen 2560x1440");
+        assert_eq!(Shown { fg_kind: 4, screen: [0; 2], ..sample_shown() }.extras(), "frame generation x2 (FG4)");
     }
 
     #[test]
@@ -2749,6 +2774,10 @@ mod tests {
         assert_eq!(fg_fps(true, 30.0, 30.0), 0.0, "no generated frames yet: no (base N)");
         assert_eq!(fg_fps(true, 30.0, 58.0), 58.0);
         assert!(caption_text(30.0, 0.0, 0.0, "Profile X", &x4, 30.0, mem, 0, "").starts_with("KLBF Lab | 30 FPS | "));
+        let fg3 = Shown { fg_kind: 3, ..x4.clone() };
+        assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &fg3, 26.6, mem, 0, "").starts_with("KLBF Lab | 27 FPS (FG3, base 14) | 1% 8 |"));
+        let paused = Shown { fg_paused: true, ..fg3 };
+        assert!(caption_text(14.0, 8.0, 8_400.0, "Profile X", &paused, 14.0, mem, 0, "").starts_with("KLBF Lab | 14 FPS (FG paused) | 1% 8 |"));
         let mut set = sample_card().set;
         assert_eq!(set.fg_fps(30.0), 60.0, "no measured ratio: x2");
         set.fg_ratio = 1.9;

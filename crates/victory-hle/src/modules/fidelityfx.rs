@@ -316,7 +316,7 @@ extern "system" fn ffxCreateContext(context: *mut *mut c_void, desc: *mut u8, _a
     code
 }
 
-/// `ffxQueryGetProviderVersion` (`FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION`, 5): the version name of
+/// `ffxQueryGetProviderVersion` (`FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION`, 6; 5 is the version override): the version name of
 /// the provider the DLL picked for `context` (27/11: outside RDNA 4 it falls back to FSR 3.1).
 fn provider_version(query: Header, context: *mut *mut c_void) -> Option<String> {
     #[repr(C)]
@@ -337,7 +337,7 @@ fn provider_version(query: Header, context: *mut *mut c_void) -> Option<String> 
     Some(unsafe { std::ffi::CStr::from_ptr(q.name) }.to_string_lossy().into_owned())
 }
 
-const QUERY_PROVIDER_VERSION: u64 = 5;
+const QUERY_PROVIDER_VERSION: u64 = 6;
 
 extern "system" fn ffxDestroyContext(context: *mut *mut c_void, _alloc: *const c_void) -> u32 {
     let Some(api) = api() else { return ERROR };

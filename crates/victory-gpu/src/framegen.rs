@@ -21,12 +21,19 @@
 //! held back to interpolate towards). AMD recommends a base of 60 fps; at
 //! about 16 real frames a second it adds latency (60+ ms) and artifacts
 //! (ghosting, torn edges on fast motion and camera cuts).
+//!
+//! (27/11) FSR 4's frame generation is RX 9000 only: on any other card the
+//! FSR 3.1 frame generation of the same DLL is picked by hand ([`fsr3_providers`]),
+//! never none. F7 pauses it and starts it again ([`toggle`]): paused, each
+//! present is the real frame only, so nothing (the interface included) is
+//! interpolated. Both ideas from computermakemegta6 (BigCheese)'s
+//! VIctory-BigCheese v2.1, written again here.
 
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue;
+use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_CHAIN_DESC1, IDXGIFactory2, IDXGISwapChain3, IDXGISwapChain4,
 };
@@ -65,6 +72,9 @@ impl Resource {
 }
 
 const OK: u32 = 0;
+const GET_VERSIONS: u64 = 4;
+const OVERRIDE_VERSION: u64 = 5;
+const GET_PROVIDER_VERSION: u64 = 6;
 const CREATE_FRAMEGEN: u64 = 0x0002_0001;
 const CONFIGURE_FRAMEGEN: u64 = 0x0002_0002;
 const DISPATCH_FRAMEGEN_PREPARE_V2: u64 = 0x0002_000c;
@@ -191,6 +201,14 @@ static FRAMEGEN: std::sync::Mutex<Framegen> = std::sync::Mutex::new(Framegen {
 static SWAP_CHAIN_CONTEXT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 static SWAP_CHAIN: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 static CONTEXT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+/// (27/11) FSR 3.1's providers (swap chain, frame generation) picked by hand on a card without FSR 4's
+/// frame generation; 0: the SDK's own pick.
+static FSR3: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// (27/11) Which frame generation runs: 3 (FSR 3.1) or 4 (FSR 4); 0 before its context is made.
+static KIND: AtomicU8 = AtomicU8::new(0);
+/// (27/11) F7: paused (each present the real frame only); the first prepare after it starts again resets.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+static RESUMED: AtomicBool = AtomicBool::new(false);
 /// Set on the first failure: frame generation stays off for the run.
 static FAILED: AtomicBool = AtomicBool::new(false);
 /// The frame identifier of the next present.
@@ -277,16 +295,128 @@ fn log_provider(api: &Api) {
         id: u64,
         name: *const std::ffi::c_char,
     }
-    let mut q = ProviderVersion { ty: 5, next: std::ptr::null_mut(), id: 0, name: std::ptr::null() };
+    let mut q = ProviderVersion { ty: GET_PROVIDER_VERSION, next: std::ptr::null_mut(), id: 0, name: std::ptr::null() };
     // SAFETY: the SDK's call on a context it made, with a description of ours that outlives it.
     let r = unsafe { (api.query)(CONTEXT.as_ptr(), (&raw mut q).cast::<Header>()) };
     if r == OK && !q.name.is_null() {
         // SAFETY: a NUL-terminated name the SDK keeps.
         let name = unsafe { std::ffi::CStr::from_ptr(q.name) }.to_string_lossy();
         tracing::info!("frame generation: {name}");
+        KIND.store(kind_of(&name), Ordering::Relaxed);
     } else {
         tracing::info!(r, "frame generation: no provider version");
+        if FSR3[1].load(Ordering::Relaxed) != 0 {
+            KIND.store(3, Ordering::Relaxed);
+        }
     }
+}
+
+/// 3 or 4 from a provider's version name ("3.1.5", "FSR 4.0.2"); 0 for anything else.
+fn kind_of(name: &str) -> u8 {
+    match name.chars().find(char::is_ascii_digit) {
+        Some('3') => 3,
+        Some('4') => 4,
+        _ => 0,
+    }
+}
+
+/// The providers the SDK offers for `effect` (a create description type), on `device` (null: its
+/// built-in ones only): (id, version name). Empty if it cannot say.
+fn versions(api: &Api, effect: u64, device: *mut std::ffi::c_void) -> Vec<(u64, String)> {
+    #[repr(C)]
+    struct GetVersions {
+        header: Header,
+        effect: u64,
+        device: *mut std::ffi::c_void,
+        count: *mut u64,
+        ids: *mut u64,
+        names: *mut *const std::ffi::c_char,
+    }
+    let mut count = 0u64;
+    let mut q = GetVersions {
+        header: header(GET_VERSIONS),
+        effect,
+        device,
+        count: &raw mut count,
+        ids: std::ptr::null_mut(),
+        names: std::ptr::null_mut(),
+    };
+    // SAFETY: a null context asks for the versions; the count, then arrays of that many, outlive both calls.
+    if unsafe { (api.query)(std::ptr::null_mut(), &raw const q.header) } != OK || !(1..=64).contains(&count) {
+        return Vec::new();
+    }
+    let mut ids = vec![0u64; count as usize];
+    let mut names: Vec<*const std::ffi::c_char> = vec![std::ptr::null(); count as usize];
+    (q.ids, q.names) = (ids.as_mut_ptr(), names.as_mut_ptr());
+    // SAFETY: as above, with room for `count` answers.
+    if unsafe { (api.query)(std::ptr::null_mut(), &raw const q.header) } != OK {
+        return Vec::new();
+    }
+    let n = (count as usize).min(ids.len());
+    ids.into_iter()
+        .zip(names)
+        .take(n)
+        .filter(|&(id, name)| id != 0 && !name.is_null())
+        // SAFETY: NUL-terminated names the SDK keeps.
+        .map(|(id, name)| (id, unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// The first FSR 3 provider of the lists, when the card's own list (`on_card`) has no FSR 4 one: `None`
+/// (the SDK's own pick) on RX 9000, or when the SDK could not say what the card offers.
+fn fsr3_of(on_card: &[(u64, String)], built_in: &[(u64, String)]) -> Option<u64> {
+    if on_card.is_empty() || on_card.iter().any(|v| kind_of(&v.1) == 4) {
+        return None;
+    }
+    built_in.iter().chain(on_card).find(|v| kind_of(&v.1) == 3).map(|v| v.0)
+}
+
+/// (27/11) On a card without FSR 4's frame generation (before RX 9000): FSR 3.1's swap chain and frame
+/// generation, picked by hand, so frame generation runs there too; noted in [`FSR3`].
+fn fsr3_providers(api: &Api, device: *mut std::ffi::c_void) {
+    let null = std::ptr::null_mut();
+    let generator = fsr3_of(&versions(api, CREATE_FRAMEGEN, device), &versions(api, CREATE_FRAMEGEN, null));
+    let swap_chain = generator.and_then(|_| {
+        let built_in = versions(api, CREATE_SWAP_CHAIN_FOR_HWND, null);
+        let on_card = versions(api, CREATE_SWAP_CHAIN_FOR_HWND, device);
+        built_in.iter().chain(&on_card).find(|v| kind_of(&v.1) == 3).map(|v| v.0)
+    });
+    if let (Some(g), Some(s)) = (generator, swap_chain) {
+        tracing::info!("frame generation: no FSR 4 frame generation on this card (RX 9000 only); FSR 3.1's instead");
+        FSR3[0].store(s, Ordering::Relaxed);
+        FSR3[1].store(g, Ordering::Relaxed);
+    }
+}
+
+/// `ffxOverrideVersion`: the provider to use.
+#[repr(C)]
+struct Override {
+    header: Header,
+    id: u64,
+}
+
+/// (27/11) Which frame generation runs: 3 (FSR 3.1), 4 (FSR 4), 0 not yet known.
+pub fn kind() -> u8 {
+    KIND.load(Ordering::Relaxed)
+}
+
+/// (27/11) Whether F7 paused frame generation (never during a bench run: it runs as set).
+pub fn paused() -> bool {
+    PAUSED.load(Ordering::Relaxed) && !crate::klbf_bench::active()
+}
+
+/// (27/11) F7: frame generation paused, or started again (its history reset). `false` (the key is not
+/// ours) when no frame generation swap chain presents.
+pub fn toggle() -> bool {
+    if SWAP_CHAIN.load(Ordering::Acquire).is_null() || FAILED.load(Ordering::Relaxed) {
+        return false;
+    }
+    let paused = !PAUSED.fetch_xor(true, Ordering::Relaxed);
+    if !paused {
+        RESUMED.store(true, Ordering::Relaxed);
+    }
+    tracing::info!(paused, "F7: frame generation {}", if paused { "paused" } else { "on again" });
+    true
 }
 
 /// The upscale context's flags and largest render size, for the frame
@@ -332,15 +462,23 @@ pub fn swap_chain(
     if FAILED.load(Ordering::Relaxed) {
         return None;
     }
+    // SAFETY: the queue's own device.
+    if let Ok(device) = unsafe { queue.GetDevice::<ID3D12Device>() } {
+        fsr3_providers(api, device.as_raw());
+    }
     let mut out = std::ptr::null_mut();
     let mut version = Version {
         header: header(CREATE_SWAP_CHAIN_VERSION),
         version: SWAP_CHAIN_VERSION,
     };
+    let mut fsr3 = Override {
+        header: Header { kind: OVERRIDE_VERSION, next: (&raw mut version).cast() },
+        id: FSR3[0].load(Ordering::Relaxed),
+    };
     let mut create = CreateSwapChainForHwnd {
         header: Header {
             kind: CREATE_SWAP_CHAIN_FOR_HWND,
-            next: (&raw mut version).cast(),
+            next: if fsr3.id != 0 { (&raw mut fsr3).cast() } else { (&raw mut version).cast() },
         },
         swap_chain: &raw mut out,
         hwnd: hwnd.0,
@@ -415,6 +553,7 @@ pub fn prepare(
     camera: [f32; 4],
 ) {
     if FAILED.load(Ordering::Relaxed)
+        || paused()
         || SWAP_CHAIN_CONTEXT.load(Ordering::Acquire).is_null()
         || depth.resource.is_null()
         || motion_vectors.resource.is_null()
@@ -440,7 +579,8 @@ pub fn prepare(
         jitter,
         motion_vector_scale,
         frame_time_delta,
-        reset,
+        // (27/11) After F7's pause, the frames it holds are stale.
+        reset: reset || RESUMED.swap(false, Ordering::Relaxed),
         camera,
         depth,
         motion_vectors,
@@ -477,10 +617,14 @@ fn create(api: &Api, fg: &Framegen) -> bool {
         header: header(BACKEND_DX12),
         device,
     };
+    let mut fsr3 = Override {
+        header: Header { kind: OVERRIDE_VERSION, next: (&raw mut dx12).cast() },
+        id: FSR3[1].load(Ordering::Relaxed),
+    };
     let mut create = CreateFramegen {
         header: Header {
             kind: CREATE_FRAMEGEN,
-            next: (&raw mut dx12).cast(),
+            next: if fsr3.id != 0 { (&raw mut fsr3).cast() } else { (&raw mut dx12).cast() },
         },
         flags: fg.upscale_flags & 0b1_1110,
         display: fg.display,
@@ -559,7 +703,23 @@ pub fn before_present() {
     }
     let fg = FRAMEGEN.lock().unwrap_or_else(|e| e.into_inner());
     let frame = FRAME.load(Ordering::Acquire);
-    configure(api, &fg, frame, PREPARED.load(Ordering::Acquire) == frame + 1);
+    configure(api, &fg, frame, !paused() && PREPARED.load(Ordering::Acquire) == frame + 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fsr3_frame_generation_where_fsr4_is_not_offered() {
+        let v = |list: &[(u64, &str)]| list.iter().map(|&(i, n)| (i, n.to_owned())).collect::<Vec<_>>();
+        let built_in = v(&[(30, "3.1.5"), (31, "3.1.4")]);
+        assert_eq!(fsr3_of(&v(&[(40, "4.0.2"), (30, "3.1.5")]), &built_in), None, "RX 9000: FSR 4's, the SDK's pick");
+        assert_eq!(fsr3_of(&v(&[(30, "3.1.5")]), &built_in), Some(30), "RX 6000 / 7000: FSR 3.1's");
+        assert_eq!(fsr3_of(&v(&[(30, "FSR 3.1.5")]), &[]), Some(30));
+        assert_eq!(fsr3_of(&[], &built_in), None, "the SDK could not say: its own pick");
+        assert_eq!((kind_of("4.0.2"), kind_of("FSR 3.1.6"), kind_of("")), (4, 3, 0));
+    }
 }
 
 /// (27/11) Frames shown per second over the last second (real and generated), 0 before a second

@@ -6,6 +6,12 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## Unreleased
+
+- Frame generation on RX 6000 / RX 7000 (and any card without FSR 4's): FSR 3.1 frame generation runs instead of none when frame generation is on. The caption and the benchmark card say which one runs (FG3 or FG4). Idea from computermakemegta6 (BigCheese)'s VIctory-BigCheese v2.1, written again in our code.
+- F7 in the game pauses frame generation and starts it again (only while it is on; not during a benchmark). Paused, only real frames are shown, so the interface does not ghost; the caption says "FG paused". Idea from computermakemegta6 (BigCheese).
+- The FSR version shown is the one the DLL really runs (its provider version was asked with the wrong query).
+
 ## v26.11.3 (27 Nov 2026)
 
 - The launcher starts from "KLBF Lab.cmd" instead of "KLBF Lab.vbs": Windows Defender's cloud check flagged the .vbs (a script starting a hidden PowerShell) as a trojan, a false positive. An existing desktop shortcut is repaired automatically.

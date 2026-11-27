@@ -400,10 +400,11 @@ function Set-KlbfAppId {
 # Every key of KLBF Lab, as the Quick tab lists them.
 function Get-KlbfShortcuts {
     @(
+        'F7    Frame generation paused / on again (in the game, while it is on)'
         'F8    Screenshot (in the game): the game image, with a small KLBF Lab mark'
         'F10  Settings: closes the game and opens this window; Play starts it again'
         'F11  Restart: closes the game and starts it again with the same settings'
-        'F10  during a benchmark: stops it (F8 and F11 do nothing during a run)'
+        'F10  during a benchmark: stops it (F7, F8 and F11 do nothing during a run)'
         'Alt+Enter  borderless fullscreen on and off (in the game)'
         'Shift  held while starting: opens these settings first'
     )
