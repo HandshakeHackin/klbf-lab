@@ -241,6 +241,31 @@ fn short_flags() -> D3D12_HEAP_FLAGS {
     if short_no_wait() { D3D12_HEAP_FLAG_NONE } else { not_resident() }
 }
 
+/// `KLBF_REBAR_UPLOAD=1` (off by default): [`Host::upload_buffer`] makes its buffers in the card's own memory,
+/// written by the CPU through a resizable BAR (`D3D12_HEAP_TYPE_GPU_UPLOAD`, [`Host::mapped_card_buffer`]), so
+/// the card reads them without crossing the bus; the upload heap stays the fallback (no ReBAR / SAM, too big,
+/// card memory short). Idea from Paradoxo321's rodrion-vi.
+fn rebar_upload() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_REBAR_UPLOAD").is_some_and(|v| v == "1"))
+}
+
+/// Whether an upload buffer of `size` bytes may go in card memory ([`rebar_upload`]): up to 32 MiB, and the
+/// card's memory ([`Host::video_memory`]: budget, used) stays under 80 % of its budget, as for windows.
+fn card_upload_fits(size: u64, video: Option<[u64; 4]>) -> bool {
+    size <= 32 << 20 && video.is_some_and(|[budget, used, ..]| used.saturating_add(size) <= budget / 10 * 8)
+}
+
+#[cfg(test)]
+#[test]
+fn card_uploads_are_small_and_leave_room() {
+    let gib = 1u64 << 30;
+    assert!(card_upload_fits(1 << 20, Some([8 * gib, 4 * gib, 0, 0])));
+    assert!(!card_upload_fits((32 << 20) + 1, Some([8 * gib, 0, 0, 0])), "over 32 MiB");
+    assert!(!card_upload_fits(1 << 20, Some([10 * gib, 8 * gib, 0, 0])), "card memory at 80 %");
+    assert!(!card_upload_fits(1 << 20, None), "budget unknown");
+}
+
 /// [`resident`] then, if `map`, [`mapped`], for a short-lived buffer ([`short_no_wait`]).
 fn short_wait(device: &ID3D12Device, b: &ID3D12Resource, map: bool) -> windows::core::Result<()> {
     if short_no_wait() {
@@ -9943,6 +9968,14 @@ impl Host {
     }
 
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        // (KLBF_REBAR_UPLOAD) Straight into the card's memory when the CPU can map it; the upload heap otherwise.
+        if rebar_upload()
+            && self.mapped_card_memory()
+            && card_upload_fits(size, self.video_memory())
+            && let Some(made) = self.mapped_card_buffer(size, false)
+        {
+            return Some(made);
+        }
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
