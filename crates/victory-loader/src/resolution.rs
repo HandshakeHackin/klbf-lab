@@ -17,6 +17,18 @@
 //! else-path. The back buffers' pool (64 MB on Series X) is checked to be
 //! used up but for 2 MB (+0x247af25, an `int3`); for another size that
 //! check is jumped over.
+//!
+//! (ours, 27/11) `KLBF_X_FSR=1`: AMD FSR on Series X. The title's upscaler
+//! picker (+0x7e93f0) returns 6, its own upscaler, except on Series S, 7,
+//! FidelityFX; it is made to return 7, so the title's FidelityFX calls go to
+//! the PC FSR DLL (`VICTORY_FSR_DLL`, the redirect in victory-hle). Without
+//! that DLL nothing is patched: the console's own upscaler DLL only knows a
+//! 1920x1080 output and stops the title. FidelityFX's render scale
+//! (+0x28ef680: 1.0 on Series X, 2/3 on Series S) becomes
+//! `KLBF_X_FSR_QUALITY`'s: quality 1/1.5 (default), balanced 1/1.7,
+//! performance 1/2. At 1.0 the Series X memory plan overflows. The picker
+//! and scale sites and their codes are avatarmanz/VIctory-7900XTX 4d7185e's
+//! (from AwkGrep256's Marvisak/VIctory#1793 and avatarmanz#53).
 
 /// What a site's patch came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +67,35 @@ pub fn asked_render_scale() -> Option<f32> {
 
 pub fn parse_render_scale(spec: &str) -> Option<f32> {
     spec.trim().parse::<f32>().ok().filter(|s| (0.5..=1.0).contains(s))
+}
+
+/// `KLBF_X_FSR=1`: FidelityFX's render scale for `KLBF_X_FSR_QUALITY`
+/// (said why if it is not one), or `None` without it. Needs the PC FSR DLL
+/// (`VICTORY_FSR_DLL`); without it, said so and `None`.
+pub fn asked_fsr() -> Option<f32> {
+    if std::env::var_os("KLBF_X_FSR").is_none_or(|v| v != "1") {
+        return None;
+    }
+    if std::env::var_os("VICTORY_FSR_DLL").is_none_or(|v| v.is_empty()) {
+        eprintln!("KLBF: KLBF_X_FSR=1 needs VICTORY_FSR_DLL (the PC amd_fidelityfx_upscaler_dx12.dll); not patched");
+        return None;
+    }
+    let quality = std::env::var("KLBF_X_FSR_QUALITY").unwrap_or_default();
+    let scale = fsr_scale(&quality);
+    if scale.is_none() {
+        eprintln!("KLBF: KLBF_X_FSR_QUALITY={quality}: expected quality, balanced or performance; quality used");
+    }
+    Some(scale.unwrap_or(1.0 / 1.5))
+}
+
+/// AMD's render scale of an FSR quality mode (empty: quality).
+pub fn fsr_scale(quality: &str) -> Option<f32> {
+    match quality.trim().to_ascii_lowercase().as_str() {
+        "" | "quality" => Some(1.0 / 1.5),
+        "balanced" => Some(1.0 / 1.7),
+        "performance" => Some(0.5),
+        _ => None,
+    }
 }
 
 pub fn parse_output(spec: &str) -> Option<(u32, u32)> {
@@ -127,6 +168,59 @@ pub const OWN_SCALE: Site = Site {
 pub fn own_scale_code(scale: f32) -> Vec<u8> {
     let mut c = OWN_SCALE.bytes[..6].to_vec();
     c.extend(scale.to_le_bytes());
+    c
+}
+
+/// FidelityFX's render size method, +0x28ef680, and its padding: the scale
+/// is 1.0 (+0x5fc6ed8) or, on Series S, 2/3 (+0x615d95c), loaded at +0x28
+/// and +0x32.
+pub const FFX_SCALE: Site = Site {
+    at: 0x28ef680,
+    what: "FidelityFX's render scale",
+    bytes: &[
+        0x41, 0x56, 0x56, 0x57, 0x53, 0x48, 0x83, 0xec, 0x28, 0x44, 0x89, 0xcb, 0x4c, 0x89, 0xc6, 0x48, 0x89, 0xd7, 0x49, 0x89,
+        0xce, 0xe8, 0xa6, 0x5a, 0x78, 0xfd, 0x0f, 0xb6, 0xc0, 0x41, 0x89, 0x86, 0x90, 0x00, 0x00, 0x00, 0x84, 0xc0, 0x75, 0x0a,
+        0xc5, 0xfa, 0x10, 0x05, 0x28, 0x78, 0x6d, 0x03, 0xeb, 0x08, 0xc5, 0xfa, 0x10, 0x05, 0xa2, 0xe2, 0x86, 0x03, 0xc5, 0xf2,
+        0x2a, 0x54, 0x24, 0x70, 0xc5, 0xf2, 0x2a, 0xcb, 0xc5, 0xfa, 0x59, 0xc9, 0xc5, 0xfa, 0x2c, 0xc1, 0x89, 0x07, 0xc5, 0xfa,
+        0x59, 0xc2, 0xc5, 0xfa, 0x2c, 0xc0, 0x89, 0x06, 0x48, 0x83, 0xc4, 0x28, 0x5b, 0x5f, 0x5e, 0x41, 0x5e, 0xc3, 0xcc, 0xcc,
+        0xcc, 0xcc, 0xcc, 0xcc,
+    ],
+};
+
+/// What goes at [`FFX_SCALE`] for `scale`: both loads read `scale`, written
+/// into the padding at +0x64.
+pub fn ffx_scale_code(scale: f32) -> Vec<u8> {
+    const LOADS: [usize; 2] = [0x28, 0x32];
+    const SLOT: usize = 0x64;
+    let mut c = FFX_SCALE.bytes.to_vec();
+    c[SLOT..SLOT + 4].copy_from_slice(&scale.to_le_bytes());
+    for l in LOADS {
+        c[l + 4..l + 8].copy_from_slice(&((SLOT - (l + 8)) as i32).to_le_bytes());
+    }
+    c
+}
+
+/// The upscaler picker, +0x7e93f0, to its first `ret`: 7 (FidelityFX) on
+/// Series S, else 6 (the title's own).
+pub const PICKER: Site = Site {
+    at: 0x7e93f0,
+    what: "upscaler picker",
+    bytes: &[
+        0x48, 0x83, 0xec, 0x28, 0x80, 0x3d, 0x6d, 0xf0, 0x3a, 0x07, 0x00, 0x75, 0x09, 0x83, 0x3d, 0x68, 0xf0, 0x3a, 0x07, 0x00,
+        0x74, 0x28, 0xe8, 0x35, 0xbd, 0x88, 0xff, 0x8a, 0x0d, 0x5b, 0xf0, 0x3a, 0x07, 0x80, 0xe1, 0x40, 0x80, 0xf9, 0x01, 0xb9,
+        0x07, 0x00, 0x00, 0x00, 0x83, 0xd9, 0x00, 0x84, 0xc0, 0xb8, 0x06, 0x00, 0x00, 0x00, 0x0f, 0x45, 0xc1, 0x48, 0x83, 0xc4,
+        0x28, 0xc3,
+    ],
+};
+
+/// The picker's FidelityFX answer.
+pub const FIDELITYFX: u32 = 7;
+
+/// `mov eax, kind ; ret`.
+pub fn picker_code(kind: u32) -> Vec<u8> {
+    let mut c = vec![0xb8];
+    c.extend(kind.to_le_bytes());
+    c.push(0xc3);
     c
 }
 
@@ -222,6 +316,18 @@ pub unsafe fn apply_asked(base: usize, size: usize) {
     if let Some(s) = asked_render_scale() {
         asked.push((&OWN_SCALE, own_scale_code(s), format!("{s}")));
     }
+    if let Some(s) = asked_fsr() {
+        // Both or neither: FidelityFX at Series X's scale 1.0 overflows its memory plan.
+        // SAFETY: the caller's promise.
+        let found = unsafe { [matches(base, size, &FFX_SCALE), matches(base, size, &PICKER)] };
+        if found == [Patched::Done; 2] {
+            asked.push((&FFX_SCALE, ffx_scale_code(s), format!("{s}")));
+            asked.push((&PICKER, picker_code(FIDELITYFX), format!("returns {FIDELITYFX}")));
+        } else {
+            tracing::warn!(?found, "KLBF_X_FSR: not patched, the title's bytes are not the ones expected (another build?)");
+            println!("resolution: KLBF_X_FSR not applied (scale site {:?}, picker site {:?})", found[0], found[1]);
+        }
+    }
     for (site, code, value) in asked {
         // SAFETY: the caller's promise.
         let done = unsafe { write(base, size, site, &code) };
@@ -299,6 +405,45 @@ mod tests {
         assert_eq!(own[6..], 0.5f32.to_le_bytes());
         assert_eq!(OWN_SCALE.bytes[6..], (2.0f32 / 3.0).to_le_bytes());
         assert_eq!(pool_check_code(), [0x48, 0x3d, 0xff, 0xff, 0x1f, 0x00, 0xeb, 0x01]);
+    }
+
+    #[test]
+    fn fsr_quality_modes() {
+        assert_eq!(fsr_scale(""), Some(1.0 / 1.5));
+        assert_eq!(fsr_scale("Quality"), Some(1.0 / 1.5));
+        assert_eq!(fsr_scale("balanced"), Some(1.0 / 1.7));
+        assert_eq!(fsr_scale(" performance "), Some(0.5));
+        assert_eq!(fsr_scale("ultra"), None);
+        // 2560x1440 in quality renders 1706x960 (the method truncates).
+        assert_eq!((2560.0 * fsr_scale("quality").unwrap()) as u32, 1706);
+    }
+
+    /// The picker returns 6 or 7 in the bytes compared; the replacement is
+    /// `mov eax, 7 ; ret`, no longer than them.
+    #[test]
+    fn the_picker_and_its_code() {
+        let b = PICKER.bytes;
+        assert_eq!(b.len(), 62);
+        assert_eq!(b[39..44], [0xb9, 7, 0, 0, 0], "mov ecx, 7 (FidelityFX)");
+        assert_eq!(b[49..54], [0xb8, 6, 0, 0, 0], "mov eax, 6 (its own)");
+        assert_eq!(b[60..], [0x28, 0xc3], "add rsp, 28h ; ret");
+        assert_eq!(picker_code(FIDELITYFX), [0xb8, 7, 0, 0, 0, 0xc3]);
+    }
+
+    #[test]
+    fn the_ffx_scale_code() {
+        let ffx = ffx_scale_code(0.75);
+        assert_eq!(ffx.len(), FFX_SCALE.bytes.len());
+        assert_eq!(FFX_SCALE.bytes[0x64..0x68], [0xcc; 4], "padding where the scale goes");
+        assert_eq!(ffx[0x64..0x68], 0.75f32.to_le_bytes());
+        for at in [0x28, 0x32] {
+            assert_eq!(ffx[at..at + 4], [0xc5, 0xfa, 0x10, 0x05], "vmovss xmm0, [rip+d]");
+            let disp = i32::from_le_bytes(ffx[at + 4..at + 8].try_into().unwrap());
+            assert_eq!(at as i32 + 8 + disp, 0x64);
+        }
+        // Only the two displacements and the padding change.
+        let changed: Vec<usize> = (0..ffx.len()).filter(|&i| ffx[i] != FFX_SCALE.bytes[i]).collect();
+        assert!(changed.iter().all(|&i| (0x2c..0x30).contains(&i) || (0x36..0x3a).contains(&i) || (0x64..0x68).contains(&i)));
     }
 
     #[cfg(windows)]

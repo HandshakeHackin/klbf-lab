@@ -12,6 +12,10 @@
 # -Data        saves (default: %LOCALAPPDATA%\klbf-lab\data)
 # -RayTracing  the title's own ray tracing (VICTORY_BVH_BUILDER=1): better light, much slower. Off by default.
 # -Fsr        Series S mode with AMD FSR 4 (the title's own upscaler, sent to the PC's FSR DLL in -FfxDir).
+# -FsrX       Series X mode with AMD FSR 4 (KLBF_X_FSR=1): the title is made to use its FidelityFX path, sent to
+#              the PC's FSR DLL in -FfxDir. -FsrQuality quality (default, 1/1.5 of the output) | balanced (1/1.7)
+#              | performance (1/2). -Output 2560x1440 sets the title's output (one of its modes; 3840x2160 without).
+# -FfxDir      the folder with AMD's signed FidelityFX DLLs (default D:\KLBF-Lab\ffx-4.1.2: SDK 2.4.0, FSR 4.1.2).
 # -Bench      KLBF Lab Bench BM-v1 (5 min, hands-off; your morning save in slot 1): Continue pressed for you.
 #              -BenchPlayer <GitHub login> names you on the card (else anonymous).
 #              -BenchLength Short (5 min, the board's test) | Medium (15) | Long (30) | Marathon (60), or the minutes: -BenchLength 60. Same place, longer.
@@ -42,7 +46,10 @@ param(
     [string]$Data = '',
     [switch]$RayTracing,
     [switch]$Fsr,
-    [string]$FfxDir = 'D:\KLBF-Lab\ffx-2.4\Kits\FidelityFX\signedbin',
+    [switch]$FsrX,
+    [ValidateSet('quality', 'balanced', 'performance')][string]$FsrQuality = 'quality',
+    [ValidateSet('', '1280x720', '1664x936', '1920x1080', '2560x1440', '3840x2160')][string]$Output = '',
+    [string]$FfxDir = 'D:\KLBF-Lab\ffx-4.1.2',
     [switch]$AutoStart,
     [switch]$Bench,
     [string]$BenchPlayer = 'anonymous',
@@ -92,6 +99,7 @@ New-Item -ItemType Directory -Force -Path $Cache, $Data | Out-Null
 
 # Settings left in this window by an earlier start go: only what is below counts.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -ne 'VICTORY_HALF_VIEWS' -and $_.Name -ne 'VICTORY_AUTO_INPUT' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 
 $set = [ordered]@{
     VICTORY_GAME_DIR  = $Game
@@ -144,6 +152,13 @@ $set = [ordered]@{
 if ($Hooks -and -not $NoHooks) {
     # The memory hooks
     $set.VICTORY_GPU_ONLY = '1'; $set.VICTORY_KNOWN_WRITES = '1'
+}
+if ($Output) { $set.KLBF_X_OUTPUT = $Output }
+if ($FsrX) {
+    # (KLBF Lab, 27/11) The title's FidelityFX path in Series X, to the PC FSR DLL
+    $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
+    if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
+    $set.VICTORY_FSR_DLL = $fsrDll; $set.KLBF_X_FSR = '1'; $set.KLBF_X_FSR_QUALITY = $FsrQuality
 }
 if (-not $NoProbeRays -and -not $RayTracing) { $set.VICTORY_PROBE_RAYS = '1' }
 if ($RayTracing) { $set.VICTORY_BVH_BUILDER = '1' }
@@ -209,6 +224,7 @@ if ($Bench) {
 }
 
 Write-Host ("KLBF Lab, Series X mode, {0} build, ray tracing {1}, memory hooks {2}" -f $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
+if ($FsrX) { Write-Host "AMD FSR (Series X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
 Write-Host "Cache: $Cache"
 Write-Host "Saves: $Data"
 # -Fsr (KLBF Lab): Series S mode, whose title upscales with FSR 4, the calls going to the PC's FSR DLL

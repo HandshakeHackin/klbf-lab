@@ -60,7 +60,10 @@ const ERROR_PARAMETER: u32 = 6;
 const DESC_OVERRIDE_VERSION: u64 = 0x1;
 const CREATE_BACKEND_DX12: u64 = 0x2;
 const DISPATCH_UPSCALE: u64 = 0x1_0001;
-const DISPATCH_GENERATE_REACTIVE_MASK: u64 = 0x1_0002;
+const QUERY_JITTER_PHASE_COUNT: u64 = 0x1_0004;
+/// (27/11) 0x1_0006 in `ffx_upscale.h` (SDK 2.4); 0x1_0002, read before, is a query's type, so
+/// a reactive mask dispatch went to the PC DLL with the title's objects in it.
+const DISPATCH_GENERATE_REACTIVE_MASK: u64 = 0x1_0006;
 
 type Create = unsafe extern "system" fn(*mut *mut c_void, *mut u8, *const c_void) -> u32;
 type Destroy = unsafe extern "system" fn(*mut *mut c_void, *const c_void) -> u32;
@@ -278,8 +281,38 @@ extern "system" fn ffxConfigure(context: *mut *mut c_void, desc: *mut u8) -> u32
     with_host_device("configure", context, desc, |api| api.configure)
 }
 
+/// (27/11) `ffxQueryDescUpscaleGetJitterPhaseCount` is answered here, from its render and display
+/// widths (words at +16 and +20, the answer's pointer at +24), with AMD's formula: the title divides
+/// by it (+0x28f03e8), and the PC DLL's answer came back 0 at a render scale of 0.5 (avatarmanz
+/// run res-6; the same `0xc0000094` in justlovett0's Series X runs on Marvisak/VIctory#1793).
 extern "system" fn ffxQuery(context: *mut *mut c_void, desc: *mut u8) -> u32 {
+    // SAFETY: a description: its type first.
+    if !desc.is_null() && unsafe { desc.cast::<u64>().read_unaligned() } == QUERY_JITTER_PHASE_COUNT {
+        // SAFETY: the description's words, as `ffx_upscale.h` lays them out.
+        unsafe {
+            let render = desc.add(16).cast::<u32>().read_unaligned();
+            let output = desc.add(20).cast::<u32>().read_unaligned();
+            let out = desc.add(24).cast::<*mut i32>().read_unaligned();
+            if out.is_null() {
+                return ERROR_PARAMETER;
+            }
+            let count = jitter_phase_count(render, output);
+            out.write_unaligned(count);
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::info!(render, output, count, "FidelityFX: jitter phase count answered here"));
+        }
+        return OK;
+    }
     with_host_device("query", context, desc, |api| api.query)
+}
+
+/// AMD's jitter phase count (`ffxFsr3GetJitterPhaseCount`): 8 x (display / render)^2, never 0.
+fn jitter_phase_count(render: u32, display: u32) -> i32 {
+    if render == 0 {
+        return 8;
+    }
+    let ratio = display as f32 / render as f32;
+    ((8.0 * ratio * ratio) as i32).max(1)
 }
 
 /// `FfxApiResourceState` to the D3D12 resource state it means.
@@ -419,6 +452,29 @@ mod tests {
         assert_eq!(d3d12_state_in(1, true), 0x8);
         assert_eq!(d3d12_state_in((1 << 1) | (1 << 2), true), 0xc0);
         assert_eq!(d3d12_state_in((1 << 3) | (1 << 1), true), 0x840);
+    }
+
+    #[test]
+    fn the_jitter_phase_count_is_never_zero() {
+        assert_eq!(jitter_phase_count(1920, 3840), 32, "scale 0.5");
+        assert_eq!(jitter_phase_count(960, 1920), 32, "Series S at 0.5, where the PC DLL said 0");
+        assert_eq!(jitter_phase_count(1706, 2560), 18, "quality, 1440p");
+        assert_eq!(jitter_phase_count(1280, 1920), 18, "Series S, 2/3");
+        assert_eq!(jitter_phase_count(2560, 2560), 8, "native");
+        assert_eq!(jitter_phase_count(0, 2560), 8);
+        assert_eq!(jitter_phase_count(4000, 100), 1);
+    }
+
+    #[test]
+    fn the_query_is_answered_here() {
+        let mut count = 0i32;
+        let mut desc = [0u8; 32];
+        desc[..8].copy_from_slice(&QUERY_JITTER_PHASE_COUNT.to_le_bytes());
+        desc[16..20].copy_from_slice(&1920u32.to_le_bytes());
+        desc[20..24].copy_from_slice(&3840u32.to_le_bytes());
+        desc[24..].copy_from_slice(&(&raw mut count as usize).to_le_bytes());
+        assert_eq!(ffxQuery(std::ptr::null_mut(), desc.as_mut_ptr()), OK);
+        assert_eq!(count, 32);
     }
 
     #[test]
