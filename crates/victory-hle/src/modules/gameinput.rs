@@ -13,7 +13,7 @@ use std::ffi::c_void;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
@@ -113,6 +113,8 @@ trait Source: Send {
     fn keys(&mut self) -> Vec<KeyState>;
     /// Motor speeds: low frequency (left), high frequency (right).
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
+    /// The foreground window is one of ours.
+    fn focused(&mut self) -> bool;
 }
 
 fn fallback(keys: &[KeyState]) -> PadState {
@@ -161,6 +163,58 @@ fn merged(a: PadState, b: PadState) -> PadState {
 /// own slot and a remapper's) from being two players.
 fn one_pad() -> bool {
     std::env::var_os("VICTORY_ONE_PAD").is_none_or(|v| v != "0")
+}
+
+// ponytail: the console's SetRumbleState holds until changed; here an ask the
+// title does not repeat within this time stops, so a rumble whose stop never
+// reaches us ends by itself. A long steady rumble set once loses its tail;
+// raise it (or make it per title) if one shows that.
+const RUMBLE_HOLD: Duration = Duration::from_secs(1);
+
+/// Rumble: what the title asked of each host pad, and what the pad runs.
+/// A pad runs the title's ask while our window has the focus, until the
+/// title stops it, [`RUMBLE_HOLD`] passes without the ask again, or the end
+/// ([`stop_rumble`]); `KLBF_RUMBLE=0`: never.
+#[derive(Default)]
+struct Motors {
+    off: bool,
+    stopped: bool,
+    asked: [Option<((u16, u16), Instant)>; PADS],
+    /// Each ask goes to the host, a stop included.
+    fresh: [bool; PADS],
+    running: [(u16, u16); PADS],
+}
+
+impl Motors {
+    fn ask(&mut self, slot: usize, speeds: (u16, u16), now: Instant) {
+        self.asked[slot] = (speeds != (0, 0)).then_some((speeds, now));
+        self.fresh[slot] = true;
+    }
+
+    /// The speeds to send now, by slot.
+    fn changes(&mut self, now: Instant, focused: bool) -> Vec<(usize, (u16, u16))> {
+        (0..PADS)
+            .filter_map(|slot| {
+                let on = focused && !self.off && !self.stopped;
+                let want = match self.asked[slot] {
+                    Some((speeds, at)) if on && now.duration_since(at) < RUMBLE_HOLD => speeds,
+                    _ => (0, 0),
+                };
+                let send = std::mem::take(&mut self.fresh[slot]) || want != self.running[slot];
+                self.running[slot] = want;
+                send.then_some((slot, want))
+            })
+            .collect()
+    }
+}
+
+/// Stops every pad's motors for good: the title is ending (or suspending
+/// to end), and a pad keeps the last speeds it was sent after we are gone.
+pub(crate) fn stop_rumble() {
+    if let Some(hub) = STARTED.get() {
+        lock(&hub.motors).stopped = true;
+        hub.run_motors(&mut **lock(&hub.source));
+    }
 }
 
 #[repr(C)]
@@ -359,6 +413,8 @@ pub struct Hub {
     /// Apart from the state: XInput can be slow, and the title reads
     /// readings every frame.
     source: Mutex<Box<dyn Source>>,
+    /// Locked after `source`.
+    motors: Mutex<Motors>,
     /// The title sees one pad ([`one_pad`]).
     one_pad: bool,
     state: Mutex<State>,
@@ -794,6 +850,7 @@ impl Hub {
             },
             devices: std::array::from_fn(Device::new),
             source: Mutex::new(source),
+            motors: Mutex::default(),
             one_pad,
             state: Mutex::new(State {
                 slots: Default::default(),
@@ -816,6 +873,8 @@ impl Hub {
     /// A hub over the host's input, polled from now on.
     fn start(source: Box<dyn Source>) -> &'static Hub {
         let hub = Hub::new(source, one_pad());
+        lock(&hub.motors).off = std::env::var_os("KLBF_RUMBLE").is_some_and(|v| v == "0");
+        let _ = STARTED.set(hub);
         hub.poll();
         std::thread::spawn(move || {
             loop {
@@ -830,11 +889,20 @@ impl Hub {
         lock(&self.state)
     }
 
+    /// Sends the motors' changes; the caller holds `source`.
+    fn run_motors(&self, source: &mut dyn Source) {
+        let focused = source.focused();
+        for (slot, (low, high)) in lock(&self.motors).changes(Instant::now(), focused) {
+            source.rumble(slot, low, high);
+        }
+    }
+
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
         let (pads, keys) = {
             let mut source = lock(&self.source);
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
+            self.run_motors(&mut **source);
             (pads, source.keys())
         };
         let events = self.state().poll(&self.devices, self.one_pad, pads, keys);
@@ -964,11 +1032,16 @@ fn host() -> Box<dyn Source> {
             Vec::new()
         }
         fn rumble(&mut self, _: usize, _: u16, _: u16) {}
+        fn focused(&mut self) -> bool {
+            true
+        }
     }
     Box::new(Nothing)
 }
 
 static HUB: LazyLock<&'static Hub> = LazyLock::new(|| Hub::start(host()));
+/// The host's hub, once the title has asked for input.
+static STARTED: OnceLock<&'static Hub> = OnceLock::new();
 
 type This = *const Object;
 type Out = *mut *const c_void;
@@ -1364,17 +1437,21 @@ extern "system" fn set_rumble(this: *const Device, params: *const [f32; 4]) {
         unsafe { *params }
     };
     let speed = |level: f32| (level.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
-    let mut source = lock(&device.hub().source);
+    let speeds = (speed(low), speed(high));
+    let hub = device.hub();
+    let mut source = lock(&hub.source);
+    let now = Instant::now();
     if one_pad {
         // The one pad is every host pad.
         for slot in 0..PADS {
             if source.pad(slot).is_some() {
-                source.rumble(slot, speed(low), speed(high));
+                lock(&hub.motors).ask(slot, speeds, now);
             }
         }
     } else {
-        source.rumble(device.index, speed(low), speed(high));
+        lock(&hub.motors).ask(device.index, speeds, now);
     }
+    hub.run_motors(&mut **source);
 }
 extern "system" fn unsupported<const SLOT: usize>(_: *const c_void) -> HRESULT {
     tracing::warn!(
@@ -1664,6 +1741,10 @@ mod host {
             // SAFETY: a valid vibration; an empty slot just fails.
             unsafe { XInputSetState(slot as u32, &speeds) };
         }
+
+        fn focused(&mut self) -> bool {
+            focused()
+        }
     }
 
     /// Debugging aid: `VICTORY_KEYS=<seconds>:<key>,...` holds each key for
@@ -1755,6 +1836,7 @@ mod tests {
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
         rumble: Vec<(usize, u16, u16)>,
+        unfocused: bool,
     }
 
     struct Fake(Arc<Mutex<FakeHost>>);
@@ -1768,6 +1850,9 @@ mod tests {
         }
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
             self.0.lock().unwrap().rumble.push((slot, low, high));
+        }
+        fn focused(&mut self) -> bool {
+            !self.0.lock().unwrap().unfocused
         }
     }
 
@@ -2130,6 +2215,51 @@ mod tests {
         rumble(&hub.devices[FALLBACK], &[1.0; 4]);
         rumble(device, std::ptr::null());
         assert_eq!(host.lock().unwrap().rumble, [(2, 32767, 65535), (2, 0, 0)]);
+    }
+
+    #[test]
+    fn rumble_stops_on_ask_on_focus_loss_after_the_hold_and_at_the_end() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut m = Motors::default();
+        assert!(m.changes(t0, true).is_empty());
+        m.ask(1, (100, 200), t0);
+        assert_eq!(m.changes(t0, true), [(1, (100, 200))]);
+        assert!(m.changes(ms(500), true).is_empty(), "held, nothing to resend");
+        // Asked again: the hold starts over.
+        m.ask(1, (100, 200), ms(900));
+        assert_eq!(m.changes(ms(900), true), [(1, (100, 200))]);
+        assert!(m.changes(ms(1800), true).is_empty());
+        // Not asked again within the hold: off.
+        assert_eq!(m.changes(ms(1900), true), [(1, (0, 0))]);
+        assert!(m.changes(ms(2000), true).is_empty());
+        // A stop always reaches the host, even with the pad already off.
+        m.ask(1, (0, 0), ms(2000));
+        assert_eq!(m.changes(ms(2000), true), [(1, (0, 0))]);
+        // Focus lost: off; back within the hold: on again.
+        m.ask(2, (5, 5), ms(3000));
+        assert_eq!(m.changes(ms(3000), false), [(2, (0, 0))]);
+        assert_eq!(m.changes(ms(3100), true), [(2, (5, 5))]);
+        // The end: off for good.
+        m.stopped = true;
+        assert_eq!(m.changes(ms(3100), true), [(2, (0, 0))]);
+        m.ask(2, (5, 5), ms(3200));
+        assert_eq!(m.changes(ms(3200), true), [(2, (0, 0))]);
+        // KLBF_RUMBLE=0: never on.
+        let mut m = Motors { off: true, ..Default::default() };
+        m.ask(0, (9, 9), t0);
+        assert_eq!(m.changes(t0, true), [(0, (0, 0))]);
+    }
+
+    #[test]
+    fn the_hub_stops_a_rumble_on_focus_loss() {
+        let (hub, host) = fake();
+        host.lock().unwrap().pads[0] = Some(PadState::default());
+        hub.poll();
+        set_rumble(&hub.devices[0], &[1.0, 1.0, 0.0, 0.0]);
+        host.lock().unwrap().unfocused = true;
+        hub.poll();
+        assert_eq!(host.lock().unwrap().rumble, [(0, u16::MAX, u16::MAX), (0, 0, 0)]);
     }
 
     #[test]
