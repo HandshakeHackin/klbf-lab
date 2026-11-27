@@ -37,3 +37,5 @@ jobs:
           Set-Content -LiteralPath $path -Value $changed -NoNewline -Encoding utf8
           cargo test -p victory-gpu queue::tests::release_waits_for_release_held_before_freeing_waiting_queue --locked -- --exact
           if ($LASTEXITCODE -eq 0) { throw 'negative control unexpectedly passed' }
+          Write-Host 'negative control failed as expected'
+          exit 0
