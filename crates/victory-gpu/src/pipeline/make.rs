@@ -37,6 +37,8 @@ pub(crate) struct Pending {
     /// Taken by a worker from [`Queue::slow`].
     was_slow: AtomicBool,
     made: OnceLock<Option<HostPipeline>>,
+    /// (27/11, #120) Milliseconds draws have waited for it, all frames together.
+    waited_ms: AtomicU64,
     /// What identifies it across runs (shader containers and state), and
     /// whether a draw or dispatch has requested it yet.
     key: String,
@@ -192,6 +194,7 @@ impl Pending {
             queue_state: AtomicU8::new(NOT_QUEUED),
             was_slow: AtomicBool::new(false),
             made: OnceLock::new(),
+            waited_ms: AtomicU64::new(0),
             key: key.finalize().to_hex()[..32].to_owned(),
             used: AtomicBool::new(false),
             #[cfg(feature = "diagnostics")]
@@ -293,6 +296,16 @@ fn wait_budget() -> Duration {
             .unwrap_or(500);
         tracing::info!(millis, "host pipeline wait budget per frame");
         Duration::from_millis(millis)
+    })
+}
+
+/// (27/11, #120) Waiting allowed for one pipeline over all frames (`VICTORY_PIPELINE_WAIT_CAP_MS`, 5000; 0: no cap).
+fn wait_cap_ms() -> u64 {
+    static CAP: OnceLock<u64> = OnceLock::new();
+    *CAP.get_or_init(|| match std::env::var("VICTORY_PIPELINE_WAIT_CAP_MS").ok().and_then(|v| v.trim().parse().ok()) {
+        Some(0) => u64::MAX,
+        Some(n) => n,
+        None => 5000,
     })
 }
 
@@ -427,6 +440,12 @@ fn wait(p: &Pending, frame: u64) {
     if budget.is_zero() {
         return;
     }
+    // (27/11, #120) A pipeline already waited for longer than `VICTORY_PIPELINE_WAIT_CAP_MS` (5 s) in all
+    // is not waited for again: one that never gets made (six ray-traced shadow pipelines on Proton)
+    // otherwise took the whole budget of every frame, 1.8 fps. Its draws are dropped until it is made.
+    if !screen && p.waited_ms.load(Ordering::Relaxed) >= wait_cap_ms() {
+        return;
+    }
     // The frame the budget belongs to, and what was waited of it (or is
     // taken by a thread waiting now); of the passes over the screen too.
     static SPENT: [Mutex<(u64, Duration)>; 2] = [const { Mutex::new((u64::MAX, Duration::ZERO)) }; 2];
@@ -458,6 +477,7 @@ fn wait(p: &Pending, frame: u64) {
     }
     drop(held);
     let waited = started.elapsed().min(left);
+    p.waited_ms.fetch_add(waited.as_millis() as u64, Ordering::Relaxed);
     if screen && waited > Duration::from_millis(500) {
         tracing::info!(
             ms = waited.as_millis() as u64,
