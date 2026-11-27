@@ -43,18 +43,15 @@ fn luid(adapter: &IDXGIAdapter3) -> Option<LUID> {
     unsafe { adapter.GetDesc1() }.ok().map(|d| d.AdapterLuid)
 }
 
-/// The adapter's segments.
-pub(crate) fn segments(adapter: &IDXGIAdapter3) -> Vec<Segment> {
-    let Some(luid) = luid(adapter) else {
-        return Vec::new();
-    };
-    let Some(info) = query(luid, D3DKMT_QUERYSTATISTICS_ADAPTER, 0) else {
-        return Vec::new();
-    };
+/// The adapter's segments. `None` means that the sample is incomplete: one
+/// missing segment must not be mistaken for a complete, lower-pressure view.
+pub(crate) fn segments(adapter: &IDXGIAdapter3) -> Option<Vec<Segment>> {
+    let luid = luid(adapter)?;
+    let info = query(luid, D3DKMT_QUERYSTATISTICS_ADAPTER, 0)?;
     // SAFETY: the member an adapter query fills.
     let count = unsafe { info.AdapterInformation.NbSegments };
     (0..count)
-        .filter_map(|id| {
+        .map(|id| {
             let result = query(luid, D3DKMT_QUERYSTATISTICS_SEGMENT, id)?;
             // SAFETY: the member a segment query fills.
             let s = unsafe { result.SegmentInformation };
@@ -70,7 +67,7 @@ pub(crate) fn segments(adapter: &IDXGIAdapter3) -> Vec<Segment> {
 
 /// Says the segments once, at the start.
 pub(crate) fn log(adapter: &IDXGIAdapter3) {
-    for s in segments(adapter) {
+    for s in segments(adapter).unwrap_or_default() {
         tracing::info!(
             id = s.id,
             aperture = s.aperture,
@@ -97,13 +94,14 @@ fn fullest_aperture(segments: Vec<Segment>) -> Option<Segment> {
     })
 }
 
-/// Applies the on/off threshold to a successful segment sample. A missing
-/// sample keeps the last state: a transient graphics-kernel query failure
-/// must not silently release the pressure back-off.
-fn tight_from_sample(was_tight: bool, fullest: Option<Segment>, percent: u64) -> bool {
+/// Applies the on/off threshold to a complete segment sample. The outer
+/// `Option` is the sample: a missing or partial graphics-kernel query keeps
+/// the last state. The inner `Option` is the result of a complete sample,
+/// which can legitimately contain no aperture segment.
+fn tight_from_sample(was_tight: bool, fullest: Option<Option<Segment>>, percent: u64) -> bool {
     let threshold = if was_tight { percent.saturating_sub(10) } else { percent };
     fullest.map_or(was_tight, |s| {
-        u128::from(s.resident) * 100 > u128::from(s.limit) * u128::from(threshold)
+        s.is_some_and(|s| u128::from(s.resident) * 100 > u128::from(s.limit) * u128::from(threshold))
     })
 }
 
@@ -123,12 +121,12 @@ pub(crate) fn tight(adapter: &IDXGIAdapter3) -> bool {
         && let Ok(_looking) = LOOKING.try_lock()
     {
         LOOKED.store(now, Ordering::Relaxed);
-        let fullest = fullest_aperture(segments(adapter));
+        let fullest = segments(adapter).map(fullest_aperture);
         let was_tight = TIGHT.load(Ordering::Relaxed);
         let threshold = if was_tight { percent.saturating_sub(10) } else { percent };
         let tight = tight_from_sample(was_tight, fullest, percent);
         if TIGHT.swap(tight, Ordering::Relaxed) != tight
-            && let Some(s) = fullest
+            && let Some(Some(s)) = fullest
         {
             tracing::info!(
                 tight,
@@ -169,10 +167,12 @@ mod tests {
     #[test]
     fn tight_state_survives_a_missing_sample_and_uses_hysteresis() {
         let at = |resident| {
-            Some(Segment { id: 1, aperture: true, limit: 100, resident })
+            Some(Some(Segment { id: 1, aperture: true, limit: 100, resident }))
         };
         assert!(!tight_from_sample(false, None, 80));
         assert!(tight_from_sample(true, None, 80));
+        assert!(!tight_from_sample(false, Some(None), 80));
+        assert!(!tight_from_sample(true, Some(None), 80));
         assert!(!tight_from_sample(false, at(80), 80));
         assert!(tight_from_sample(false, at(81), 80));
         assert!(!tight_from_sample(true, at(70), 80));
