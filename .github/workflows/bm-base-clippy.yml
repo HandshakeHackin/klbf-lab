@@ -1,0 +1,20 @@
+name: Compare beta-amd Clippy baselines
+on:
+  push:
+    branches: [verify/bm-amd-base-clippy]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [ffcfb006f10a79d9cd672430f360201d5bce2c0a, d57b2fc4acfeb26c796285c3353fde34458aa3a4]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.base }}
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
