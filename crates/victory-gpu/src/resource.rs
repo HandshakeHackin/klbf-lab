@@ -3062,7 +3062,9 @@ mod exact_tests {
 /// space of our texture blocks, plus room kept for buffer copies and
 /// targets), high / low are its 88 % / 85 % marks, "let go for room" is
 /// every copy the sweep let go (room rule and real unmaps), and there is no
-/// out-of-memory fallback (0; refused allocations are in `residency`).
+/// out-of-memory fallback (0; refused allocations are in `residency`). Last,
+/// the room only a burst needed that `KLBF_SHRINK_KEPT=1` gave back
+/// (`crate::kept`).
 #[cfg(windows)]
 pub(crate) fn housekeeping() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -3092,15 +3094,19 @@ pub(crate) fn housekeeping() {
     let exact: [u64; 6] = std::array::from_fn(|i| EXACT[i].load(Relaxed));
     let free_ram = crate::host::available_physical_ram().map_or(0, |b| b >> 20);
     let blocks = crate::pool::texture_blocks();
+    // Host lists taken by lists of ours at the reset that begins a recording
+    // (`KLBF_LIST_LAZY`): all, made new, none to take.
+    let (taken, lazy) = crate::list::taken_at_reset();
     tracing::info!(
         "memory housekeeping: card {} MB in use ({} MB counting free heap space) of {} MB (high {} MB, low {} MB); texture copies alive {} MB, \
          let go for room {} MB ({} MB in the last 5 s), made again {} MB ({} MB in the last 5 s); windows {} alive {} MB, let go {} MB; \
          free RAM {} MB; let go on a real unmap {} ({} MB), held at a sweep {} times, mapped again {} (VICTORY_UNMAP_EXACT={}); \
          title memory really unmapped {} MB in {} calls; out-of-memory fallback ran 0 times (none in this base; host memory \
          pressure {}); windows let go on unmap {} ({} MB) (VICTORY_WINDOW_UNMAP={}); host lists idle {}, let go as idle {}          (VICTORY_LIST_POOL_IDLE_S); \
+         host lists alive {}, taken at a reset {} (made new {}, none to take {}) (KLBF_LIST_LAZY={}); \
          room rule let go {} ({} MB) in {} sweeps, raw guard ran {} s (VICTORY_VRAM_RAW_PCT={}); texture blocks {} alive ({} empty, {} given back this run); \
          heaps by occupancy: <25 % {}, 25–50 % {}, 50–75 % {}, >75 % {}; free space inside heaps {} MB; \
-         copies let go to empty a sparse heap {} ({} MB) (VICTORY_HEAP_PACK={})",
+         copies let go to empty a sparse heap {} ({} MB) (VICTORY_HEAP_PACK={}); {}",
         mb(net),
         mb(raw),
         mb(budget),
@@ -3128,6 +3134,11 @@ pub(crate) fn housekeeping() {
         u8::from(crate::shadow::window_unmap()),
         crate::list::idle_lists(),
         crate::list::IDLE_LET_GO.load(Relaxed),
+        crate::host::ALIVE[0].load(Relaxed),
+        taken[0],
+        taken[1],
+        taken[2],
+        u8::from(lazy),
         ROOM_LET_GO[0].load(Relaxed),
         mb(ROOM_LET_GO[1].load(Relaxed)),
         ROOM_LET_GO[2].load(Relaxed),
@@ -3148,6 +3159,7 @@ pub(crate) fn housekeeping() {
             (true, false) => "place",
             _ => "0",
         },
+        crate::kept::text(),
     );
     // (coder K2) Made again, by who let the copy go.
     {

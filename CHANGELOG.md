@@ -6,22 +6,21 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
-## v26.11.5 (unreleased)
+## v26.11.5
 
-crossducking (RAZDA4A-XEN) and nathanbzrr: thanks for the code this release takes in (GPL-3.0).
+### Stutter and memory (all off: set the switch to try)
+- `KLBF_SAMPLER_ORDER=1`: static samplers get the same place in the driver's table at every start, so the
+  driver's shader cache answers instead of compiling hundreds of pipelines again after each start.
+- `KLBF_PIPELINE_NOBLOCK=1`: a pipeline off the screen still being built is waited for 80 ms a frame, not
+  500, and not again until it is built (`VICTORY_PIPELINE_WAIT_MS` still sets the wait).
+- `KLBF_LIST_LAZY=1`: our command lists hold a driver list only while they record.
+- `KLBF_SHRINK_KEPT=1`: room only a burst needed is given back.
+- `KLBF_POOL_DISCARD_FRESH=1`, `KLBF_POOL_DISCARD_SOFT=1`: two finer rules for pool pages given back.
 
-### Rendering
-- Trees, foliage, fences, wooden posts and signs no longer vanish or turn black: the raw views of buffers
-  that do not begin on 16 bytes, made for a list's own views, were set to null (372 to 575 a frame); they are
-  now moved to their bytes as the staged ones were. On by default; `KLBF_RAW_VIEW_FIX=0` turns it off.
-  From crossducking (RAZDA4A-XEN, Wave 11). Tickets #142, #145.
-
-### Memory (off by default, Experimental tab)
-- `KLBF_8GB_SAFE=1`: texture uploads stop at 65 % of the card's budget instead of 90 %, for 8 GB cards
-  whose live budget drops once the world is up. From nathanbzrr (RAZDA4A-XEN PR #1).
-- `KLBF_EMERGENCY_RECLAIM=1`: with under 2.5 GB of free commit, or the shared GPU memory at 88 % of its
-  budget, idle command memory and spare chunks are freed at once, before an allocation can fail with
-  0x8007000E. From crossducking (RAZDA4A-XEN).
+### Credits
+- fxceless ([victory-fork](https://github.com/fxceless/victory-fork), GPL-3.0): static samplers in one kept order.
+- CHECK6960 ([Victory-Nvidia-optimized](https://github.com/CHECK6960/Victory-Nvidia-optimized), GPL-3.0): shorter, non-blocking pipeline wait.
+- LibsMQG ([hle-d3d12-amd](https://github.com/LibsMQG/hle-d3d12-amd), GPL-3.0): lazy lists, kept room given back, pool discard switches.
 
 ## v26.11.4 (27 Nov 2026)
 
