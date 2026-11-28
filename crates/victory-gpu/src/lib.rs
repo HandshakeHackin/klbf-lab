@@ -1,3 +1,5 @@
+// ponytail: meters and logs used only by the diagnostics build; the --all-features check still sees real dead code.
+#![cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
 //! D3D12.X on host D3D12.
 //!
 //! D3D12.X records commands from code inlined into the title, which writes
