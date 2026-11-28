@@ -13,6 +13,10 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
   none of its switches was on by default. The earlier Op-lite base stays.
 
 ### Launcher
+- The start script (Start: autosave or a slot) stops as soon as a button is pressed on the pad: a step waiting
+  for a screen that never came kept pressing A in the game.
+- launcher.log records each preparation step's process, exit code and last progress when shader translation
+  or pipeline preparation stops early (HandshakeHackin, #157).
 - "KLBF Lab.exe" in the folder and on the desktop shortcut: the settings window opens with no console window
   flashing first ("KLBF Lab.cmd" stays beside it as the fallback).
 - The release notes list both zips with their own SHA-256 and how to check them (docs/klbf/VERIFY.md).
