@@ -3146,10 +3146,7 @@ impl State {
     /// host list does not hold this pipeline, root signature and heaps.
     fn bind_key(&self, list: &HostList, p: &HostPipeline, compute: bool) -> Option<BindKey> {
         use victory_shader::emit::{SLOT_MEMORY, SLOT_STRIDES, SLOT_TABLE_STRIDES, SLOT_WALK};
-        if crate::pipeline::is_builder(self.pipeline as This)
-            || crate::ambient::stand_in()
-            || p.stages.first().is_some_and(|s| s.shader.ambient.is_some()) && crate::ambient::on()
-        {
+        if crate::pipeline::is_builder(self.pipeline as This) || crate::ambient::on() {
             return None;
         }
         if self.host_pipeline != p.pso.as_raw() as usize

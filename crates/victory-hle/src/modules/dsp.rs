@@ -97,8 +97,7 @@ pub struct Stream {
     frames: u32,
     channels: u32,
     status: Box<Status>,
-    /// (diagnostic) Kind and options, commands so far, whether input with signal came.
-    kind: u32,
+    /// (diagnostic) Options, commands so far, whether input with signal came.
     options: u32,
     commands: u64,
     heard: bool,
@@ -223,7 +222,6 @@ pub extern "system" fn XDspActivate(
         kind: desc.kind,
         frames: desc.frames,
         channels: desc.channels,
-        kind,
         options,
         commands: 0,
         heard: false,

@@ -3406,11 +3406,6 @@ impl HostHeap {
         }
     }
 
-    /// This host heap's identity (see [`HostHeap::release`]).
-    pub(crate) fn id(&self) -> u64 {
-        self.id
-    }
-
     /// Gives back `n` dynamic slots from `first` (an index [`dynamic`]
     /// returned), if they were taken by this heap: `id` is [`HostHeap::id`]'s.
     /// The title can release the heap a list's slots came from, and a later
