@@ -2836,6 +2836,46 @@ mod map_runs {
         }
     }
 
+    /// For the meter's line.
+    pub(super) fn line() -> String {
+        if !on() {
+            return String::new();
+        }
+        let s: Vec<u64> = STATS.iter().map(|a| a.swap(0, Relaxed)).collect();
+        let standing = RUNS.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let a: Vec<u64> = APPLIED.iter().map(|x| x.swap(0, Relaxed)).collect();
+        let applied = if apply() || BROKEN.load(Relaxed) {
+            format!(
+                " | runs mapped as one view (VICTORY_MAP_RUNS=1{}): {} runs of {} pages, {} placeholders joined for them; checks {} of {} pages, {} failed",
+                if BROKEN.load(Relaxed) { ", OFF after a failed check" } else { "" },
+                a[0],
+                a[1],
+                a[2],
+                a[3],
+                a[4],
+                a[5]
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "; runs (VICTORY_MAP_RUNS): page mapping copies {} of {} pages would be {} runs ({} pages in runs of two or more); \
+             system calls {} page by page, about {} with runs ({:.1} and {:.1} a call); later changes of a run's pages: {} whole, {} cutting it; \
+             runs standing {}",
+            s[CALLS],
+            s[PAGES],
+            s[RUNS_MAPPED],
+            s[IN_RUNS],
+            s[SYS_NOW],
+            s[SYS_RUNS],
+            s[SYS_NOW] as f64 / s[CALLS].max(1) as f64,
+            s[SYS_RUNS] as f64 / s[CALLS].max(1) as f64,
+            s[WHOLE],
+            s[CUT],
+            standing,
+        ) + &applied
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -2969,46 +3009,6 @@ mod map_runs {
             let runs = RUNS.lock().unwrap().clone();
             assert_eq!(runs.into_iter().collect::<Vec<_>>(), vec![(0x10_0000, 3 * PAGE), (0x10_0000 + 4 * PAGE, 4 * PAGE)]);
         }
-    }
-
-    /// For the meter's line.
-    pub(super) fn line() -> String {
-        if !on() {
-            return String::new();
-        }
-        let s: Vec<u64> = STATS.iter().map(|a| a.swap(0, Relaxed)).collect();
-        let standing = RUNS.lock().unwrap_or_else(|e| e.into_inner()).len();
-        let a: Vec<u64> = APPLIED.iter().map(|x| x.swap(0, Relaxed)).collect();
-        let applied = if apply() || BROKEN.load(Relaxed) {
-            format!(
-                " | runs mapped as one view (VICTORY_MAP_RUNS=1{}): {} runs of {} pages, {} placeholders joined for them; checks {} of {} pages, {} failed",
-                if BROKEN.load(Relaxed) { ", OFF after a failed check" } else { "" },
-                a[0],
-                a[1],
-                a[2],
-                a[3],
-                a[4],
-                a[5]
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "; runs (VICTORY_MAP_RUNS): page mapping copies {} of {} pages would be {} runs ({} pages in runs of two or more); \
-             system calls {} page by page, about {} with runs ({:.1} and {:.1} a call); later changes of a run's pages: {} whole, {} cutting it; \
-             runs standing {}",
-            s[CALLS],
-            s[PAGES],
-            s[RUNS_MAPPED],
-            s[IN_RUNS],
-            s[SYS_NOW],
-            s[SYS_RUNS],
-            s[SYS_NOW] as f64 / s[CALLS].max(1) as f64,
-            s[SYS_RUNS] as f64 / s[CALLS].max(1) as f64,
-            s[WHOLE],
-            s[CUT],
-            standing,
-        ) + &applied
     }
 }
 
@@ -4927,7 +4927,7 @@ mod tex_trim {
                 said = Instant::now();
                 tracing::info!(
                     "texture trim: {} MB of views taken out of RAM since the start, {} copies looked at, {} passes held (free RAM over KLBF_TEX_TRIM_BELOW_MB), free RAM {} MB",
-                    COUNTS[0].load(Relaxed) * PAGE as u64 >> 20,
+                    (COUNTS[0].load(Relaxed) * PAGE as u64) >> 20,
                     COUNTS[1].load(Relaxed),
                     COUNTS[2].load(Relaxed),
                     super::pool_discard::free_ram().unwrap_or(0) >> 20
@@ -5224,7 +5224,7 @@ mod tests {
     #[test]
     fn views_of_the_copies_are_kept_in_the_books_alone() {
         soft::test_mode(soft::COPIES);
-        let mut pages = [0usize; 2];
+        let pages = [0usize; 2];
         let mut n = 2;
         assert_eq!(XMemAllocatePhysicalPages(0, &mut n, pages.as_ptr().cast_mut()), 1);
         let reserve = |pages: usize| XMemVirtualAlloc(std::ptr::null_mut(), pages * PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE);
@@ -5301,7 +5301,7 @@ mod tests {
     #[test]
     fn verify_maps_as_before_and_the_books_read_the_same() {
         soft::test_mode(soft::VERIFY);
-        let mut pages = [0usize; 1];
+        let pages = [0usize; 1];
         let mut n = 1;
         assert_eq!(XMemAllocatePhysicalPages(0, &mut n, pages.as_ptr().cast_mut()), 1);
         let reserve = || XMemVirtualAlloc(std::ptr::null_mut(), PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE);

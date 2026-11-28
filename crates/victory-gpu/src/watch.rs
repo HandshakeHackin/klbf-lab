@@ -245,11 +245,11 @@ fn journal() -> std::sync::RwLockReadGuard<'static, Journal> {
 }
 
 fn journal_mut() -> std::sync::RwLockWriteGuard<'static, Journal> {
-    let j = match JOURNAL.try_write() {
+    
+    match JOURNAL.try_write() {
         Ok(j) => j,
         Err(_) => waited(2, || JOURNAL.write().unwrap_or_else(|e| e.into_inner())),
-    };
-    j
+    }
 }
 
 /// (Coder W, `VICTORY_CLEAN_STAMP`) Per 64 KiB block, the number of the last change of what
@@ -732,7 +732,7 @@ fn ask_early(every: std::time::Duration) {
                 idle = 0;
             }
             round += 1;
-            if round % 64 == 0 {
+            if round.is_multiple_of(64) {
                 hot.retain(|_, n| {
                     *n /= 2;
                     *n > 0
@@ -6651,7 +6651,7 @@ mod fast_tests {
                                 // SAFETY: inside our view.
                                 unsafe { std::ptr::write_volatile(at as *mut u64, n ^ (round << 56) ^ ((t as u64) << 48)) };
                                 done.fetch_add(1, SeqCst);
-                                if n % 32 == 0 {
+                                if n.is_multiple_of(32) {
                                     std::thread::yield_now();
                                 }
                             }

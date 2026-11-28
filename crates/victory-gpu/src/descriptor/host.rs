@@ -3468,7 +3468,7 @@ impl HostHeap {
         self.make_listed_in(recording, words, index, Some(batch))
     }
 
-    fn make_listed_in(&self, recording: u64, words: [u32; 3], index: u32, mut batch: Option<&mut CopyBatch>) -> Option<Listed> {
+    fn make_listed_in(&self, recording: u64, words: [u32; 3], index: u32, batch: Option<&mut CopyBatch>) -> Option<Listed> {
         use crate::drawmeter::{C, count};
         if self.sampler {
             return None;
@@ -3600,12 +3600,12 @@ impl HostHeap {
                     }
                     std::collections::hash_map::Entry::Vacant(v) => v.insert(make_new()?),
                 }
-            } else if views.made.contains_key(&words) {
-                hit = true;
+            } else if let std::collections::hash_map::Entry::Vacant(e) = views.made.entry(words) {
+                let m = make_new()?;
+                e.insert(m);
                 views.made.get_mut(&words)?
             } else {
-                let m = make_new()?;
-                views.made.insert(words, m);
+                hit = true;
                 views.made.get_mut(&words)?
             };
             if hit {
@@ -3658,7 +3658,7 @@ impl HostHeap {
             let (slot0, slot1) = (slot_at(at), slot_at(at + 1));
             #[cfg(feature = "diagnostics")]
             sp.lap(C::MlBefore);
-            match batch.as_deref_mut() {
+            match batch {
                 None => {
                     self.copy_from(index, slot0);
                     if made.twin && twins {
@@ -5292,7 +5292,7 @@ fn make_twinned(
                 if crate::resource::e5_alpha_one() && crate::resource::e5_stand_in(resource) {
                     match &mut desc {
                         Some(d) => {
-                            d.Shader4ComponentMapping = 0 | 1 << 3 | 2 << 6 | 5 << 9 | 1 << 12;
+                            d.Shader4ComponentMapping = (1 << 3) | 2 << 6 | 5 << 9 | 1 << 12;
                             crate::resource::E5_VIEWS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                         None => {

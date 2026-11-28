@@ -933,7 +933,7 @@ static SAFETY_TURN: AtomicU64 = AtomicU64::new(0);
 /// compare, at most 16 MB a second).
 pub(crate) fn safety_due(bytes: u64) -> bool {
     // One page in 8 offered, in turn, while the budget lasts.
-    if SAFETY_TURN.fetch_add(1, Relaxed) % 8 != 0 {
+    if !SAFETY_TURN.fetch_add(1, Relaxed).is_multiple_of(8) {
         return false;
     }
     let ok = SAFETY.fetch_update(Relaxed, Relaxed, |l| l.checked_sub(bytes)).is_ok();
@@ -1273,7 +1273,7 @@ pub fn line(frames: f64) {
         locks[2],
         CHUNKS_MADE.load(Relaxed),
     );
-    if second % 10 == 0 {
+    if second.is_multiple_of(10) {
         let bk = book();
         for (list, what) in [(&bk.changed, "CHANGED"), (&bk.same, "unchanged")] {
             if !list.is_empty() {

@@ -910,7 +910,7 @@ fn net_round(from: u64, seen: &mut std::collections::HashMap<u64, crate::texture
             continue;
         }
         seen.remove(&serial);
-        stale_case("safety net: a stale copy", start as usize, len as usize, resource as usize);
+        stale_case("safety net: a stale copy", start as usize, len as usize, resource);
         let n = NET[4].fetch_add(1, Relaxed);
         if n < 32 {
             tracing::warn!(

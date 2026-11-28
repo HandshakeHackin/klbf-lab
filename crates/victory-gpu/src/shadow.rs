@@ -2293,7 +2293,7 @@ fn dword_runs(at: usize, title: &[u8], merged: &[u8], gap: usize) -> Vec<(usize,
 /// 12 MB this way and finds 80,000 runs.
 fn word_runs(at: usize, title: &[u8], held: &[u8]) -> Vec<(usize, usize)> {
     #[cfg(target_arch = "x86_64")]
-    if at % 4 == 0 && title.len() % 4 == 0 && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
+    if at.is_multiple_of(4) && title.len().is_multiple_of(4) && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: the processor has AVX2, and the lengths are the same.
         return unsafe { word_runs_avx2(title, held) };
     }
@@ -2366,7 +2366,7 @@ pub(crate) static MERGED_FUSED: AtomicU64 = AtomicU64::new(0);
 /// `held` is `title` afterwards.
 fn word_runs_put(at: usize, title: &[u8], held: &mut [u8]) -> Vec<(usize, usize)> {
     #[cfg(target_arch = "x86_64")]
-    if at % 4 == 0 && title.len() % 4 == 0 && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
+    if at.is_multiple_of(4) && title.len().is_multiple_of(4) && title.len() == held.len() && std::arch::is_x86_feature_detected!("avx2") {
         // SAFETY: the processor has AVX2, and the lengths are the same.
         return unsafe { word_runs_put_avx2(title, held) };
     }
@@ -4164,9 +4164,9 @@ impl Shadow {
                     // our own sends are on: else each run is a copy.)
                     && crate::host::goes_as_words(0, 4)
                     && !crate::host::upcheck::on()
-                    && at % 4 == 0
-                    && lo % 4 == 0
-                    && n % 4 == 0
+                    && at.is_multiple_of(4)
+                    && lo.is_multiple_of(4)
+                    && n.is_multiple_of(4)
                     && {
                         if left.fetch_sub(most, Ordering::Relaxed) >= most {
                             true
@@ -4383,7 +4383,7 @@ impl Shadow {
             // pages are looked at (one refresh in 64 goes today's way, its pages checked).
             if crate::watch::stalelog::mode() == 1 {
                 static N: AtomicU64 = AtomicU64::new(0);
-                if N.fetch_add(1, Ordering::Relaxed) % 64 != 0
+                if !N.fetch_add(1, Ordering::Relaxed).is_multiple_of(64)
                     && let Some(now) = crate::watch::journal_answer(from, to)
                 {
                     let began = std::time::Instant::now();
@@ -4468,6 +4468,7 @@ impl Shadow {
                 })
                 .collect()
         };
+        #[cfg_attr(not(feature = "diagnostics"), allow(unused_mut))]
         let mut spared = crate::knownwrites::spared(&pages, from, to);
         // (Its reason is counted there.)
         if !spared.iter().any(|&s| s) {
@@ -4477,6 +4478,7 @@ impl Shadow {
         count(F_REFRESHES, 1);
         let clip = |page: usize| ((page * PAGE).max(from), ((page + 1) * PAGE).min(to));
         // The safety compare (diagnostics): spared pages that differ from the copy are taken.
+        #[cfg_attr(not(feature = "diagnostics"), allow(unused_mut))]
         let mut stale: Vec<(usize, usize)> = Vec::new();
         #[cfg(feature = "diagnostics")]
         {
@@ -5695,7 +5697,7 @@ mod land_tests {
                 let at = random(&mut seed) % LEN;
                 gpu[at] = gpu[at].wrapping_add(1 + (random(&mut seed) % 255) as u8);
             }
-            let title: Vec<u8> = base.iter().map(|&x| if random(&mut seed) % 7 == 0 { x ^ 0x3c } else { x }).collect();
+            let title: Vec<u8> = base.iter().map(|&x| if random(&mut seed).is_multiple_of(7) { x ^ 0x3c } else { x }).collect();
             let (lo, hi) = (random(&mut seed) % (LEN / 2), LEN / 2 + random(&mut seed) % (LEN / 2) + 1);
             let skip: Vec<(usize, usize)> = match round % 4 {
                 0 => Vec::new(),
@@ -5839,7 +5841,7 @@ mod land_tests {
             });
             let mut now = vec![0u8; LEN];
             for round in 1..200u32 {
-                for block in (0..BLOCKS).filter(|b| (*b as u32 * 5 + round) % 3 != 0) {
+                for block in (0..BLOCKS).filter(|b| !(*b as u32 * 5 + round).is_multiple_of(3)) {
                     for i in (block * PIECE / 4 + 3..(block + 1) * PIECE / 4).step_by(4) {
                         now[i * 4..i * 4 + 4].copy_from_slice(&(round << 20 | i as u32).to_le_bytes());
                     }
