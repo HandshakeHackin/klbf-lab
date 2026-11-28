@@ -11,13 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: e28c1c59dc0ee31a098f89aa26990aeb53d3d1ac
+          ref: 7278580dd79362c88519bcad90dbb6b539726a96
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Demonstrate descriptor mismatch on original PR 152
         shell: bash
         run: |
           set -euo pipefail
+          git fetch --no-tags --depth=1 origin e28c1c59dc0ee31a098f89aa26990aeb53d3d1ac d9353ecc271fa6df00f18f4f6602b642269b8e3a
+          git diff e28c1c59dc0ee31a098f89aa26990aeb53d3d1ac d9353ecc271fa6df00f18f4f6602b642269b8e3a -- crates/victory-gpu/src/rootstring.rs | git apply -R
           test_name=rootstring::tests::static_sampler_defaults_match_the_native_hlsl_compiler
           if cargo test --locked -p victory-gpu --lib "$test_name" -- --exact --nocapture > baseline.txt 2>&1; then
             cat baseline.txt
@@ -31,6 +33,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin d9353ecc271fa6df00f18f4f6602b642269b8e3a
-          git restore --source=FETCH_HEAD -- crates/victory-gpu/src/rootstring.rs
+          git restore --source=HEAD -- crates/victory-gpu/src/rootstring.rs
           cargo test --locked -p victory-gpu --lib rootstring::tests:: -- --nocapture
