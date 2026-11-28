@@ -6,6 +6,22 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## v26.11.5
+
+### Stutter and memory (all off: set the switch to try)
+- `KLBF_SAMPLER_ORDER=1`: static samplers get the same place in the driver's table at every start, so the
+  driver's shader cache answers instead of compiling hundreds of pipelines again after each start.
+- `KLBF_PIPELINE_NOBLOCK=1`: a pipeline off the screen still being built is waited for 80 ms a frame, not
+  500, and not again until it is built (`VICTORY_PIPELINE_WAIT_MS` still sets the wait).
+- `KLBF_LIST_LAZY=1`: our command lists hold a driver list only while they record.
+- `KLBF_SHRINK_KEPT=1`: room only a burst needed is given back.
+- `KLBF_POOL_DISCARD_FRESH=1`, `KLBF_POOL_DISCARD_SOFT=1`: two finer rules for pool pages given back.
+
+### Credits
+- fxceless ([victory-fork](https://github.com/fxceless/victory-fork), GPL-3.0): static samplers in one kept order.
+- CHECK6960 ([Victory-Nvidia-optimized](https://github.com/CHECK6960/Victory-Nvidia-optimized), GPL-3.0): shorter, non-blocking pipeline wait.
+- LibsMQG ([hle-d3d12-amd](https://github.com/LibsMQG/hle-d3d12-amd), GPL-3.0): lazy lists, kept room given back, pool discard switches.
+
 ## v26.11.4 (27 Nov 2026)
 
 Thanks to the testers whose reports led to this release: Domi, INGLIP, deydey103, Solar, pacoravan,
