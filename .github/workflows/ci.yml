@@ -1,59 +1,44 @@
-name: Verify benchmark menu session
+name: Verify shipped v26.11.5 launchers
 on:
   push:
-    branches: ['verify/v26.11.4-bench-menu-restart']
+    branches: ['verify/v26.11.5-packaged-benchmark']
 permissions:
   contents: read
 jobs:
-  release-powershell:
+  packaged-launchers:
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/checkout@v5
-        with:
-          path: source
-          ref: a916502edc5d2c2406e9515fbb25af043776db09
-      - name: Exercise the launcher menu
-        shell: powershell
-        run: |
-          ./tests/benchmark-menu-session.ps1 -Source ./source -ExpectKnownLeak
-  release-pwsh:
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/checkout@v5
-        with:
-          path: source
-          ref: a916502edc5d2c2406e9515fbb25af043776db09
-      - name: Exercise the launcher menu
+      - name: Fetch release assets and verify their SHA-256 fingerprints
         shell: pwsh
         run: |
-          ./tests/benchmark-menu-session.ps1 -Source ./source -ExpectKnownLeak
-  fix-powershell:
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/checkout@v5
-        with:
-          path: source
-          ref: 818134982d331f0e553c6cb9d666bcc10e4bb066
-      - name: Exercise the launcher menu
+          $ErrorActionPreference = 'Stop'
+          $packages = @(
+            @{ Name = 'KLBF-Lab-win64.zip'; Sha256 = '4a12a4616807891e90cc686ee0c1d8f6326c79ed8509b09d0ad7cee2b13ef1c3'; Dir = 'updater' }
+            @{ Name = 'KLBF-Lab.zip'; Sha256 = '0b2bc044fb2f787533ce6e3fd6fea01507de54dc82a005916a1d0ae9c1d60770'; Dir = 'manual' }
+          )
+          foreach ($package in $packages) {
+              $zip = Join-Path $env:RUNNER_TEMP $package.Name
+              Invoke-WebRequest ("https://github.com/PastiiJay/klbf-lab/releases/download/v26.11.5/" + $package.Name) -OutFile $zip
+              $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+              if ($actual -ne $package.Sha256) { throw "Unexpected fingerprint for $($package.Name): $actual" }
+              Write-Host "$($package.Name) SHA-256 $actual"
+              Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP $package.Dir)
+          }
+      - name: Test manual launcher in powershell
         shell: powershell
         run: |
-          ./tests/benchmark-menu-session.ps1 -Source ./source
-  fix-pwsh:
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/checkout@v5
-        with:
-          path: source
-          ref: 818134982d331f0e553c6cb9d666bcc10e4bb066
-      - name: Exercise the launcher menu
+          ./tests/benchmark-menu-session.ps1 -Source (Join-Path $env:RUNNER_TEMP 'manual/KLBF Lab')
+      - name: Test updater launcher in powershell
+        shell: powershell
+        run: |
+          ./tests/benchmark-menu-session.ps1 -Source (Join-Path $env:RUNNER_TEMP 'updater')
+      - name: Test manual launcher in pwsh
         shell: pwsh
         run: |
-          ./tests/benchmark-menu-session.ps1 -Source ./source
+          ./tests/benchmark-menu-session.ps1 -Source (Join-Path $env:RUNNER_TEMP 'manual/KLBF Lab')
+      - name: Test updater launcher in pwsh
+        shell: pwsh
+        run: |
+          ./tests/benchmark-menu-session.ps1 -Source (Join-Path $env:RUNNER_TEMP 'updater')
