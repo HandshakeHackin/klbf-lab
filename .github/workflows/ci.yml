@@ -1,33 +1,66 @@
-name: CI
-
+name: Check the published Windows launcher with the NVIDIA SDK
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/v26.11.6-streamline-package']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
-    runs-on: windows-latest
-    timeout-minutes: 60
+  package:
+    runs-on: windows-2025
+    timeout-minutes: 18
     steps:
-      - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - name: Fetch the published KLBF Lab launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe -fLsS --retry 2 -o release.zip https://github.com/PastiiJay/klbf-lab/releases/download/v26.11.6/KLBF-Lab-win64.zip
+          if ($LASTEXITCODE -or (Get-FileHash release.zip).Hash -ne '18c845e9005ac0229d580d190cd6137c8ed92021d82da932215d0508b10a36ac') { throw 'Release ZIP SHA-256 mismatch' }
+          Expand-Archive release.zip -DestinationPath release
+      - name: Test a fresh Streamline installation using the released installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./release/launcher-menu.ps1
+          $dir = (Resolve-Path release).Path
+          if (Install-KlbfComponent streamline $dir -CheckOnly) { throw 'Expected a clean install' }
+          if (-not (Install-KlbfComponent streamline $dir)) { throw 'Cold installation failed' }
+          $sdk = Join-Path $dir 'streamline'
+          $files = @(Get-ChildItem $sdk -Filter *.dll)
+          if ($files.Count -ne 8) { throw "Found $($files.Count) DLLs" }
+          foreach ($f in $files) {
+            if ($f.Length -eq 0) { throw "Empty $($f.Name)" }
+            Write-Host "$($f.Name) $($f.Length) $((Get-FileHash $f.FullName).Hash)"
+          }
+          if ((Get-Item "$sdk/LICENSE-NVIDIA-Streamline.txt").Length -le 0) { throw 'Missing license' }
+          $sig = Get-AuthenticodeSignature "$sdk/sl.interposer.dll"
+          Write-Host "Interposer signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw 'Interposer signature failed' }
+      - name: Test the installed component offline and exercise launch settings on both shells
+        shell: pwsh
+        run: |
+          @'
+          $ErrorActionPreference = 'Stop'
+          . ./release/launcher-menu.ps1
+          $dir = (Resolve-Path release).Path
+          function Invoke-WebRequest { throw 'Unexpected network request after installation' }
+          if (-not (Install-KlbfComponent streamline $dir -CheckOnly)) { throw 'Cache check failed' }
+          if (-not (Install-KlbfComponent streamline $dir)) { throw 'Warm install failed' }
+          $choice = Get-KlbfDefaults
+          $choice.upscaler = 'dlss'; $choice.profile = 'X'; $choice.frameGen = $true
+          foreach ($n in 2,3,4,6) {
+            $choice.fgType = "dlss$n"
+            $sw = Get-KlbfSwitches $choice
+            if (-not $sw.Dlss -or -not $sw.FsrX -or $sw.DlssFrames -ne $n -or $sw.FrameGen) { throw "Unexpected Profile X switches for x$n" }
+          }
+          $choice.profile = 'S'
+          $sw = Get-KlbfSwitches $choice
+          if (-not $sw.Fsr -or $sw.Dlss -or $sw.DlssFrames -ne 6) { throw 'Unexpected Profile S switches' }
+          $choice.profile = 'X'; $choice.upscaler = 'title'
+          $sw = Get-KlbfSwitches $choice
+          if ($sw.Dlss -or $sw.DlssFrames -or $sw.FrameGen) { throw 'Unexpected switches on built-in upscaling' }
+          Write-Host "Passed offline warm install and switch cases on PowerShell $($PSVersionTable.PSVersion)"
+          '@ | Set-Content checks.ps1
+          foreach ($exe in 'powershell.exe','pwsh.exe') {
+            & $exe -NoProfile -File ./checks.ps1
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }
