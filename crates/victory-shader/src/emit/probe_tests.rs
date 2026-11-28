@@ -107,7 +107,7 @@ fn inspect() {
                 names.len(),
                 count("s_barrier"),
                 count("bvh"),
-                names.iter().filter(|x| (x.starts_with("global_load") || x.starts_with("flat_load"))).count(),
+                names.iter().filter(|x| x.starts_with("global_load") || x.starts_with("flat_load")).count(),
                 names.iter().filter(|x| x.starts_with("buffer_load") || x.starts_with("s_buffer_load")).count(),
                 names.iter().filter(|x| x.starts_with("ds_")).count(),
                 p.blocks.len(),

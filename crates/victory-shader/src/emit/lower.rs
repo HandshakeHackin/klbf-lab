@@ -755,6 +755,8 @@ pub(super) fn loops_wave(native: &NativeProgram) -> bool {
     let test = TEST_LOOPS_WAVE.get();
     #[cfg(not(test))]
     let test: Option<u8> = None;
+    // (Outside the tests `test` is always None.)
+    #[allow(clippy::unnecessary_literal_unwrap)]
     let mode = test.unwrap_or_else(|| {
         static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
         *MODE.get_or_init(|| match std::env::var("VICTORY_LOOPS_WAVE").ok().as_deref().map(str::trim) {
@@ -5524,7 +5526,7 @@ impl<'a> Lower<'a> {
         let mut open = vec![place];
         while let Some(v) = open.pop() {
             if let Some(c) = input(v) {
-                parts.push(c as u8);
+                parts.push(c);
                 continue;
             }
             let made = p.blocks.iter().flat_map(|blk| &blk.insts).find(|k| k.writes.iter().any(|w| w.1 == v))?;
