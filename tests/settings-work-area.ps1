@@ -11,13 +11,15 @@ try {
     $hardware = @{ gpu = 'AMD Radeon RX 6600M'; vramGB = 8; ramGB = 16; screen = '1366x768' }
     $screens = @(
         @{ primary = $true; bounds = '1366x768'; work = @(0, 0, 1366, 728) }
-        @{ primary = $false; bounds = '1280x720'; work = @(0, 0, 1280, 640) }
+        @{ primary = $false; bounds = '1280x720'; work = @(-1280, 24, 1280, 640) }
+        @{ primary = $false; bounds = '1920x1080'; work = @(0, 0, 1920, 1040) }
+        @{ primary = $false; bounds = '500x700'; work = @(0, 0, 500, 660) }
     )
     $info = @{ data = $fixture; victory = (Join-Path $fixture 'victory.exe'); windows = 'Windows 11'; screens = $screens }
     $m = New-KlbfMenuForm (Get-KlbfDefaults) $hardware 'Shaders: ready for this build.' $info
     $m.form.Show()
     [Windows.Forms.Application]::DoEvents()
-    foreach ($index in 0,1,0) {
+    foreach ($index in 0,1,2,3,0) {
         $m.c.display.SelectedIndex = $index
         [Windows.Forms.Application]::DoEvents()
         $w = $screens[$index].work
