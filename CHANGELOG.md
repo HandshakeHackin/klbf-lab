@@ -6,7 +6,7 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
-## v26.11.6 (unreleased)
+## v26.11.6 (28 Nov 2026)
 
 ### Known issues
 - AMD FSR 4: black planes can flash out from the character on water (boat, swimming) and in low sun (FSR 3.1 not checked yet),
