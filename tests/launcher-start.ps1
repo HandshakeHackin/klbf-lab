@@ -94,6 +94,24 @@ try {
     $m.c.savesList.Items[0].Selected = $true; $m.c.savesList.Items[2].Selected = $false; Update-KlbfMoveButtons $m.c
     Check 'window: no buttons on the autosave' (-not $m.c.moveShown)
     $m.form.Dispose()
+
+    # (28/11) Launch options: NAME=value pairs, KLBF_ / VICTORY_ names only, plain values; remembered
+    $o = ConvertFrom-KlbfLaunchOptions '  KLBF_RAW_VIEW_FIX=0   VICTORY_VIEW_BYTES=1 VICTORY_LOG=warn,victory_gpu=info '
+    Check 'options parsed' (($o.Keys -join ',') -eq 'KLBF_RAW_VIEW_FIX,VICTORY_VIEW_BYTES,VICTORY_LOG' -and $o.VICTORY_LOG -eq 'warn,victory_gpu=info')
+    Check 'no options: none' ((ConvertFrom-KlbfLaunchOptions '').Count -eq 0)
+    foreach ($bad in 'PATH=C:/x', 'klbf_x=1', 'KLBF_X="1"', 'KLBF_X=1;calc', 'KLBF_X=$(1)', 'KLBF_X', 'KLBF_=1', 'KLBF_X=') {
+        Check "refused: $bad" ($(try { $null = ConvertFrom-KlbfLaunchOptions $bad; $false } catch { "$_" -match 'KLBF_ or VICTORY_' }))
+    }
+    $ch = Get-KlbfDefaults; $ch.launchOptions = 'KLBF_RAW_VIEW_FIX=0'; Save-KlbfSettings $ch $f
+    Check 'options remembered' ((Read-KlbfSettings $f).launchOptions -eq 'KLBF_RAW_VIEW_FIX=0')
+    $m = New-KlbfMenuForm $ch $hw '' @{ data = $data; windows = 'Windows 11' }
+    Check 'window: options shown and given back' ($m.c.launchOptions.Text -eq 'KLBF_RAW_VIEW_FIX=0' -and (Get-KlbfFormChoice $m.c).launchOptions -eq 'KLBF_RAW_VIEW_FIX=0')
+    $m.c.launchOptions.Text = 'PATH=1'
+    Check 'window: Play refuses a bad option, says why' (-not (& $m.c.launchOk) -and $m.c.launchNote.Text -match 'PATH=1')
+    $m.form.Dispose()
+    # The run log names them
+    $code = Invoke-KlbfLogged "$env:SystemRoot\System32\cmd.exe" @('/c', 'exit /b 0') (Join-Path $t 'logs') 'Launch options: KLBF_RAW_VIEW_FIX=0'
+    Check 'run log names the options' ((Get-Content -Raw (Get-ChildItem (Join-Path $t 'logs') -Filter 'run-*.log').FullName) -match 'Launch options: KLBF_RAW_VIEW_FIX=0')
 } finally {
     Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue
 }

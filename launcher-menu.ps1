@@ -117,7 +117,9 @@ function Get-KlbfDefaults {
         # (low-end beta) Experimental switches, all off: Experimental tab, play.ps1's -HeapSkip and siblings
         heapSkip = $false; heapSkipVerify = $false; rebarUpload = $false; refreshCoalesce = $false; pagePool = $false; safe8gb = $false; emergencyReclaim = $false
         # (28/11) How Play starts: the game's menu, a new game, the autosave, or a save (Get-KlbfStartPlan)
-        start = 'menu' }
+        start = 'menu'
+        # (28/11) Launch options, as on Steam: NAME=value pairs over everything above (ConvertFrom-KlbfLaunchOptions)
+        launchOptions = '' }
 }
 
 # (low-end beta) The experimental choices: play.ps1 switch, environment variable, the tab's text and tooltip.
@@ -150,10 +152,24 @@ function ConvertTo-KlbfChoice($o) {
     if ($o.game -is [string]) { $c.game = $o.game }
     if ($o.shotsDir -is [string]) { $c.shotsDir = $o.shotsDir }
     if ($o.borderless -is [bool]) { $c.borderless = $o.borderless }
+    if ($o.launchOptions -is [string]) { $c.launchOptions = $o.launchOptions.Trim() }
     if ($o.start -is [string] -and $o.start -match '^(menu|new|auto|SARC.*~[0-9a-f]{16})$') { $c.start = $o.start }
     foreach ($k in $script:KlbfExperimental.Keys) { if ($o.$k -is [bool]) { $c[$k] = $o.$k } }
     if (($o.display -is [int] -or $o.display -is [long]) -and $o.display -ge -1 -and $o.display -lt 16) { $c.display = [int]$o.display }
     $c
+}
+
+# (28/11) Launch options: "NAME=value NAME=value" as an ordered table. Names KLBF_ or VICTORY_ only, values
+# without quotes, spaces or shell characters; anything else throws a message to show, and nothing starts.
+function ConvertFrom-KlbfLaunchOptions([string]$Text) {
+    $o = [ordered]@{}
+    foreach ($t in ($Text -split '\s+' | Where-Object { $_ })) {
+        if ($t -cnotmatch '^((KLBF|VICTORY)_[A-Z0-9_]+)=([A-Za-z0-9_.,:+/=\-]+)$') {
+            throw "Launch option not used: $t. Write NAME=value, the name in capitals starting with KLBF_ or VICTORY_, the value with no quotes or special characters (example: KLBF_RAW_VIEW_FIX=0)."
+        }
+        $o[$Matches[1]] = $Matches[3]
+    }
+    $o
 }
 
 # (27/11) Where F8's screenshots go (KLBF_SHOTS_DIR): the folder chosen in Settings, else Pictures\KLBF Lab
@@ -1129,7 +1145,7 @@ function Remove-KlbfOldLogs([string]$Dir, [int]$Keep = 10) {
 
 # Runs $Exe with $ArgList, every line it writes (output and errors) shown as before and written to a new
 # run-<date>.log in $Dir as it comes (a crash keeps what was said). Its exit code.
-function Invoke-KlbfLogged([string]$Exe, [string[]]$ArgList, [string]$Dir) {
+function Invoke-KlbfLogged([string]$Exe, [string[]]$ArgList, [string]$Dir, [string]$Note = '') {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     $log = Join-Path $Dir ('run-{0:yyyy-MM-dd_HH-mm-ss}.log' -f (Get-Date))
     Remove-KlbfOldLogs $Dir 9
@@ -1140,6 +1156,7 @@ function Invoke-KlbfLogged([string]$Exe, [string[]]$ArgList, [string]$Dir) {
     $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
         $w.WriteLine("KLBF Lab run, $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): $(Split-Path -Leaf $Exe) $($ArgList[0])")
+        if ($Note) { $w.WriteLine($Note) }
         & $Exe @ArgList 2>&1 | ForEach-Object { $l = "$_"; $w.WriteLine($l); $l } | Out-Host
         $code = $LASTEXITCODE
         $w.WriteLine("exit code $code")
@@ -1514,6 +1531,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.exp.heapSkip.add_CheckedChanged({ $c.exp.heapSkipVerify.Enabled = $c.exp.heapSkip.Checked }.GetNewClosure())
     $note = & $label $expPage 'Turn on one at a time and compare with all off: same save, same route, same length.' 6 222 480 36
     $note.ForeColor = $soft
+    # (28/11) Launch options, as on Steam: environment values for the game, over the boxes above
+    [void](& $label $expPage 'Launch options' 6 262 480 18)
+    $c.launchOptions = & $add $expPage (New-Object System.Windows.Forms.TextBox) 6 282 480 24
+    $c.launchOptions.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.launchOptions.ForeColor = Get-KlbfColor $script:KlbfTheme.text
+    $c.tips.SetToolTip($c.launchOptions, 'NAME=value, separated by spaces (KLBF_ or VICTORY_ names). Applied when the game starts, over the boxes above. Example: KLBF_RAW_VIEW_FIX=0 VICTORY_VIEW_BYTES=1')
+    $c.launchNote = & $label $expPage '' 6 310 480 54
+    $c.launchNote.ForeColor = $soft
 
     # Saves tab
     $c.savesRoot = Get-KlbfSavesRoot $Info.data
@@ -1782,7 +1806,14 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $c.lastShare = $text
         try { & $c.clipboard $text; $c.quickNote.Text = 'Text copied: paste it anywhere.' } catch { $c.quickNote.Text = 'Could not copy the text.' }
     }.GetNewClosure())
-    $c.play.add_Click({ if ($c.playIsUpdate -and $c.startUpdate) { & $c.startUpdate; return }; $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
+    $fLaunch = ${function:ConvertFrom-KlbfLaunchOptions}
+    # (28/11) Launch options that would be refused: said on their tab, nothing starts
+    $c.launchOk = { try { $null = & $fLaunch $c.launchOptions.Text; $true } catch { $c.launchNote.Text = "$_"; $c.tabs.SelectedTab = $c.launchOptions.Parent; $false } }.GetNewClosure()
+    $c.play.add_Click({
+        if ($c.playIsUpdate -and $c.startUpdate) { & $c.startUpdate; return }
+        if (-not (& $c.launchOk)) { return }
+        $c.form.Tag = 'play'; $c.form.Close()
+    }.GetNewClosure())
     $opened = $Choice; $fShots = ${function:Set-KlbfShotsPath}; $fShotsDir = ${function:Get-KlbfShotsDir}
     $c.quickRestart.add_Click({ if ($c.playIsUpdate -and $c.startUpdate) { & $c.startUpdate; return }; & $fSet $c $opened; $c.form.Tag = 'play'; $c.form.Close() }.GetNewClosure())
     $c.quickSettings.add_Click({ $c.tabs.SelectedIndex = 0 }.GetNewClosure())
@@ -1909,6 +1940,7 @@ function Set-KlbfFormChoice($c, $Choice) {
     $c.output.SelectedIndex = $c.output.Items.IndexOf($Choice.output)
     $c.fg.Checked = $Choice.frameGen; $c.adv.Checked = $Choice.advanced
     foreach ($k in $c.exp.Keys) { $c.exp[$k].Checked = [bool]$Choice.$k }
+    $c.launchOptions.Text = [string]$Choice.launchOptions
     $c.exp.heapSkipVerify.Enabled = $c.exp.heapSkip.Checked
     $c.startWant = [string]$Choice.start
     if ($c.startValues) { $c.startList.SelectedIndex = [math]::Max(0, [array]::IndexOf($c.startValues, $c.startWant)) }
@@ -1932,6 +1964,7 @@ function Get-KlbfFormChoice($c) {
         rebarUpload = [bool]$c.exp.rebarUpload.Checked; refreshCoalesce = [bool]$c.exp.refreshCoalesce.Checked; pagePool = [bool]$c.exp.pagePool.Checked
         safe8gb = [bool]$c.exp.safe8gb.Checked; emergencyReclaim = [bool]$c.exp.emergencyReclaim.Checked
         display = $(if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -eq $c.primaryIndex) { -1 } else { [int]$c.display.SelectedIndex })
+        launchOptions = [string]$c.launchOptions.Text
         start = $(if ($c.startList -and $c.startList.SelectedIndex -ge 0) { [string]$c.startValues[$c.startList.SelectedIndex] } else { [string]$c.startWant })
     })
 }

@@ -268,6 +268,8 @@ if ($menuAction -eq 'bench' -and $picked.benchSave) {
     $Data = New-KlbfBenchData $Data $picked.benchSave
     Write-Host "KLBF Lab Bench: save $benchLabel, alone in a copy of your data ($Data)"
 }
+# (28/11) Settings' Launch options (Experimental tab): read now, so a refused one starts nothing
+$launchOptions = if (-not $explicit) { ConvertFrom-KlbfLaunchOptions $choice.launchOptions } else { [ordered]@{} }
 # (28/11) Settings' Start beside Play: a new game, the autosave or a slot, pressed for you (Get-KlbfStartPlan)
 $startPlan = if (-not $explicit -and -not $Bench) { Get-KlbfStartPlan $choice.start (Get-KlbfSavesRoot $Data) } else { $null }
 if ($startPlan.note) { Write-Host $startPlan.note }
@@ -397,12 +399,16 @@ $set.KLBF_LOG_DIR = Get-KlbfLogDir
 # (27/11) The Display chosen in Settings: the game window opens centred on that monitor (else the main one)
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }
+# (28/11) The launch options over every box (-More, from the command line, still has the last word)
+foreach ($k in $launchOptions.Keys) { $set[$k] = $launchOptions[$k] }
+$launchNote = if ($launchOptions.Count) { 'Launch options: ' + (($launchOptions.Keys | ForEach-Object { "$_=$($launchOptions[$_])" }) -join ' ') } else { '' }
+if ($launchNote) { Write-Host $launchNote }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
 # Apply benchmark-only values (and the menu presses, 28/11) for the game below only: a later start from F10's
 # Settings runs in this process. Preflight can fail or return to Settings.
 $benchEnvironment = @{}
 foreach ($k in $set.Keys) {
-    if ($k -eq 'VICTORY_AUTO_INPUT' -or ($Bench -and $k -in 'KLBF_BENCH', 'KLBF_BENCH_PLAYER', 'KLBF_BENCH_LENGTH', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_SAVE_ID', 'KLBF_BENCH_WHERE', 'VICTORY_AUTO_INPUT')) {
+    if ($k -eq 'VICTORY_AUTO_INPUT' -or $launchOptions.Contains($k) -or ($Bench -and $k -in 'KLBF_BENCH', 'KLBF_BENCH_PLAYER', 'KLBF_BENCH_LENGTH', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_SAVE_ID', 'KLBF_BENCH_WHERE', 'VICTORY_AUTO_INPUT')) {
         $benchEnvironment[$k] = $set[$k]
     } else {
         Set-Item -Path "Env:$k" -Value $set[$k]
@@ -517,7 +523,7 @@ try {
         $previous[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
         Set-Item -Path "Env:$k" -Value $benchEnvironment[$k]
     }
-    $code = Invoke-KlbfLogged $Victory $runArgs (Get-KlbfLogDir)
+    $code = Invoke-KlbfLogged $Victory $runArgs (Get-KlbfLogDir) $launchNote
 } finally {
     foreach ($k in $previous.Keys) {
         if ($null -eq $previous[$k]) { Remove-Item -LiteralPath "Env:$k" -ErrorAction SilentlyContinue }
