@@ -1,19 +1,41 @@
-name: Benchmark result clipboard
-on: [push, workflow_dispatch]
+name: Verify benchmark clipboard
+on:
+  push:
+    branches: ['verify/v26.11.5-benchmark-clipboard']
 permissions:
   contents: read
 jobs:
-  windows:
-    runs-on: windows-2025
-    strategy:
-      fail-fast: false
-      matrix:
-        shell: [powershell, pwsh]
+  powershell:
+    runs-on: windows-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
-      - name: Exercise benchmark clipboard on the Quick tab
-        shell: ${{ matrix.shell }}
+      - name: Exercise all Quick tab clipboard cases
+        shell: powershell
         run: |
           $exe = (Get-Process -Id $PID).Path
           & $exe -NoProfile -STA -File ./tests/benchmark-clipboard.ps1
+          exit $LASTEXITCODE
+      - name: Check existing launcher logging
+        shell: powershell
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./tests/launcher-logs.ps1
+          exit $LASTEXITCODE
+  pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Exercise all Quick tab clipboard cases
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./tests/benchmark-clipboard.ps1
+          exit $LASTEXITCODE
+      - name: Check existing launcher logging
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./tests/launcher-logs.ps1
           exit $LASTEXITCODE
