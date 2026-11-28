@@ -8,6 +8,13 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
 
 ## v26.11.6 (unreleased)
 
+### Known issues
+- AMD FSR (4 and 3.1): black planes can flash out from the character on water (boat, swimming) and in low sun,
+  from the motion data the upscaler gets. Not seen with the built-in (console) upscaler, now the default.
+- Some vehicles show green, with every upscaler; they usually fade after a while.
+- Some clothes and skin can show many-coloured speckles; a car can lose its paint after a time skip (sleep).
+- NVIDIA DLSS has never run on an RTX card yet: reports welcome.
+
 ### Performance
 - Op-lite's work of 28 Nov taken out again: in play tests it cost frame rate (driving, sailing), while
   none of its switches was on by default. The earlier Op-lite base stays.
