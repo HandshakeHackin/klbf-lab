@@ -13,6 +13,7 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
   none of its switches was on by default. The earlier Op-lite base stays.
 
 ### Launcher
+- Quick tab: Copy JSON beside Copy summary, the full result file for the results form (HandshakeHackin, #161).
 - First start: the built-in (console) upscaler by default instead of AMD FSR, which can flash black planes from
   the character on water and in low sun. AMD FSR and NVIDIA DLSS stay one click away; a saved choice is kept.
 - The start script (Start: autosave or a slot) stops as soon as a button is pressed on the pad: a step waiting
