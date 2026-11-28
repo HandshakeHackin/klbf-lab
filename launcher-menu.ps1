@@ -1262,7 +1262,12 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
     # (27/11) Centred on the chosen display (moved when Display changes), not on the main one
     $f.StartPosition = 'Manual'
-    $f.ClientSize = New-Object System.Drawing.Size(520, 906)
+    $menuClient = New-Object System.Drawing.Size(520, 906)
+    $f.ClientSize = $menuClient
+    $frameSize = [System.Drawing.Size]::Subtract($f.Size, $f.ClientSize)
+    $menuSize = [System.Drawing.Size]::Add($menuClient, $frameSize)
+    $f.AutoScroll = $true
+    $f.AutoScrollMinSize = $menuClient
     $soft = Get-KlbfColor $script:KlbfTheme.soft
     $back = Get-KlbfColor $script:KlbfTheme.back
     $c = @{ recommended = (Get-KlbfRecommended $Hardware); info = $Info; hw = $Hardware; openUrl = { param($u) Start-Process $u }
@@ -1555,7 +1560,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $fCentre = ${function:Get-KlbfCentre}
     $c.place = {
         if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -ge @($c.screens).Count) { return }
-        $xy = & $fCentre $c.screens[$c.display.SelectedIndex].work @($c.form.Width, $c.form.Height)
+        $work = $c.screens[$c.display.SelectedIndex].work
+        if (@($work).Count -ge 4 -and $work[2] -gt 0 -and $work[3] -gt 0) {
+            $width = $menuSize.Width
+            if ($work[3] -lt $menuSize.Height) { $width += [Windows.Forms.SystemInformation]::VerticalScrollBarWidth }
+            $c.form.Size = New-Object Drawing.Size([math]::Min($width, $work[2]), [math]::Min($menuSize.Height, $work[3]))
+        }
+        $xy = & $fCentre $work @($c.form.Width, $c.form.Height)
         if ($xy) { $c.form.Location = New-Object System.Drawing.Point($xy[0], $xy[1]) }
     }.GetNewClosure()
     $c.display.add_SelectedIndexChanged({ & $c.place; & $markIt; & $fUpdate $c }.GetNewClosure())
