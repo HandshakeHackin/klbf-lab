@@ -6,7 +6,7 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
-## v26.11.5 (unreleased)
+## v26.11.5 (28 Nov 2026)
 
 ### Credits
 - Op-lite (via FilipGra24/OP-lite): the work of 28 Nov taken as is, every new switch off by default:
