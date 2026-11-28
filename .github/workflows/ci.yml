@@ -1,113 +1,25 @@
-name: Bench state across ordinary launches
+name: Benchmark then ordinary Play on v26.11.4
 on:
   push:
-    branches: ['verify/v26.11.3-bench-child-restoration']
+    branches: ['verify/v26.11.4-bench-menu-restart']
 permissions:
   contents: read
 jobs:
-  powershell:
+  menu-to-play:
     runs-on: windows-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+        build: [release, fix]
     steps:
       - uses: actions/checkout@v5
-        with:
-          ref: 0d8b4a3cf7077831ab520f3a9807880d42a1d5ea
-      - shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'bench-session'
-          New-Item -ItemType Directory $root | Out-Null
-          New-Item -ItemType File (Join-Path $root 'game_scarlett_master.exe') | Out-Null
-          $stub = Join-Path $root 'record.cmd'
-          $env:BENCH_TEST_RECORD = Join-Path $root 'record.txt'
-          @('@echo off','> "%BENCH_TEST_RECORD%" echo mode=[%KLBF_BENCH%] player=[%KLBF_BENCH_PLAYER%] length=[%KLBF_BENCH_LENGTH%]','exit /b 0') | Set-Content $stub -Encoding ascii
-          $opts = @{ Game=$root; Victory=$stub; Cache=(Join-Path $root 'cache'); Data=(Join-Path $root 'data'); NoMenu=$true; NoPrecompile=$true; SkipShaderCheck=$true }
-          & .\play.ps1 @opts
-          $before = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          if ($before -ne 'mode=[] player=[] length=[]') { throw "unexpected fresh control: $before" }
-          try { & .\play.ps1 @opts -Bench -BenchPlayer fixture -BenchLength 15; throw 'missing rejection' }
-          catch { if ($_.Exception.Message -notlike '*shaders are not translated*') { throw } }
-          & .\play.ps1 @opts
-          $after = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          Write-Host "ordinary launch before benchmark: $before"
-          Write-Host "ordinary launch after rejected benchmark: $after"
-          if ($after -ne $before) { throw 'Rejected bench leaked into normal launch' }
-          $env:VICTORY_AUTO_INPUT = 'manual-input'
-          $env:KLBF_BENCH_PLAYER = 'original-player'
-          $env:BENCH_MENU_RECORD = Join-Path $root 'menu.txt'
-          @'
-          function Show-KlbfMenu {
-              "$env:KLBF_BENCH|$env:KLBF_BENCH_PLAYER|$env:KLBF_BENCH_LENGTH|$env:VICTORY_AUTO_INPUT" | Set-Content $env:BENCH_MENU_RECORD
-              return $null
-          }
-          '@ | Add-Content ./launcher-menu.ps1
-          . ./launcher-menu.ps1
-          $stamp = Get-KlbfShaderStamp $stub 'diag' '1' ''
-          Set-Content (Join-Path $opts.Cache 'scarlett-shaders-ahead.txt') $stamp
-          $pipelineDir = Join-Path $opts.Cache 'pipelines'
-          New-Item -ItemType Directory $pipelineDir -Force | Out-Null
-          1..1000 | Set-Content (Join-Path $pipelineDir 'early-pipelines.txt')
-          & .\play.ps1 @opts -Bench -BenchPlayer fixture -BenchLength 15
-          $child = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          $menu = (Get-Content $env:BENCH_MENU_RECORD).Trim()
-          Write-Host "Accepted benchmark child: $child"
-          Write-Host "Environment at nested Settings: $menu"
-          if ($child -ne 'mode=[bm-v1] player=[fixture] length=[medium]') { throw 'Child settings missing' }
-          if ($menu -ne '|original-player||manual-input') { throw 'Nested Settings inherited benchmark values' }
-          & .\play.ps1 @opts
-          $next = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          if ($next -ne 'mode=[] player=[original-player] length=[]' -or $env:VICTORY_AUTO_INPUT -ne 'manual-input') { throw 'Session did not restore' }
-          Write-Host "Ordinary launch after completed benchmark: $next"
-  pwsh:
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
       - uses: actions/checkout@v5
         with:
-          ref: 0d8b4a3cf7077831ab520f3a9807880d42a1d5ea
-      - shell: pwsh
+          path: source
+          ref: ${{ matrix.build == 'release' && 'a916502edc5d2c2406e9515fbb25af043776db09' || '818134982d331f0e553c6cb9d666bcc10e4bb066' }}
+      - name: Run cold rejection, benchmark then Play, and independent restart
+        shell: ${{ matrix.shell }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $root = Join-Path $env:RUNNER_TEMP 'bench-session'
-          New-Item -ItemType Directory $root | Out-Null
-          New-Item -ItemType File (Join-Path $root 'game_scarlett_master.exe') | Out-Null
-          $stub = Join-Path $root 'record.cmd'
-          $env:BENCH_TEST_RECORD = Join-Path $root 'record.txt'
-          @('@echo off','> "%BENCH_TEST_RECORD%" echo mode=[%KLBF_BENCH%] player=[%KLBF_BENCH_PLAYER%] length=[%KLBF_BENCH_LENGTH%]','exit /b 0') | Set-Content $stub -Encoding ascii
-          $opts = @{ Game=$root; Victory=$stub; Cache=(Join-Path $root 'cache'); Data=(Join-Path $root 'data'); NoMenu=$true; NoPrecompile=$true; SkipShaderCheck=$true }
-          & .\play.ps1 @opts
-          $before = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          if ($before -ne 'mode=[] player=[] length=[]') { throw "unexpected fresh control: $before" }
-          try { & .\play.ps1 @opts -Bench -BenchPlayer fixture -BenchLength 15; throw 'missing rejection' }
-          catch { if ($_.Exception.Message -notlike '*shaders are not translated*') { throw } }
-          & .\play.ps1 @opts
-          $after = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          Write-Host "ordinary launch before benchmark: $before"
-          Write-Host "ordinary launch after rejected benchmark: $after"
-          if ($after -ne $before) { throw 'Rejected bench leaked into normal launch' }
-          $env:VICTORY_AUTO_INPUT = 'manual-input'
-          $env:KLBF_BENCH_PLAYER = 'original-player'
-          $env:BENCH_MENU_RECORD = Join-Path $root 'menu.txt'
-          @'
-          function Show-KlbfMenu {
-              "$env:KLBF_BENCH|$env:KLBF_BENCH_PLAYER|$env:KLBF_BENCH_LENGTH|$env:VICTORY_AUTO_INPUT" | Set-Content $env:BENCH_MENU_RECORD
-              return $null
-          }
-          '@ | Add-Content ./launcher-menu.ps1
-          . ./launcher-menu.ps1
-          $stamp = Get-KlbfShaderStamp $stub 'diag' '1' ''
-          Set-Content (Join-Path $opts.Cache 'scarlett-shaders-ahead.txt') $stamp
-          $pipelineDir = Join-Path $opts.Cache 'pipelines'
-          New-Item -ItemType Directory $pipelineDir -Force | Out-Null
-          1..1000 | Set-Content (Join-Path $pipelineDir 'early-pipelines.txt')
-          & .\play.ps1 @opts -Bench -BenchPlayer fixture -BenchLength 15
-          $child = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          $menu = (Get-Content $env:BENCH_MENU_RECORD).Trim()
-          Write-Host "Accepted benchmark child: $child"
-          Write-Host "Environment at nested Settings: $menu"
-          if ($child -ne 'mode=[bm-v1] player=[fixture] length=[medium]') { throw 'Child settings missing' }
-          if ($menu -ne '|original-player||manual-input') { throw 'Nested Settings inherited benchmark values' }
-          & .\play.ps1 @opts
-          $next = (Get-Content $env:BENCH_TEST_RECORD).Trim()
-          if ($next -ne 'mode=[] player=[original-player] length=[]' -or $env:VICTORY_AUTO_INPUT -ne 'manual-input') { throw 'Session did not restore' }
-          Write-Host "Ordinary launch after completed benchmark: $next"
+          ./tests/benchmark-menu-session.ps1 -Source ./source -ExpectKnownLeak:('${{ matrix.build }}' -eq 'release')
