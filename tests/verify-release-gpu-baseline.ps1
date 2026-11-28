@@ -50,14 +50,14 @@ $original = [IO.File]::ReadAllText($pages)
 $old = "Width: 1024," + [Environment]::NewLine + "            Height: 512,"
 if (-not $original.Contains($old)) { $old = $old.Replace([Environment]::NewLine, [string][char]10) }
 if (($original.Split([string[]]@($old), [StringSplitOptions]::None)).Length -ne 2) { throw 'Unexpected page-test fixture' }
-$original = $original.Replace($old, $old.Replace('1024', '2048').Replace('512', '1024'))
+$original = $original.Replace($old, $old.Replace('1024', '2048').Replace('512', '2048'))
 $original = $original.Replace('MipLevels: 11,', 'MipLevels: 12,')
 [IO.File]::WriteAllText($pages, $original + $probe)
 $original = [IO.File]::ReadAllText($migration)
 $from = 'moved_keeps(host, desc(windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_BC1_UNORM, 10));'
 $to = @'
 moved_keeps(host, D3D12_RESOURCE_DESC {
-            Width: 2048, Height: 1024,
+            Width: 2048, Height: 2048,
             ..desc(windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_BC1_UNORM, 12)
         });
 '@
