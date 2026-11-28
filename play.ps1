@@ -277,7 +277,7 @@ if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'op
 # -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
 # screens and Continue pressed by themselves (your morning save in slot 1 must be the last one); touch nothing.
 if ($Bench) {
-    $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer; $env:KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $env:KLBF_BENCH_LENGTH) { $env:KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
+    $set.KLBF_BENCH = 'bm-v1'; $set.KLBF_BENCH_PLAYER = $BenchPlayer; $set.KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $set.KLBF_BENCH_LENGTH) { $set.KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
     if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
     $set.VICTORY_AUTO_INPUT = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A,d>=1000'
     Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing until the card shows. Your card is saved in bench-results beside victory.exe;'
@@ -293,7 +293,16 @@ $set.KLBF_LAUNCHER = '1'
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
-foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
+# Benchmark mode and scripted input belong to the game child. The launcher can
+# return to Settings and start a normal game in this same PowerShell process.
+$benchEnvironment = @{}
+foreach ($k in $set.Keys) {
+    if ($Bench -and $k -in 'KLBF_BENCH', 'KLBF_BENCH_PLAYER', 'KLBF_BENCH_LENGTH', 'KLBF_BENCH_SAVE', 'VICTORY_AUTO_INPUT') {
+        $benchEnvironment[$k] = $set[$k]
+    } else {
+        Set-Item -Path "Env:$k" -Value $set[$k]
+    }
+}
 if ($PrintEnv) {
     $mode = if ($Fsr) { 'Profile S (run --console series-s), VICTORY_FSR_DLL=' + (Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll') } else { 'Profile X' }
     Write-Output "mode: $mode"
@@ -381,18 +390,30 @@ Write-Host "Cache: $Cache"
 Write-Host "Saves: $Data"
 # -Fsr (KLBF Lab): Profile S, whose title upscales with FSR 4, the calls going to the PC's FSR DLL
 # (VICTORY_FSR_DLL, in -FfxDir).
-if ($Fsr) {
-    $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
-    if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
-    $env:VICTORY_FSR_DLL = $fsrDll
-    & $Victory run $exe --execute --console series-s
-} else {
-    & $Victory run $exe --execute
+$previous = @{}
+try {
+    foreach ($k in $benchEnvironment.Keys) {
+        $previous[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+        Set-Item -Path "Env:$k" -Value $benchEnvironment[$k]
+    }
+    if ($Fsr) {
+        $fsrDll = Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll'
+        if (-not (Test-Path -LiteralPath $fsrDll)) { throw "AMD FSR not found: $fsrDll (use -FfxDir)" }
+        $env:VICTORY_FSR_DLL = $fsrDll
+        & $Victory run $exe --execute --console series-s
+    } else {
+        & $Victory run $exe --execute
+    }
+    $code = $LASTEXITCODE
+} finally {
+    foreach ($k in $previous.Keys) {
+        if ($null -eq $previous[$k]) { Remove-Item -LiteralPath "Env:$k" -ErrorAction SilentlyContinue }
+        else { Set-Item -Path "Env:$k" -Value $previous[$k] }
+    }
 }
 # (27/11) In the game F10 (Settings) and F11 (Restart) end it with exit code 10 or 11: the settings window
 # (its Play starts the game again), or the same start again; the saves are backed up again at that start.
 # ponytail: a new play.ps1 per relaunch (nested), fine for a session's few dozen restarts.
-$code = $LASTEXITCODE
 switch (Get-KlbfNextStart $code ([bool]$Bench)) {
     'quick' { $again = $passOn; & $PSCommandPath -Setup -Quick @again; exit $LASTEXITCODE }
     'settings' { $again = $passOn; & $PSCommandPath -Setup @again; exit $LASTEXITCODE }
