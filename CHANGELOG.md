@@ -45,6 +45,8 @@ Dominic, MalarkZA, Aphantasiac, KingKaom and wilsonwilsonlg.
   on the card, in the result file and in the text to share; no fixed scene name any more.
 - The card shows a Save ID (a short fingerprint of the save it loaded): same ID, same starting point.
 - The card no longer lists the launcher itself among the experimental switches.
+- After a bench, Play in the reopened Settings window starts a normal game again: the bench switches now
+  reach only the benched game, not the launcher that stays open. From HandshakeHackin (#147).
 
 ### Controls
 - Keyboard and mouse: a click in the game takes the mouse for the camera (F9 or leaving the window lets it go);
