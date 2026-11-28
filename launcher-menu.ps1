@@ -1567,14 +1567,16 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.copy = & $btn $g 'Copy' 380 24 88
     $c.savesNote = & $white (& $label $savesPage '' 6 436 480 60)
 
-    # Quick tab: the last bench card, to copy as an image or as a short text
+    # Quick tab: the card image, short share text, and original JSON for the results board
     # (27/11) Heights from the content, top to bottom (nothing overlaps whatever the number of shortcut lines)
     $g = & $group $quickPage 'Last benchmark' 4 226
     $c.benchPic = New-Object System.Windows.Forms.PictureBox; $c.benchPic.SizeMode = 'Zoom'
     [void](& $add $g $c.benchPic 12 22 456 140)
     $c.benchInfo = & $white (& $label $g '' 12 166 456 20)
-    $c.copyImage = & $btn $g 'Copy image' 12 188 140
-    $c.copyText = & $btn $g 'Copy text' 158 188 140
+    $c.copyImage = & $btn $g 'Copy image' 12 188 92
+    $c.copyText = & $btn $g 'Copy summary' 108 188 102
+    $c.copyJson = & $btn $g 'Copy JSON' 214 188 86
+    $c.tips.SetToolTip($c.copyJson, 'Copy the full result for the benchmark issue form.')
     $c.quickNote = & $white (& $label $g '' 304 186 164 34)
     # (27/11) Shortcuts: every key, and the in-game actions here (the game is not running: Restart is Play
     # with the settings this window opened with; Settings is this window)
@@ -1598,6 +1600,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.shotsNote = & $white (& $label $g '' 172 54 300)
     Set-KlbfShotsPath $c $Choice.shotsDir
     $c.lastBench = Get-KlbfLastBench $Info.victory
+    $c.copyJson.Enabled = [bool]$c.lastBench.json
     if ($c.lastBench) {
         $c.benchPic.Image = [System.Drawing.Image]::FromStream((New-Object IO.MemoryStream(, [IO.File]::ReadAllBytes($c.lastBench.png))))
         $c.benchInfo.Text = 'The newest card from the bench-results folder.'
@@ -1779,6 +1782,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $z = & $fCopy $from $to $c.savesRoot
         & $fSaves $c
         $c.savesNote.Text = 'Copied. The saves before it are backed up.' 
+    }.GetNewClosure())
+    $c.copyJson.add_Click({
+        try {
+            $json = [IO.File]::ReadAllText($c.lastBench.json)
+            & $c.clipboard $json
+            $c.quickNote.Text = 'JSON copied for the issue form.'
+        } catch { $c.quickNote.Text = 'Could not copy the result JSON.' }
     }.GetNewClosure())
     $fShare = ${function:Get-KlbfBenchShareText}
     $c.showNamesBtn.add_Click({ $c.showNames = -not $c.showNames; & $fSaves $c }.GetNewClosure())
