@@ -3445,7 +3445,7 @@ fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) 
 /// title memory read, took `us`.
 #[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
-    let (named, refused) = std::mem::replace(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()), (None, ""));
+    let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
         (WHY_READ | WHY_STALE, Some(named)) => named,
         (WHY_READ, None) => (("a host copy of what a copy done on the card wrote", refused, 0, 0, 0), 0),
@@ -8795,6 +8795,7 @@ enum Touch {
     /// The copy is given to shaders.
     Write(usize),
     /// Title memory is written.
+    #[allow(dead_code)] // (kept for the diagnostics log)
     Title,
     Nothing,
     /// Another part of the submission begins.
@@ -9542,7 +9543,7 @@ impl Batch {
         #[cfg(feature = "diagnostics")]
         if skip && self.refreshes.len() > 1 {
             let n = KEPT_EARLY.fetch_add(1, Ordering::Relaxed) + 1;
-            if n.is_power_of_two() || n % 10_000 == 0 {
+            if n.is_power_of_two() || n.is_multiple_of(10_000) {
                 tracing::info!(n, "asks ahead left out with the submission's asking standing (VICTORY_ASK_KEPT_EARLY=1), since the start");
             }
         }
