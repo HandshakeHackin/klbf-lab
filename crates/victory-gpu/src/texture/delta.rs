@@ -113,7 +113,7 @@ thread_local! {
 
 /// The digest of the title bytes `[at, at + len)` from `memory` now, read
 /// into this thread's buffer. Like the texture read buffer, it does not
-/// shrink unless `VICTORY_SHRINK_KEPT=1` gives it back after a use over
+/// shrink unless `KLBF_SHRINK_KEPT=1` gives it back after a use over
 /// 8 MiB (`crate::kept`).
 fn digest_now(memory: *const u8, (at, len): (usize, usize)) -> Digest {
     BUF.with(|b| {

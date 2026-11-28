@@ -3061,7 +3061,7 @@ mod exact_tests {
 /// targets), high / low are its 88 % / 85 % marks, "let go for room" is
 /// every copy the sweep let go (room rule and real unmaps), and there is no
 /// out-of-memory fallback (0; refused allocations are in `residency`). Last,
-/// the room only a burst needed that `VICTORY_SHRINK_KEPT=1` gave back
+/// the room only a burst needed that `KLBF_SHRINK_KEPT=1` gave back
 /// (`crate::kept`).
 #[cfg(windows)]
 pub(crate) fn housekeeping() {
@@ -3093,7 +3093,7 @@ pub(crate) fn housekeeping() {
     let free_ram = crate::host::available_physical_ram().map_or(0, |b| b >> 20);
     let blocks = crate::pool::texture_blocks();
     // Host lists taken by lists of ours at the reset that begins a recording
-    // (`VICTORY_LIST_LAZY`): all, made new, none to take.
+    // (`KLBF_LIST_LAZY`): all, made new, none to take.
     let (taken, lazy) = crate::list::taken_at_reset();
     tracing::info!(
         "memory housekeeping: card {} MB in use ({} MB counting free heap space) of {} MB (high {} MB, low {} MB); texture copies alive {} MB, \
@@ -3101,7 +3101,7 @@ pub(crate) fn housekeeping() {
          free RAM {} MB; let go on a real unmap {} ({} MB), held at a sweep {} times, mapped again {} (VICTORY_UNMAP_EXACT={}); \
          title memory really unmapped {} MB in {} calls; out-of-memory fallback ran 0 times (none in this base; host memory \
          pressure {}); windows let go on unmap {} ({} MB) (VICTORY_WINDOW_UNMAP={}); host lists idle {}, let go as idle {}          (VICTORY_LIST_POOL_IDLE_S); \
-         host lists alive {}, taken at a reset {} (made new {}, none to take {}) (VICTORY_LIST_LAZY={}); \
+         host lists alive {}, taken at a reset {} (made new {}, none to take {}) (KLBF_LIST_LAZY={}); \
          room rule let go {} ({} MB) in {} sweeps, raw guard ran {} s (VICTORY_VRAM_RAW_PCT={}); texture blocks {} alive ({} empty, {} given back this run); \
          heaps by occupancy: <25 % {}, 25–50 % {}, 50–75 % {}, >75 % {}; free space inside heaps {} MB; \
          copies let go to empty a sparse heap {} ({} MB) (VICTORY_HEAP_PACK={}); {}",

@@ -1,5 +1,5 @@
 // Author: libs (hle-d3d12-amd)
-//! Room that only a burst needed, given back (`VICTORY_SHRINK_KEPT=1`, off by default).
+//! Room that only a burst needed, given back (`KLBF_SHRINK_KEPT=1`, off by default).
 //!
 //! A table that is cleared and a buffer that is used again keep the room of the most they
 //! ever held. Each host list's tables of texture states and of twins are cleared at every
@@ -19,7 +19,7 @@
 //! buffer anew for each such read, where it reused it before.
 //!
 //! What was given back is counted for the memory housekeeping line ([`text`]). Diagnostics
-//! builds can turn it on and off while the title runs (`VICTORY_AB=<s>,VICTORY_SHRINK_KEPT`).
+//! builds can turn it on and off while the title runs (`VICTORY_AB=<s>,KLBF_SHRINK_KEPT`).
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
@@ -40,17 +40,17 @@ const BUFFER_ROOM: usize = 8 << 20;
 /// again counts again.
 static GIVEN: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
-/// `VICTORY_SHRINK_KEPT=1` (or the in-run A/B's choice in a diagnostics build).
+/// `KLBF_SHRINK_KEPT=1` (or the in-run A/B's choice in a diagnostics build).
 fn on() -> bool {
     #[cfg(feature = "diagnostics")]
     {
         static BIT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-        if let Some(bit) = *BIT.get_or_init(|| crate::ab::bit("VICTORY_SHRINK_KEPT")) {
+        if let Some(bit) = *BIT.get_or_init(|| crate::ab::bit("KLBF_SHRINK_KEPT")) {
             return crate::ab::on(bit);
         }
     }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("VICTORY_SHRINK_KEPT").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| std::env::var("KLBF_SHRINK_KEPT").is_ok_and(|v| v.trim() == "1"))
 }
 
 /// The size a cleared table with room for `room` entries, which held `held` before the
@@ -133,7 +133,7 @@ pub(crate) fn text() -> String {
     let given: [u64; 4] = std::array::from_fn(|i| GIVEN[i].load(Relaxed));
     let mb = |bytes: u64| bytes as f64 / f64::from(1u32 << 20);
     format!(
-        "room only a burst needed, given back (VICTORY_SHRINK_KEPT={}): host list tables made smaller {} \
+        "room only a burst needed, given back (KLBF_SHRINK_KEPT={}): host list tables made smaller {} \
          (about {:.1} MB), read buffers {} ({:.1} MB)",
         u8::from(on()),
         given[0],
@@ -237,6 +237,6 @@ mod tests {
 
     #[test]
     fn the_line_names_the_switch() {
-        assert!(text().contains("(VICTORY_SHRINK_KEPT="));
+        assert!(text().contains("(KLBF_SHRINK_KEPT="));
     }
 }

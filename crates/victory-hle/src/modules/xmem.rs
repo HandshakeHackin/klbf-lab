@@ -431,14 +431,14 @@ struct Section {
     /// A bit per page: committed, as far as [`Section::window`] asked.
     committed: Box<[std::sync::atomic::AtomicU64]>,
     /// (`VICTORY_POOL_DISCARD`) A bit per page: written through
-    /// [`Section::window`] (or, `VICTORY_POOL_DISCARD_SOFT`, read through it
+    /// [`Section::window`] (or, `KLBF_POOL_DISCARD_SOFT`, read through it
     /// by the books) and not discarded since (resident in our view).
     resident: Box<[std::sync::atomic::AtomicU64]>,
     /// (`VICTORY_POOL_DISCARD`) A bit per page: discarded and not written since.
     discarded: Box<[std::sync::atomic::AtomicU64]>,
     /// (`VICTORY_POOL_DISCARD`) A bit per page: written through
     /// [`Section::window`] since it was last noted for a discard
-    /// ([`pool_discard::unshown`]); what `VICTORY_POOL_DISCARD_FRESH` keeps.
+    /// ([`pool_discard::unshown`]); what `KLBF_POOL_DISCARD_FRESH` keeps.
     fresh: Box<[std::sync::atomic::AtomicU64]>,
 }
 
@@ -4125,13 +4125,13 @@ mod soft {
 /// without a whole view are never touched. `VICTORY_POOL_DISCARD_DELAY_S`:
 /// 0 (default) adaptive 2-10 s, N fixed. Line every 30 s: "pool discard: ...".
 ///
-/// `VICTORY_POOL_DISCARD_FRESH=1` (default off): a page DirectStorage wrote
+/// `KLBF_POOL_DISCARD_FRESH=1` (default off): a page DirectStorage wrote
 /// again after the unmapping that noted it (a refill the title is yet to map)
 /// is kept when its discard comes due, not reset with the new bytes in it; it
 /// is looked at again once it is unmapped again. Such pages are counted with
 /// the switch or without ("written again after their unmapping").
 ///
-/// `VICTORY_POOL_DISCARD_SOFT=1` (default off): a page the books read through
+/// `KLBF_POOL_DISCARD_SOFT=1` (default off): a page the books read through
 /// the lasting view ([`soft::read`], `VICTORY_SOFT_VIEWS=copies`) counts as
 /// resident, as one written through it does, and is discarded the same way;
 /// before, only DirectStorage's writes made a page resident, and the pages the
@@ -4157,20 +4157,20 @@ mod pool_discard {
             tracing::info!(on, "VICTORY_POOL_DISCARD: pool pages the title has given back (shown by no view but its whole pool view) are reset and taken out of the working set in the section's lasting view while free RAM is short");
             if on {
                 let switch = |name: &str| std::env::var_os(name).is_some_and(|v| v == "1");
-                let (fresh, soft) = (switch("VICTORY_POOL_DISCARD_FRESH"), switch("VICTORY_POOL_DISCARD_SOFT"));
+                let (fresh, soft) = (switch("KLBF_POOL_DISCARD_FRESH"), switch("KLBF_POOL_DISCARD_SOFT"));
                 KEEP_FRESH.store(fresh, Relaxed);
                 SOFT_READS.store(soft, Relaxed);
                 tracing::info!(
                     fresh,
                     soft,
-                    "VICTORY_POOL_DISCARD_FRESH: pool pages DirectStorage wrote again after their unmapping are kept when their discard comes due (counted either way); VICTORY_POOL_DISCARD_SOFT: pool pages the books read through the lasting view count as resident and are discarded too"
+                    "KLBF_POOL_DISCARD_FRESH: pool pages DirectStorage wrote again after their unmapping are kept when their discard comes due (counted either way); KLBF_POOL_DISCARD_SOFT: pool pages the books read through the lasting view count as resident and are discarded too"
                 );
             }
             on
         })
     }
 
-    /// `VICTORY_POOL_DISCARD_FRESH` and `VICTORY_POOL_DISCARD_SOFT`, read
+    /// `KLBF_POOL_DISCARD_FRESH` and `KLBF_POOL_DISCARD_SOFT`, read
     /// with [`on`]: off until it has been asked, and without the discard.
     static KEEP_FRESH: AtomicBool = AtomicBool::new(false);
     static SOFT_READS: AtomicBool = AtomicBool::new(false);
@@ -4213,7 +4213,7 @@ mod pool_discard {
 
     /// [`written`], the switch aside: resident, discarded no more (a refill),
     /// and written since the page was last noted for a discard (what
-    /// `VICTORY_POOL_DISCARD_FRESH` keeps; marked with or without it, for the
+    /// `KLBF_POOL_DISCARD_FRESH` keeps; marked with or without it, for the
     /// count).
     fn mark_written(section: &Section, index: usize, n: usize) {
         for k in index..(index + n).min(section.pages) {
@@ -4261,7 +4261,7 @@ mod pool_discard {
 
     /// Whether [`unshown`] notes `page`: resident in our lasting view, and
     /// shown by whole views alone now. If so it is not written since its
-    /// noting from now on (`VICTORY_POOL_DISCARD_FRESH`): cleared before the
+    /// noting from now on (`KLBF_POOL_DISCARD_FRESH`): cleared before the
     /// page is queued, so the loop never meets the noting with an older bit.
     fn to_note(physical: &Physical, page: &Slice) -> bool {
         let bit = 1u64 << (page.index % 64);
@@ -4286,7 +4286,7 @@ mod pool_discard {
     /// [`read`]: whether the page was discarded and not written since, which
     /// is counted, `soft` or not: the read got what the reset left, unless the
     /// title refilled the page through a view of its own. With `soft`
-    /// (`VICTORY_POOL_DISCARD_SOFT`) the page is resident from now on, as a
+    /// (`KLBF_POOL_DISCARD_SOFT`) the page is resident from now on, as a
     /// write makes it, so that losing its last view but the pool's notes it
     /// for a discard; but a read is no refill: the discarded bit stays,
     /// nothing counts as rewritten, and the page is not written since its
@@ -4316,7 +4316,7 @@ mod pool_discard {
     /// (resident no more, discarded). DirectStorage may have written it again
     /// since the unmapping that noted it: new bytes the title is yet to map,
     /// which a reset would lose. Such a page is counted; with `keep_fresh`
-    /// (`VICTORY_POOL_DISCARD_FRESH`) it is kept, resident, until an unmapping
+    /// (`KLBF_POOL_DISCARD_FRESH`) it is kept, resident, until an unmapping
     /// notes it again; without, it is reset as before.
     fn claim(section: &Section, index: usize, keep_fresh: bool) -> bool {
         let (word, bit) = (index / 64, 1u64 << (index % 64));
@@ -4426,7 +4426,7 @@ mod pool_discard {
                     if base == 0 || section.resident[page.index / 64].load(Relaxed) & bit == 0 || !only_whole_views(&physical, page) {
                         continue;
                     }
-                    // (`VICTORY_POOL_DISCARD_FRESH`) Not one DirectStorage wrote
+                    // (`KLBF_POOL_DISCARD_FRESH`) Not one DirectStorage wrote
                     // again since its unmapping, with the switch. (A write that
                     // starts between here and the reset is not seen: DirectStorage
                     // writes without the views' lock.)
@@ -4463,11 +4463,11 @@ mod pool_discard {
     /// "pool discard: ..." with the process's working set. Of the counts since
     /// the start, "written again after their unmapping" is the pages whose
     /// discard came due with new bytes in them (kept with
-    /// `VICTORY_POOL_DISCARD_FRESH=1`, else reset as before); "read while
+    /// `KLBF_POOL_DISCARD_FRESH=1`, else reset as before); "read while
     /// discarded" is the books' reads of pages reset and not written since:
     /// above 0, a read got what the reset left unless the title refilled the
     /// page through a view of its own, the sign to keep
-    /// `VICTORY_POOL_DISCARD_SOFT` off (without it, to look at the discard
+    /// `KLBF_POOL_DISCARD_SOFT` off (without it, to look at the discard
     /// itself).
     fn line() -> String {
         use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -4484,11 +4484,11 @@ mod pool_discard {
             mb(COUNTS[REWRITTEN].load(Relaxed)),
             delay().as_millis(),
             COUNTS[WRITTEN_AGAIN].load(Relaxed),
-            if KEEP_FRESH.load(Relaxed) { "kept: VICTORY_POOL_DISCARD_FRESH=1" } else { "reset as before" },
+            if KEEP_FRESH.load(Relaxed) { "kept: KLBF_POOL_DISCARD_FRESH=1" } else { "reset as before" },
             COUNTS[READ_DISCARDED].load(Relaxed),
             c.WorkingSetSize >> 20,
             c.PeakWorkingSetSize >> 20,
-            if SOFT_READS.load(Relaxed) { ", VICTORY_POOL_DISCARD_SOFT=1" } else { "" },
+            if SOFT_READS.load(Relaxed) { ", KLBF_POOL_DISCARD_SOFT=1" } else { "" },
             if failed == 0 { String::new() } else { format!(", resets refused {failed}") },
             if below() == u64::MAX { "any".to_owned() } else { (below() >> 20).to_string() },
             if HELD_BY_RAM.load(Relaxed) { "; held now: RAM plentiful" } else { "" },
@@ -4534,7 +4534,7 @@ mod pool_discard {
             (bit(&section.resident), bit(&section.discarded), bit(&section.fresh))
         }
 
-        /// (`VICTORY_POOL_DISCARD_FRESH`) A page DirectStorage writes again
+        /// (`KLBF_POOL_DISCARD_FRESH`) A page DirectStorage writes again
         /// after the unmapping that noted it is counted when its discard comes
         /// due, and kept with the switch alone; one not written since is reset
         /// either way.
@@ -4595,7 +4595,7 @@ mod pool_discard {
             assert_eq!(XMemFreePhysicalPages(N, pages.as_ptr()), 1);
         }
 
-        /// (`VICTORY_POOL_DISCARD_SOFT`) A page the books read is resident from
+        /// (`KLBF_POOL_DISCARD_SOFT`) A page the books read is resident from
         /// then on with the switch alone; a read is no refill, and one of a
         /// page discarded and not written since is counted, switch or not.
         #[test]

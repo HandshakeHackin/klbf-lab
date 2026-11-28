@@ -306,7 +306,7 @@ fn fresh_list() -> Option<crate::host::HostList> {
 }
 
 /// Whether the lists of ours that [`thin`] translates the title's calls into
-/// hold a host list only while they record (`VICTORY_LIST_LAZY=1`, with
+/// hold a host list only while they record (`KLBF_LIST_LAZY=1`, with
 /// `VICTORY_THIN=1`; off by default). Without it a submission leaves such a
 /// list a new host list, closed, for its next recording ([`detach`]), and
 /// the title's list keeps the recording, and with it that list, until the
@@ -321,12 +321,12 @@ fn fresh_list() -> Option<crate::host::HostList> {
 #[cfg(windows)]
 fn lazy() -> bool {
     *LAZY.get_or_init(|| {
-        let asked = std::env::var_os("VICTORY_LIST_LAZY").is_some_and(|v| v == "1");
+        let asked = std::env::var_os("KLBF_LIST_LAZY").is_some_and(|v| v == "1");
         let on = asked && thin::on();
         if on {
-            tracing::info!("lists of ours hold a host list only while they record (VICTORY_LIST_LAZY=1)");
+            tracing::info!("lists of ours hold a host list only while they record (KLBF_LIST_LAZY=1)");
         } else if asked {
-            tracing::warn!("VICTORY_LIST_LAZY=1 needs VICTORY_THIN=1: host lists are held as before");
+            tracing::warn!("KLBF_LIST_LAZY=1 needs VICTORY_THIN=1: host lists are held as before");
         }
         on
     })
@@ -375,7 +375,7 @@ fn host_for_recording() -> Option<crate::host::HostList> {
                         Some(Err(e)) => e.to_string(),
                         _ => "no host GPU".to_string(),
                     };
-                    tracing::warn!(%error, "no host list for a recording of a list of ours (VICTORY_LIST_LAZY=1): it draws nothing");
+                    tracing::warn!(%error, "no host list for a recording of a list of ours (KLBF_LIST_LAZY=1): it draws nothing");
                 });
                 return None;
             }
@@ -2712,7 +2712,7 @@ mod tests {
         unsafe { &mut *this.cast_mut().cast::<List>() }
     }
 
-    /// With `VICTORY_LIST_LAZY=1` a list of ours is made without a host list
+    /// With `KLBF_LIST_LAZY=1` a list of ours is made without a host list
     /// and has none to run; the reset that begins a recording takes one,
     /// closed, and resets it (an allocator is not reset under a list open on
     /// it, which would end the run); a submission takes it and leaves none.
