@@ -1158,10 +1158,10 @@ function Get-KlbfBenchShareText($Result) {
     $low = [string]::Format($en, '1% low {0:0.0}', $Result.fps.low_1pct)
     if ($fg) {
         $head = if ($null -ne $Result.fps_shown.avg) {
-            [string]::Format($en, '{0:0.0} FPS (base {1:0.0})', $Result.fps_shown.avg, $fps)
+            [string]::Format($en, '{0:0.0#} FPS (base {1:0.0#})', $Result.fps_shown.avg, $fps)
         } else { "base $head" }
         $low = if ($null -ne $Result.fps_shown.low_1pct) {
-            [string]::Format($en, '1% low {0:0.0} (base {1:0.0})', $Result.fps_shown.low_1pct, $Result.fps.low_1pct)
+            [string]::Format($en, '1% low {0:0.0#} (base {1:0.0#})', $Result.fps_shown.low_1pct, $Result.fps.low_1pct)
         } else { "base $low" }
     }
     $up = switch ($set.upscaler_kind) {
