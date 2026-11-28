@@ -26,7 +26,9 @@ jobs:
       - name: Run existing launcher log checks
         shell: powershell
         run: |
-          ./tests/launcher-logs.ps1
+          $shellPath = (Get-Process -Id $PID).Path
+          & $shellPath -NoProfile -File ./tests/launcher-logs.ps1
+          exit $LASTEXITCODE
   pwsh:
     runs-on: windows-latest
     timeout-minutes: 5
@@ -48,4 +50,6 @@ jobs:
       - name: Run existing launcher log checks
         shell: pwsh
         run: |
-          ./tests/launcher-logs.ps1
+          $shellPath = (Get-Process -Id $PID).Path
+          & $shellPath -NoProfile -File ./tests/launcher-logs.ps1
+          exit $LASTEXITCODE
