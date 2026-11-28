@@ -1,25 +1,59 @@
-name: Benchmark then ordinary Play on v26.11.4
+name: Verify benchmark menu session
 on:
   push:
     branches: ['verify/v26.11.4-bench-menu-restart']
 permissions:
   contents: read
 jobs:
-  menu-to-play:
+  release-powershell:
     runs-on: windows-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shell: [powershell, pwsh]
-        build: [release, fix]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/checkout@v5
         with:
           path: source
-          ref: ${{ matrix.build == 'release' && 'a916502edc5d2c2406e9515fbb25af043776db09' || '818134982d331f0e553c6cb9d666bcc10e4bb066' }}
-      - name: Run cold rejection, benchmark then Play, and independent restart
-        shell: ${{ matrix.shell }}
+          ref: a916502edc5d2c2406e9515fbb25af043776db09
+      - name: Exercise the launcher menu
+        shell: powershell
         run: |
-          ./tests/benchmark-menu-session.ps1 -Source ./source -ExpectKnownLeak:('${{ matrix.build }}' -eq 'release')
+          ./tests/benchmark-menu-session.ps1 -Source ./source -ExpectKnownLeak
+  release-pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          path: source
+          ref: a916502edc5d2c2406e9515fbb25af043776db09
+      - name: Exercise the launcher menu
+        shell: pwsh
+        run: |
+          ./tests/benchmark-menu-session.ps1 -Source ./source -ExpectKnownLeak
+  fix-powershell:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          path: source
+          ref: 818134982d331f0e553c6cb9d666bcc10e4bb066
+      - name: Exercise the launcher menu
+        shell: powershell
+        run: |
+          ./tests/benchmark-menu-session.ps1 -Source ./source
+  fix-pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          path: source
+          ref: 818134982d331f0e553c6cb9d666bcc10e4bb066
+      - name: Exercise the launcher menu
+        shell: pwsh
+        run: |
+          ./tests/benchmark-menu-session.ps1 -Source ./source
