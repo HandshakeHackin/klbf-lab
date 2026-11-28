@@ -23,6 +23,8 @@ jobs:
           done
           git diff --cached --check
           git diff --cached --stat
+          git fetch --no-tags --depth=1 origin 47810d81eccc2de708275bb7b204aa1e872630fe
+          git show FETCH_HEAD:tests/preparation-exit-log.ps1 > tests/preparation-exit-log.ps1
       - name: Exercise the combined launcher on Windows PowerShell and PowerShell 7
         shell: pwsh
         run: |
