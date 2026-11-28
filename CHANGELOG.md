@@ -6,7 +6,69 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
-## v26.11.5
+## v26.11.6 (unreleased)
+
+### Performance
+- Op-lite's work of 28 Nov taken out again: in play tests it cost frame rate (driving, sailing), while
+  none of its switches was on by default. The earlier Op-lite base stays.
+
+### Launcher
+- "KLBF Lab.exe" in the folder and on the desktop shortcut: the settings window opens with no console window
+  flashing first ("KLBF Lab.cmd" stays beside it as the fallback).
+- The release notes list both zips with their own SHA-256 and how to check them (docs/klbf/VERIFY.md).
+- Start beside Play in Settings: Game menu (as before), New game, Autosave or a slot numbered as the game's menu
+  lists it. The save is made the newest (all saves backed up first), then Continue is pressed for you; New game
+  is pressed only with no save yet (with saves, pick it in the game's menu). Remembered like the other settings.
+- Saves tab: up and down buttons beside the clicked slot move it one place in the game's Load list (the two
+  saves trade dates, which the list is sorted by; all saves backed up before the first move, refused while
+  the game runs; the autosave stays first).
+- Launch options (Experimental tab), as on Steam: `NAME=value` pairs separated by spaces, applied to the game
+  over the boxes, remembered, and written at the top of the run log. Only `KLBF_` and `VICTORY_` names and plain
+  values are taken; anything else is refused with a message and nothing starts.
+
+### NVIDIA
+- NVIDIA DLSS through NVIDIA's official Streamline SDK (v2.14.16, MIT), all off by default; nothing changes
+  on AMD or without the choice. Settings, Upscaler: "NVIDIA DLSS (GeForce RTX)" (`-Dlss`, `KLBF_DLSS=1`):
+  DLSS Super Resolution does the FSR path's upscale in AMD FSR's place, at the FSR preset's render size.
+- Settings, Options: frame generation "NVIDIA DLSS x2" (RTX 40 and 50), "x3", "x4", "x6" (Multi Frame
+  Generation, RTX 50; never more than the driver says it makes) beside "AMD FSR x2" (`-DlssFrames 2..6`,
+  `KLBF_DLSS_FG`): DLSS Frame Generation on our present, from the upscale's depth and motion vectors, with
+  Reflex low latency on. The interface is not given to it apart (it can shimmer on fast motion, as with FSR's).
+- Frame rate cap 30 / 40 / 60 in Settings, Options (`-FpsCap`, the existing `KLBF_FPS_CAP`).
+- No NVIDIA file is in this repository or in the release zip: the first start with DLSS picked fetches
+  NVIDIA's own release from github.com/NVIDIA-RTX/Streamline (276 MB, checked against the SHA-256 GitHub
+  publishes for it), keeps only its `bin/x64` DLLs in `streamline\` beside victory.exe, and victory.exe checks
+  NVIDIA's signature before loading them. DLSS itself (`nvngx_dlss.dll`, `nvngx_dlssg.dll`) is under the
+  NVIDIA RTX SDKs license, fetched from NVIDIA as it ships.
+- Defensive, not yet tried on an NVIDIA card: offline, a hash or signature mismatch, a card or driver
+  without the feature, a failed device hand-over or a refused upscale: the run goes on with AMD FSR (and
+  AMD's frame generation) as before, said in the log.
+- Credits (GPL-3.0, code taken and adapted): readmet3xt-lab/foxhound (the Streamline ABI and DLSS
+  mode/camera code as they are; library loading, signature check, device hand-over, DLSS evaluation and the
+  present markers; the 30/40/60 cap idea), Kemerd/VIctory-NVIDIA-RT and trustno1-coder/VIctory-NVIDIA
+  (frame generation 2x to 6x, bounded by what the driver makes).
+
+## v26.11.5 (28 Nov 2026)
+
+### Credits
+- fxceless ([victory-fork](https://github.com/fxceless/victory-fork), GPL-3.0): static samplers in one kept order.
+- CHECK6960 ([Victory-Nvidia-optimized](https://github.com/CHECK6960/Victory-Nvidia-optimized), GPL-3.0): shorter, non-blocking pipeline wait.
+- LibsMQG ([hle-d3d12-amd](https://github.com/LibsMQG/hle-d3d12-amd), GPL-3.0): lazy lists, kept room given back, pool discard switches.
+
+crossducking (RAZDA4A-XEN) and nathanbzrr: thanks for the code this release takes in (GPL-3.0).
+
+### Rendering
+- Trees, foliage, fences, wooden posts and signs no longer vanish or turn black: the raw views of buffers
+  that do not begin on 16 bytes, made for a list's own views, were set to null (372 to 575 a frame); they are
+  now moved to their bytes as the staged ones were. On by default; `KLBF_RAW_VIEW_FIX=0` turns it off.
+  From crossducking (RAZDA4A-XEN, Wave 11). Tickets #142, #145.
+
+### Memory (off by default, Experimental tab)
+- `KLBF_8GB_SAFE=1`: texture uploads stop at 65 % of the card's budget instead of 90 %, for 8 GB cards
+  whose live budget drops once the world is up. From nathanbzrr (RAZDA4A-XEN PR #1).
+- `KLBF_EMERGENCY_RECLAIM=1`: with under 2.5 GB of free commit, or the shared GPU memory at 88 % of its
+  budget, idle command memory and spare chunks are freed at once, before an allocation can fail with
+  0x8007000E. From crossducking (RAZDA4A-XEN).
 
 ### Stutter and memory (all off: set the switch to try)
 - `KLBF_SAMPLER_ORDER=1`: static samplers get the same place in the driver's table at every start, so the
@@ -16,11 +78,6 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
 - `KLBF_LIST_LAZY=1`: our command lists hold a driver list only while they record.
 - `KLBF_SHRINK_KEPT=1`: room only a burst needed is given back.
 - `KLBF_POOL_DISCARD_FRESH=1`, `KLBF_POOL_DISCARD_SOFT=1`: two finer rules for pool pages given back.
-
-### Credits
-- fxceless ([victory-fork](https://github.com/fxceless/victory-fork), GPL-3.0): static samplers in one kept order.
-- CHECK6960 ([Victory-Nvidia-optimized](https://github.com/CHECK6960/Victory-Nvidia-optimized), GPL-3.0): shorter, non-blocking pipeline wait.
-- LibsMQG ([hle-d3d12-amd](https://github.com/LibsMQG/hle-d3d12-amd), GPL-3.0): lazy lists, kept room given back, pool discard switches.
 
 ## v26.11.4 (27 Nov 2026)
 
