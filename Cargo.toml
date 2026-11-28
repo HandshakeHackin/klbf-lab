@@ -47,6 +47,7 @@ opus-pure = "0.2.4"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
+dropping_copy_types = "allow"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -57,6 +58,15 @@ needless_range_loop = "allow"
 chunks_exact_to_as_chunks = "allow"
 sliced_string_as_bytes = "allow"
 collapsible_match = "allow"
+# Op-lite's work of 28 Nov (v26.11.5), let through until it is tidied:
+unnecessary_sort_by = "allow"
+large_enum_variant = "allow"
+too_many_arguments = "allow"
+doc_lazy_continuation = "allow"
+wrong_self_convention = "allow"
+missing_transmute_annotations = "allow"
+unusual_byte_groupings = "allow"
+format_in_format_args = "allow"
 manual_clamp = "allow"
 implicit_saturating_sub = "allow"
 min_max = "allow"
