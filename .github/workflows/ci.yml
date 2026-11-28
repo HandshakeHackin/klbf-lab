@@ -23,7 +23,8 @@ jobs:
             cat baseline.txt
             exit 1
           fi
-          tail -n 30 baseline.txt
+          grep -A12 '^error' baseline.txt || true
+          tail -n 35 baseline.txt
           grep -F 'parser comparison/border' baseline.txt
           grep -F 'test result: FAILED. 0 passed; 1 failed;' baseline.txt
       - name: Check the two corrected defaults against the native result
