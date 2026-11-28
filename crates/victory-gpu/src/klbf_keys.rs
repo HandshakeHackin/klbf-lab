@@ -1,7 +1,8 @@
 //! (27/11) KLBF Lab's in-game keys and menu, one press each while the game window has the focus: F10
 //! closes the game for the launcher's settings (exit code 10, play.ps1 opens KLBF Lab Settings, Play
 //! starts it again), F11 restarts it with the same settings (11), F8 saves a screenshot of the game
-//! image (`klbf_bench::save_screenshot`). With our launcher (`KLBF_LAUNCHER`) the caption says them at
+//! image (`klbf_bench::save_screenshot`), F7 pauses frame generation and starts it again
+//! (`framegen::toggle`, only while it runs). With our launcher (`KLBF_LAUNCHER`) the caption says them at
 //! its right (`with_hints`). The keys come as window messages (`on_message`, from the title window's
 //! procedure), so a short tap is never missed between two frames. During a bench run none of them acts
 //! (F10 is the bench's: it stops the run). Started by another launcher (no `KLBF_LAUNCHER`,
@@ -29,16 +30,17 @@ pub enum Action {
     Screenshot,
     Restart,
     Settings,
+    FrameGen,
 }
 
 /// Each action's key.
-const ALL: [(Action, usize); 3] = [(Action::Screenshot, 0x77), (Action::Restart, 0x7A), (Action::Settings, 0x79)];
+const ALL: [(Action, usize); 4] = [(Action::Screenshot, 0x77), (Action::Restart, 0x7A), (Action::Settings, 0x79), (Action::FrameGen, 0x76)];
 
 impl Action {
     /// The exit code play.ps1 acts on; `None`: done in the game.
     pub fn exit_code(self) -> Option<i32> {
         match self {
-            Action::Screenshot => None,
+            Action::Screenshot | Action::FrameGen => None,
             Action::Restart => Some(EXIT_RESTART),
             Action::Settings => Some(EXIT_SETTINGS),
         }
@@ -49,6 +51,7 @@ impl Action {
             Action::Screenshot => "Screenshot (F8)",
             Action::Restart => "Restart (F11)",
             Action::Settings => "Settings (F10)",
+            Action::FrameGen => "Frame generation (F7)",
         }
     }
 
@@ -92,6 +95,7 @@ pub fn on_message(message: u32, wparam: usize, lparam: isize) -> bool {
     }
     let Some(action) = action_of(message, wparam, lparam).filter(|&a| acts(a, launcher())) else { return false };
     match action.exit_code() {
+        None if action == Action::FrameGen => return crate::framegen::toggle(),
         None => SHOT.store(true, Ordering::Relaxed),
         Some(code) => {
             tracing::info!(code, "KLBF Lab: {} asked, the game closes for the launcher", action.label());
@@ -104,8 +108,13 @@ pub fn on_message(message: u32, wparam: usize, lparam: isize) -> bool {
     true
 }
 
-/// (27/11) The keys, said at the caption's right.
+/// (27/11) The keys, said at the caption's right; F7 too while frame generation runs.
 const HINTS: &str = "F8 Screenshot \u{b7} F10 Settings \u{b7} F11 Restart";
+const HINTS_FG: &str = "F7 Frame gen \u{b7} F8 Screenshot \u{b7} F10 Settings \u{b7} F11 Restart";
+
+fn hints() -> &'static str {
+    if crate::framegen::kind() > 0 { HINTS_FG } else { HINTS }
+}
 
 /// `caption` with the keys pushed to its right end, just before the window's buttons, by spaces measured
 /// in the caption's font; the caption alone when they do not fit, during a bench, or without our
@@ -122,7 +131,7 @@ pub(crate) fn with_hints(hwnd: usize, caption: String) -> String {
         return caption;
     }
     match measure(hwnd, &caption).and_then(|([c, h, room], sp)| spaces(c, h, sp, room)) {
-        Some(n) => format!("{caption}{}{HINTS}", " ".repeat(n)),
+        Some(n) => format!("{caption}{}{}", " ".repeat(n), hints()),
         None => caption,
     }
 }
@@ -334,7 +343,7 @@ fn measure(hwnd: usize, caption: &str) -> Option<([i32; 3], f32)> {
             GetTextExtentPoint32W(dc, t.as_ptr(), t.len() as i32, &mut size);
             size.cx
         };
-        let out = ([width(caption), width(HINTS), room], width(&" ".repeat(100)) as f32 / 100.0);
+        let out = ([width(caption), width(hints()), room], width(&" ".repeat(100)) as f32 / 100.0);
         SelectObject(dc, old);
         DeleteObject(font);
         ReleaseDC(std::ptr::null_mut(), dc);
@@ -448,6 +457,8 @@ mod tests {
         assert_eq!(down(0x77), Some(Action::Screenshot));
         assert_eq!(down(0x7A), Some(Action::Restart));
         assert_eq!(action_of(WM_SYSKEYDOWN, 0x79, 1), Some(Action::Settings), "F10 comes as a system key");
+        assert_eq!(down(0x76), Some(Action::FrameGen));
+        assert_eq!(Action::FrameGen.exit_code(), None, "F7 acts in the game, with any launcher");
         assert_eq!(down(0x78), None, "F9 is not ours");
         assert_eq!(action_of(WM_KEYDOWN, 0x7A, 1 << 30), None, "a held key's repeats do nothing");
         assert_eq!(Action::Settings.exit_code(), Some(10));
