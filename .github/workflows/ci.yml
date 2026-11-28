@@ -5,23 +5,55 @@ on:
 permissions:
   contents: read
 jobs:
-  check:
+  powershell:
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shell: [powershell, pwsh]
     steps:
       - uses: actions/checkout@v5
         with:
           ref: 6f53d9ad1d94c198f2a0c5135c54b796cabab1e5
       - name: Construct settings on release and with the array fix from PR 137
-        shell: ${{ matrix.shell }}
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $src = Get-Content ./launcher-menu.ps1 -Raw
           $old = '$c.screens = if ($null -ne $Info.screens) { @($Info.screens) } else { @(Get-KlbfScreens) }'
-          $new = '$c.screens = @(if ($null -ne $Info.screens) { $Info.screens } else { Get-KlbfScreens })'
+          $new = '$c.screens = @(if ($null -ne $Info.screens) { @($Info.screens) } else { @(Get-KlbfScreens) })'
+          if (!$src.Contains($old)) { throw 'release assignment missing' }
+          $fixture = @{ primary=$true; device='TEST'; mode='2560x1440'; bounds='2560x1440'; work=@(200, 10, 2560, 1400) }
+          $secondary = @{ primary=$false; device='TEST2'; mode='1920x1080'; bounds='1920x1080'; work=@(-1920,0,1920,1080) }
+          $hw = @{ screen='2560x1440'; ramGB=32; vramGB=16; gpu='AMD Radeon RX 6900 XT'; cpu='fixture' }
+          foreach ($variant in 'release','array-fix') {
+            if ($variant -eq 'array-fix') { $src.Replace($old,$new) | Set-Content ./launcher-fixture.ps1 -Encoding UTF8; . ./launcher-fixture.ps1 }
+            else { . ./launcher-menu.ps1 }
+            foreach ($n in 1,2) {
+              $screens = @($fixture,$secondary)[0..($n-1)]
+              $info = @{ screens=@($screens); data=$env:RUNNER_TEMP; cache=$env:RUNNER_TEMP; victory=''; game='' }
+              $result = New-KlbfMenuForm (ConvertTo-KlbfChoice $null) $hw 'test' $info
+              try {
+                $selected = $result.c.screens[$result.c.display.SelectedIndex]
+                $matches = $null -ne $selected -and $selected.device -eq 'TEST'
+                $pt = @(Get-KlbfCentre $fixture.work @($result.form.Width,$result.form.Height))
+                $centered = $result.form.Left -eq $pt[0] -and $result.form.Top -eq $pt[1]
+                Write-Host "$variant display-count=$n selected-record=$matches centered=$centered"
+                if ($result.c.display.Items.Count -ne $n) { throw 'display choices missing' }
+                if ($variant -eq 'release' -and $n -eq 1) { if ($matches) { throw 'expected scalar issue missing' } }
+                elseif (!($matches -and $centered)) { throw 'incorrect selected screen or placement' }
+              } finally { $result.form.Dispose() }
+            }
+          }
+  pwsh:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 6f53d9ad1d94c198f2a0c5135c54b796cabab1e5
+      - name: Construct settings on release and with the array fix from PR 137
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Get-Content ./launcher-menu.ps1 -Raw
+          $old = '$c.screens = if ($null -ne $Info.screens) { @($Info.screens) } else { @(Get-KlbfScreens) }'
+          $new = '$c.screens = @(if ($null -ne $Info.screens) { @($Info.screens) } else { @(Get-KlbfScreens) })'
           if (!$src.Contains($old)) { throw 'release assignment missing' }
           $fixture = @{ primary=$true; device='TEST'; mode='2560x1440'; bounds='2560x1440'; work=@(200, 10, 2560, 1400) }
           $secondary = @{ primary=$false; device='TEST2'; mode='1920x1080'; bounds='1920x1080'; work=@(-1920,0,1920,1080) }
