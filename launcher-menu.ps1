@@ -2183,6 +2183,7 @@ function Show-KlbfPrepare([string]$Victory, [string]$Rpf, [string]$Book = '', [s
     $st = @{ i = 0; total = 0; done = 0; read = $null; ok = $true; p = $null; cancelled = $false }
     $weights = [double[]]@($phases | ForEach-Object { $_.weight })
     $fBar = ${function:Get-KlbfPrepareBar}; $fStop = ${function:Stop-KlbfTree}
+    $logPhase = ${function:Add-KlbfLauncherLog}
     $start = {
         $ph = $phases[$st.i]
         $psi = New-Object System.Diagnostics.ProcessStartInfo($Victory)
@@ -2191,6 +2192,7 @@ function Show-KlbfPrepare([string]$Victory, [string]$Rpf, [string]$Book = '', [s
         $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
         $st.total = 0; $st.done = 0
         $st.p = [System.Diagnostics.Process]::Start($psi)
+        & $logPhase "$($ph.what) started (PID $($st.p.Id))"
         $null = $st.p.StandardError.ReadToEndAsync()
         $st.read = $st.p.StandardOutput.ReadLineAsync()
         $last.Text = "$($ph.what)..."
@@ -2208,6 +2210,10 @@ function Show-KlbfPrepare([string]$Victory, [string]$Rpf, [string]$Book = '', [s
         $bar.Value = & $fBar $weights $st.i $frac
         if ($st.total -gt 0) { $last.Text = '{0}: {1} of {2}' -f $ph.what, $st.done, $st.total }
         if (-not $st.read -and $st.p.HasExited) {
+            if ($st.p.ExitCode -ne 0) {
+                $progress = if ($st.total -gt 0) { "$($st.done) of $($st.total)" } else { 'no progress reported' }
+                & $logPhase ('{0} (PID {1}) exited with 0x{2:X8} ({3})' -f $ph.what, $st.p.Id, $st.p.ExitCode, $progress)
+            }
             # The translation must succeed; pipelines left over are made while playing.
             if ($ph.args -ne 'warm' -and $st.p.ExitCode -ne 0) { $st.ok = $false }
             if ($st.ok -and $st.i + 1 -lt $phases.Count) { $st.i++; & $start } else { $bar.Value = 1000; $f.Close() }
