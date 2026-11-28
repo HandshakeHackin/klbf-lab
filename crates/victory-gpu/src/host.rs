@@ -522,6 +522,7 @@ fn sweep() {
     if crate::residency::pressured() {
         trim_spare_chunks();
     }
+    emergency_reclaim();
     crate::pool::room(host().and_then(|h| h.video_memory()));
     crate::pipeline::trim_library();
     crate::shadow::let_go_idle();
@@ -531,6 +532,24 @@ fn sweep() {
     crate::list::let_go_idle_lists();
     // (Fox port C) The housekeeping line, every five seconds.
     crate::resource::housekeeping();
+}
+
+/// (crossducking, RAZDA4A-XEN, adapted) `KLBF_EMERGENCY_RECLAIM=1` (off): at each sweep
+/// under emergency pressure ([`crate::residency::emergency_pressure`]), every idle prelude
+/// and spare chunk goes before the title's next allocation can fail with `0x8007000E`.
+/// (The idle textures, copies and lists go at every sweep already.)
+fn emergency_reclaim() {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| crate::switch::on("KLBF_EMERGENCY_RECLAIM")) {
+        return;
+    }
+    let shared = host().and_then(|h| h.video_memory()).map(|[_, _, budget, used]| (budget, used));
+    if !crate::residency::emergency_pressure(shared) {
+        return;
+    }
+    trim_preludes_to(0);
+    trim_spare_chunks();
+    tracing::warn!(?shared, "emergency reclaim: low commit or shared GPU memory");
 }
 
 /// (Fox V, `VICTORY_PAGE_MIGRATE`) Runs `f` with the host's queue under the
@@ -1530,9 +1549,14 @@ fn give_prelude(prelude: Prelude) {
 /// Lets idle preludes past [`PRELUDES_MOST`]'s second number go, and their
 /// command memory with them.
 pub(crate) fn trim_preludes() {
+    trim_preludes_to(PRELUDES_MOST.1);
+}
+
+/// [`trim_preludes`] down to `keep` idle preludes.
+fn trim_preludes_to(keep: usize) {
     let gone: Vec<IdlePrelude> = {
         let mut idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
-        let keep = idle.len().min(PRELUDES_MOST.1);
+        let keep = idle.len().min(keep);
         idle.split_off(keep)
     };
     // (Outside the lock: freeing lists takes the graphics kernel's time.)

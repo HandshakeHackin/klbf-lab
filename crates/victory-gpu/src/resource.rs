@@ -2020,7 +2020,9 @@ fn room_percent() -> u64 {
         std::env::var("VICTORY_TEXTURE_ROOM_PERCENT")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .map_or(90, |percent| percent.clamp(50, 97))
+            // (nathanbzrr, RAZDA4A-XEN PR #1) `KLBF_8GB_SAFE=1` (off): 65, for an 8 GB card
+            // whose live budget falls to ~5.9 GB once the world is up.
+            .map_or(if crate::switch::on("KLBF_8GB_SAFE") { 65 } else { 90 }, |percent| percent.clamp(50, 97))
     })
 }
 

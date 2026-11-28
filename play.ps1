@@ -43,7 +43,8 @@
 # -Tout        everything at once, for a test: -FsrX (quality unless -FsrQuality), -FrameGen, -Hooks and -TexTrim,
 #              with the DLLs of -FfxDir. Each switch stays usable alone for A/B.
 # -HeapSkip (KLBF_HEAP_SKIP=1, -HeapSkipVerify adds KLBF_HEAP_SKIP_VERIFY=1), -RebarUpload (KLBF_REBAR_UPLOAD=1),
-#              -RefreshCoalesce (KLBF_REFRESH_COALESCE=1), -PagePool (VICTORY_PAGE_POOL=1): the low-end beta's
+#              -RefreshCoalesce (KLBF_REFRESH_COALESCE=1), -PagePool (VICTORY_PAGE_POOL=1), -Safe8GB (KLBF_8GB_SAFE=1),
+#              -EmergencyReclaim (KLBF_EMERGENCY_RECLAIM=1): the low-end beta's
 #              experimental switches (Settings, Experimental tab), untested, each off unless given.
 # -NoPrecompile  skip the step below
 # -OnlyPrecompile  do the step below and stop, without starting the game
@@ -85,6 +86,8 @@ param(
     [switch]$RebarUpload,
     [switch]$RefreshCoalesce,
     [switch]$PagePool,
+    [switch]$Safe8GB,
+    [switch]$EmergencyReclaim,
     [switch]$Tout,
     [switch]$NoPrecompile,
     [switch]$OnlyPrecompile,
@@ -317,6 +320,8 @@ if ($HeapSkip) { $set.KLBF_HEAP_SKIP = '1'; if ($HeapSkipVerify) { $set.KLBF_HEA
 if ($RebarUpload) { $set.KLBF_REBAR_UPLOAD = '1' }
 if ($RefreshCoalesce) { $set.KLBF_REFRESH_COALESCE = '1' }
 if ($PagePool) { $set.VICTORY_PAGE_POOL = '1' }
+if ($Safe8GB) { $set.KLBF_8GB_SAFE = '1' }
+if ($EmergencyReclaim) { $set.KLBF_EMERGENCY_RECLAIM = '1' }
 if ($Output) { $set.KLBF_X_OUTPUT = $Output }
 if ($FsrX) {
     # (KLBF Lab, 27/11) The title's FidelityFX path in Series X, to the PC FSR DLL
@@ -366,7 +371,7 @@ foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 if ($PrintEnv) {
     $mode = if ($Fsr) { 'Profile S (run --console series-s), VICTORY_FSR_DLL=' + (Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll') } else { 'Profile X' }
     Write-Output "mode: $mode"
-    $on = @(@('Fsr', 'FsrX', 'FrameGen', 'Hooks', 'TexTrim', 'HeapSkip', 'HeapSkipVerify', 'RebarUpload', 'RefreshCoalesce', 'PagePool') | Where-Object { (Get-Variable $_).Value })
+    $on = @(@('Fsr', 'FsrX', 'FrameGen', 'Hooks', 'TexTrim', 'HeapSkip', 'HeapSkipVerify', 'RebarUpload', 'RefreshCoalesce', 'PagePool', 'Safe8GB', 'EmergencyReclaim') | Where-Object { (Get-Variable $_).Value })
     if ($FsrX) { $on += "FsrQuality=$FsrQuality" }
     if ($Output) { $on += "Output=$Output" }
     Write-Output ('switches: ' + ($on -join ' '))
