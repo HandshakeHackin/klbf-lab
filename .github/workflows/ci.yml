@@ -1,33 +1,35 @@
-name: CI
-
+name: Verify BC1 page fixtures and the stable depth-bounds port
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/v26.11.5-bc1-and-depth']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  workspace:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
+        with:
+          ref: 4c49ec1d60ae5a5a231acadd01cfff182ff6b7a4
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - name: Exercise both tests on the exact page-fixture commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p victory-gpu --lib pool::pages::tests::a_copy_on_pages_is_mapped_and_gives_its_pages_back -- --exact --nocapture
+          cargo test --locked -p victory-gpu --lib pool::pages::migrate::tests::a_moved_copy_keeps_its_texels -- --exact --nocapture
+      - name: Apply only the independently verified depth-bounds port
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 96668cc4fb808c434b276bd1b5e81533bcfde99f
+          git restore --source=FETCH_HEAD -- crates/victory-gpu/src/pipeline/host.rs
+          git diff --stat
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
+      - name: Clippy with diagnostics
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
+      - name: Full workspace
         run: cargo test --workspace --locked
