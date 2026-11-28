@@ -72,11 +72,11 @@ impl Composer {
         );
         // SAFETY: the blobs' own bytes, alive through the calls.
         unsafe {
-            let bytes = |b: &ID3DBlob| {
-                std::slice::from_raw_parts(b.GetBufferPointer().cast::<u8>(), b.GetBufferSize())
-            };
             let device = &host.device;
-            let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes(&vs))?;
+            // Not the blob: under Wine the host refuses the signature inside
+            // it (E_FAIL), while a description read from the source's `RS`
+            // and serialized here works, as the title's own signatures do.
+            let root: ID3D12RootSignature = crate::rootstring::make(device, SOURCE)?;
             let code = |b: &ID3DBlob| D3D12_SHADER_BYTECODE {
                 pShaderBytecode: b.GetBufferPointer(),
                 BytecodeLength: b.GetBufferSize(),
@@ -218,6 +218,9 @@ mod tests {
     fn composes_scaled_premultiplied_plane_on_gpu() {
         let Some(host) = crate::host::host() else {
             eprintln!("skipping display-plane readback: no D3D12 device");
+            if let Some(marker) = std::env::var_os("VICTORY_COMPOSITOR_GPU_MARKER") {
+                std::fs::write(marker, "host_device=unavailable\n").unwrap();
+            }
             return;
         };
         let format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -310,6 +313,13 @@ mod tests {
             let start = mapped.cast::<u8>().add(footprint.Offset as usize);
             let pixels: [u8; 12] = std::slice::from_raw_parts(start, 12).try_into().unwrap();
             buffer.Unmap(0, None);
+            if let Some(marker) = std::env::var_os("VICTORY_COMPOSITOR_GPU_MARKER") {
+                std::fs::write(
+                    marker,
+                    format!("host_device=created\noutput=3x1 RGBA8\npixels={pixels:?}\n"),
+                )
+                .unwrap();
+            }
             for (actual, expected) in pixels
                 .iter()
                 .zip([128, 0, 0, 255, 64, 128, 0, 255, 0, 0, 255, 255])

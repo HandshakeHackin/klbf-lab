@@ -1741,10 +1741,12 @@ impl PlanePass {
             pShaderBytecode: bytes.as_ptr().cast(),
             BytecodeLength: bytes.len(),
         };
-        // SAFETY: the root signature is inside the pixel shader; the
+        // Not the blob: under Wine the host refuses the signature inside it
+        // (E_FAIL), while a description read from the source's `RS` and
+        // serialized here works, as the title's own signatures do. The
         // description points at live data and never releases its pointer.
         unsafe {
-            let root: ID3D12RootSignature = device.CreateRootSignature(0, &ps[..])?;
+            let root: ID3D12RootSignature = crate::rootstring::make(device, source)?;
             let desc = D3D12_GRAPHICS_PIPELINE_STATE_DESC {
                 pRootSignature: std::mem::transmute_copy(&root),
                 VS: code(&vs[..]),
@@ -2354,7 +2356,7 @@ cbuffer Span : register(b0) {
 ByteAddressBuffer now : register(t0);
 // 16 bytes per piece of the copy: the hash of its bytes when they were
 // last sent up (or hashed whole, the first time).
-RWByteAddressBuffer hashes : register(u0);
+RWStructuredBuffer<uint4> hashes : register(u0);
 RWByteAddressBuffer differs : register(u1);
 groupshared uint4 parts[64];
 [RootSignature(RS)]
@@ -2413,12 +2415,12 @@ void main(uint3 id : SV_GroupID, uint thread : SV_GroupIndex) {
     if (compare != 0u) {
         // The flag, and above it 31 bits of the hash (`torn`).
         uint folded = h.x ^ (h.y * 3u) ^ (h.z * 5u) ^ (h.w * 7u);
-        differs.Store(out_at + id.x * 4u, (folded << 1u) | (any(h != hashes.Load4(piece * 16u)) ? 1u : 0u));
+        differs.Store(out_at + id.x * 4u, (folded << 1u) | (any(h != hashes[piece]) ? 1u : 0u));
         // With the copy-back on its own thread: the next compare of the
         // piece finds what is written from here on.
-        if (compare == 2u) hashes.Store4(piece * 16u, h);
+        if (compare == 2u) hashes[piece] = h;
     } else {
-        hashes.Store4(piece * 16u, h);
+        hashes[piece] = h;
     }
 }
 "#;
@@ -4637,11 +4639,13 @@ impl Host {
         const RESULTS: u64 = 1 << 20;
         let (differs, data) = self.shared_buffer(RESULTS).ok_or_else(windows::core::Error::empty)?;
         name(&differs, || "card compare results".into());
-        // SAFETY: the blob's own bytes; the root signature is inside the
-        // shader.
+        // Not the blob: under Wine the host refuses the signature inside it
+        // (E_FAIL), while a description read from the source's `RS` and
+        // serialized here works, as the title's own signatures do.
+        let root = crate::rootstring::make(&self.device, CARD_COMPARE)?;
+        // SAFETY: the blob's own bytes.
         unsafe {
             let bytes = std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
-            let root: ID3D12RootSignature = self.device.CreateRootSignature(0, bytes)?;
             let pso: ID3D12PipelineState = self.device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
                 pRootSignature: std::mem::transmute_copy(&root),
                 CS: D3D12_SHADER_BYTECODE {

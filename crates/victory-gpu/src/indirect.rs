@@ -60,7 +60,7 @@ ByteAddressBuffer count_buf : register(t1);
 RWByteAddressBuffer dst_args : register(u0);
 // The list's work so far (vertex instances, threads): past the budget,
 // records run empty.
-RWByteAddressBuffer budget : register(u1);
+RWStructuredBuffer<uint> budget : register(u1);
 static const uint BUDGET = 1u << 27;
 // The vertices or indices an instance from which a draw record runs empty.
 static const uint MOST_DRAW = 1u << 23;
@@ -161,8 +161,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // (`rest`).
         // Only the group's own records are walked (one, clamped alone).
         uint before;
-        budget.InterlockedOr(0, 0, before);
-        [allow_uav_condition]
+        InterlockedOr(budget[0], 0, before);
         while (before < BUDGET) {
             uint next = before;
             for (uint j = 0; j < n; j++) {
@@ -173,7 +172,7 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             }
             if (next == before) break;
             uint prev;
-            budget.InterlockedCompareExchange(0, before, next, prev);
+            InterlockedCompareExchange(budget[0], before, next, prev);
             if (prev == before) break;
             before = prev;
         }
@@ -195,17 +194,17 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         // the largest cost there was (small ones are not told).
         uint told;
         if (refused > 0) {
-            budget.InterlockedAdd(12, refused, told);
+            InterlockedAdd(budget[3], refused, told);
         }
         if (biggest >= (1u << 22)) {
-            budget.InterlockedMax(16, biggest, told);
+            InterlockedMax(budget[4], biggest, told);
         }
     }
     GroupMemoryBarrierWithGroupSync();
     if (gi == 0 && kind > 2 && n > 0) {
         uint was;
-        budget.InterlockedMax(4, largest_asked, was);
-        budget.InterlockedAdd(8, all_asked, was);
+        InterlockedMax(budget[1], largest_asked, was);
+        InterlockedAdd(budget[2], all_asked, was);
     }
     if (!active) {
         return;
@@ -339,11 +338,15 @@ fn make_from(device: &ID3D12Device, source: &str) -> windows::core::Result<Clamp
         return Err(e);
     }
     let code = code.ok_or_else(windows::core::Error::empty)?;
-    // SAFETY: the blob's own bytes; the root signature is inside the shader.
+    // The blob is not handed to `CreateRootSignature`: under Wine the host
+    // refuses the signature inside it (E_FAIL), while a description read
+    // from the source's `RS` and serialized here works, as the title's own
+    // signatures do.
+    let root = crate::rootstring::make(device, source)?;
+    // SAFETY: the blob's own bytes.
     unsafe {
         let bytes =
             std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
-        let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
         let pso = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
             pRootSignature: std::mem::transmute_copy(&root),
             CS: D3D12_SHADER_BYTECODE {
@@ -639,14 +642,25 @@ pub(crate) mod tests {
 
     const WORKER_CS: &str = r#"
 #define RS "UAV(u0)"
-RWByteAddressBuffer hits : register(u0);
+RWStructuredBuffer<uint> hits : register(u0);
 [RootSignature(RS)]
 [numthreads(1, 1, 1)]
 void main() {
     uint prev;
-    hits.InterlockedAdd(0, 1, prev);
+    InterlockedAdd(hits[0], 1, prev);
 }
 "#;
+
+    /// Optional stage log for host GPU tests run through Proton, where Rust's
+    /// test-harness output is not reliably forwarded by the wrapper.
+    fn test_stage(message: &str) {
+        if let Some(path) = std::env::var_os("VICTORY_TEST_STAGE_FILE") {
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                use std::io::Write;
+                let _ = writeln!(file, "{message}");
+            }
+        }
+    }
 
     struct WarpHarness {
         device: ID3D12Device,
@@ -851,7 +865,8 @@ void main() {
         let mut code: Option<ID3DBlob> = None;
         // SAFETY: source and entry names outlive `D3DCompile`.
         unsafe {
-            D3DCompile(
+            test_stage("D3DCompile begin");
+            if let Err(error) = D3DCompile(
                 source.as_ptr().cast(),
                 source.len(),
                 s!("worker"),
@@ -863,21 +878,41 @@ void main() {
                 0,
                 &mut code,
                 None,
-            )?;
+            ) {
+                test_stage(&format!("D3DCompile failed: {error}"));
+                return Err(error);
+            }
+            test_stage("D3DCompile succeeded");
             let code = code.unwrap();
             let bytes = std::slice::from_raw_parts(
                 code.GetBufferPointer().cast::<u8>(),
                 code.GetBufferSize(),
             );
-            let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
-            let pso = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+            test_stage("rootstring::make begin");
+            let root: ID3D12RootSignature = match crate::rootstring::make(device, source) {
+                Ok(root) => root,
+                Err(error) => {
+                    test_stage(&format!("rootstring::make failed: {error}"));
+                    return Err(error);
+                }
+            };
+            test_stage("rootstring::make succeeded");
+            test_stage("CreateComputePipelineState begin");
+            let pso = match device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
                 pRootSignature: std::mem::transmute_copy(&root),
                 CS: D3D12_SHADER_BYTECODE {
                     pShaderBytecode: bytes.as_ptr().cast(),
                     BytecodeLength: bytes.len(),
                 },
                 ..Default::default()
-            })?;
+            }) {
+                Ok(pso) => pso,
+                Err(error) => {
+                    test_stage(&format!("CreateComputePipelineState failed: {error}"));
+                    return Err(error);
+                }
+            };
+            test_stage("CreateComputePipelineState succeeded");
             Ok(Clamp { root, pso })
         }
     }
@@ -968,17 +1003,22 @@ void main() {
     #[test]
     #[ignore]
     fn card_compare_costs() {
+        test_stage("card_compare_costs begin");
         let Some(mut gpu) = WarpHarness::on(false) else {
+            test_stage("adapter 0 unavailable; benchmark returned early");
             return;
         };
+        test_stage(&format!("adapter 0 D3D12 device created amd={} widest={}", amd(&gpu.device), widest(true)));
         let other = std::env::var("VICTORY_BENCH_CS").ok().map(|f| std::fs::read_to_string(f).unwrap());
         let source: &'static str = other.map_or(crate::host::CARD_COMPARE, |s| Box::leak(s.into_boxed_str()));
         let walked_alone = source.contains("SV_DispatchThreadID");
         let compare = compile_cs(&gpu.device, source).expect("the compare must compile");
+        test_stage(&format!("card-compare shader compiled walked_alone={walked_alone}"));
         let now = gpu.default_uav(256 << 20);
         let hashes = gpu.default_uav(64 << 10);
         let differs = gpu.default_uav(64 << 10);
         for (rounds, passes, pieces) in [(80u32, 5u32, 1u32), (80, 5, 5), (80, 5, 64), (80, 5, 500), (1, 1, 4000)] {
+            test_stage(&format!("benchmark variant begin rounds={rounds} passes={passes} pieces={pieces}"));
             let mut best = f64::MAX;
             for _ in 0..6 {
                 // SAFETY: our open list, live buffers, the compare's own
@@ -1013,7 +1053,9 @@ void main() {
             }
             let mb = f64::from(rounds * passes * pieces) / 16.0;
             println!("{rounds} rounds of {passes} passes of {pieces} pieces: {best:.2} ms ({mb:.0} MB, {:.0} GB/s)", mb / best / 1.024);
+            test_stage(&format!("benchmark variant complete rounds={rounds} passes={passes} pieces={pieces} best_ms={best:.2} mb={mb:.0}"));
         }
+        test_stage("card_compare_costs complete");
     }
 
     /// What raw loads through views that are not raw give past the view's
@@ -2483,18 +2525,25 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
     /// the host device.
     #[test]
     fn host_list_reuses_and_grows_scratch_across_submissions() {
+        test_stage("host_list_reuses_and_grows_scratch_across_submissions begin");
         let Some(host) = super::host() else {
+            test_stage("host D3D12 device unavailable; test returned early");
             return;
         };
+        test_stage("host D3D12 device available");
         // What earlier tests left in the debug layer's queue, if it is on.
         let _ = host.log_messages();
         let Ok(list) = host.new_list() else {
+            test_stage("command list unavailable; test returned early");
             return;
         };
+        test_stage("command list created");
         let Some((src_buf, src_ptr)) = host.shared_buffer(256 << 10) else {
+            test_stage("source buffer unavailable; test returned early");
             return;
         };
         let Some((count_buf, count_ptr)) = host.shared_buffer(256) else {
+            test_stage("count buffer unavailable; test returned early");
             return;
         };
         // SAFETY: mapped host buffers.
@@ -2513,6 +2562,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             args,
             "a clamp leaves the scratch readable as arguments"
         );
+        test_stage("initial scratch allocation ready");
         let b2 = bound(&list, (&src_buf, 64), Some((&count_buf, 0)), (1, 20, 128)).unwrap();
         assert_eq!(
             b1.as_raw(),
@@ -2520,6 +2570,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             "scratch buffer within capacity must be reused"
         );
         assert_eq!(list.indirect_state(&b2), args);
+        test_stage("within-capacity scratch reused");
 
         // A call needing >64 KiB grows the scratch buffer mid-list while keeping
         // `b1` alive until reset. The new buffer starts out common.
@@ -2542,6 +2593,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             D3D12_RESOURCE_STATE_COMMON,
             "the replaced buffer went back to common"
         );
+        test_stage("scratch grew beyond 64 KiB and old buffer returned to common");
 
         list.close();
         // With the debug layer on (`VICTORY_D3D12_DEBUG=1`, diagnostics):
@@ -2550,6 +2602,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         assert_eq!(host.log_messages(), None, "the debug layer found an error");
         host.execute(&[&list]);
         list.reset();
+        test_stage("first submission completed and list reset");
 
         // After reset, requests up to the grown high-water mark reuse `b3` with
         // zero new allocations; the buffer decayed to common when the
@@ -2566,10 +2619,12 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             "grown scratch buffer must persist across reset"
         );
         assert_eq!(list.indirect_state(&b4), args);
+        test_stage("grown scratch reused after reset");
         list.close();
         assert_eq!(host.log_messages(), None, "the debug layer found an error");
         host.execute(&[&list]);
         list.reset();
+        test_stage("host_list_reuses_and_grows_scratch_across_submissions complete");
     }
 
     /// A group charges its records in lane order: with 300 left of the
@@ -2666,14 +2721,20 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
     /// small record still runs.
     #[test]
     fn host_list_budget_starts_empty_at_each_submission() {
+        test_stage("host_list_budget_starts_empty_at_each_submission begin");
         let Some(host) = super::host() else {
+            test_stage("host D3D12 device unavailable; test returned early");
             return;
         };
+        test_stage("host D3D12 device available");
         let Ok(list) = host.new_list() else {
+            test_stage("command list unavailable; test returned early");
             return;
         };
+        test_stage("command list created");
         let _ = host.log_messages();
         let worker = compile_cs(&host.device, WORKER_CS).expect("worker shader must compile");
+        test_stage("worker pipeline ready");
         const KIND_DISPATCH: u32 = 2;
         const STRIDE: u32 = 12;
         let signature = {
@@ -2722,6 +2783,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         // SAFETY: a live buffer.
         let hits_gpu = unsafe { hits_buf.GetGPUVirtualAddress() };
         for round in 0..2 {
+            test_stage(&format!("budget-spent submission {round} begin"));
             // Spends the budget (clamped, not executed), then one group.
             bound(&list, (&big, 0), None, (KIND_DISPATCH, STRIDE, 3)).unwrap();
             let scratch = bound(&list, (&small, 0), None, (KIND_DISPATCH, STRIDE, 1)).unwrap();
@@ -2742,9 +2804,11 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             // The small record comes after the big ones spent the budget:
             // it runs empty, in every round alike (none carries over).
             assert_eq!(hits, 0, "round {round}: the spent budget empties the record after it");
+            test_stage(&format!("budget-spent submission {round} readback hits={hits}"));
         }
         // A recording with only the small record: the budget is empty
         // again, so it runs.
+        test_stage("fresh-budget submission begin");
         let scratch = bound(&list, (&small, 0), None, (KIND_DISPATCH, STRIDE, 1)).unwrap();
         // SAFETY: as above.
         unsafe {
@@ -2760,6 +2824,8 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         // SAFETY: the list has run; a mapped buffer.
         let hits = unsafe { (hits_ptr as *const u32).read_volatile() };
         assert_eq!(hits, 1, "the budget starts empty at the next submission");
+        test_stage(&format!("fresh-budget submission readback hits={hits}"));
+        test_stage("host_list_budget_starts_empty_at_each_submission complete");
     }
 
     /// Records the dispatch records `groups` (three words each, `step`
@@ -2851,15 +2917,21 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
     /// diagnostics build) no barrier names a state the buffer is not in.
     #[test]
     fn host_list_window_executions_need_no_barrier_of_their_own() {
+        test_stage("host_list_window_executions_need_no_barrier_of_their_own begin");
         let Some(host) = super::host() else {
+            test_stage("host D3D12 device unavailable; test returned early");
             return;
         };
+        test_stage("host D3D12 device available");
         // What earlier tests left in the debug layer's queue, if it is on.
         let _ = host.log_messages();
         let Ok(list) = host.new_list() else {
+            test_stage("command list unavailable; test returned early");
             return;
         };
+        test_stage("command list created");
         let worker = compile_cs(&host.device, WORKER_CS).expect("worker shader must compile");
+        test_stage("worker pipeline ready");
         const KIND_DISPATCH: u32 = 2;
         const STRIDE: u32 = 12;
         const STEP: u32 = 32;
@@ -2908,6 +2980,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         // SAFETY: a live buffer.
         let hits_gpu = unsafe { hits_buf.GetGPUVirtualAddress() };
         for _ in 0..2 {
+            test_stage("window-pair submission begin");
             // SAFETY: the mapping holds 256 bytes; nothing runs.
             unsafe { std::ptr::write_bytes(hits_ptr, 0, 256) };
             for (groups, src) in windows.iter().zip(&sources) {
@@ -2935,7 +3008,9 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             // SAFETY: the list has run; a mapped buffer.
             let hits = unsafe { (hits_ptr as *const u32).read_volatile() };
             assert_eq!(hits, expected, "every record of both windows runs once");
+            test_stage(&format!("window-pair submission readback hits={hits} expected={expected}"));
         }
+        test_stage("host_list_window_executions_need_no_barrier_of_their_own complete");
     }
 
     /// A command signature of one argument of `kind` on `device`.
@@ -2963,31 +3038,41 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
     /// ([`widest`]), clamped one by one and in a batch. Others are not asked.
     #[test]
     fn card_runs_wide_indirect_dispatches() {
+        test_stage("card_runs_wide_indirect_dispatches begin");
         const CS: &str = r#"
 #define RS "UAV(u0)"
-RWByteAddressBuffer seen : register(u0);
+RWStructuredBuffer<uint> seen : register(u0);
 [RootSignature(RS)]
 [numthreads(1, 1, 1)]
 void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
     uint was;
-    seen.InterlockedAdd(0, 1, was);
-    seen.InterlockedMax(4, group.x, was);
-    seen.InterlockedMax(8, thread.x, was);
-    seen.InterlockedAdd(16 + group.x * 4, 1, was);
+    InterlockedAdd(seen[0], 1, was);
+    InterlockedMax(seen[1], group.x, was);
+    InterlockedMax(seen[2], thread.x, was);
+    InterlockedAdd(seen[4 + group.x], 1, was);
 }
 "#;
         let Some(mut gpu) = WarpHarness::on(false) else {
+            test_stage("adapter 0 unavailable; test returned early");
             return;
         };
-        if !amd(&gpu.device) || widest(true) == 65_535 {
+        test_stage("adapter 0 D3D12 device created");
+        let is_amd = amd(&gpu.device);
+        let max_wide = widest(true);
+        test_stage(&format!("amd={is_amd} widest={max_wide}"));
+        if !is_amd || max_wide == 65_535 {
+            test_stage("adapter does not meet AMD wide-dispatch test conditions; returned early");
             return;
         }
         let worker = compile_cs(&gpu.device, CS).expect("the worker must compile");
+        test_stage("structured wide-dispatch worker compiled");
         let pass = make_from(&gpu.device, batch::SOURCE).expect("the batched clamp must compile");
+        test_stage("fork batch clamp compiled");
         let sig = gpu.signature(2, 12);
         for asked in [67_440u32, 115_200, 1 << 20, (1 << 20) + 1] {
             let runs = if asked > 1 << 20 { 65_535 } else { asked };
             for batched in [false, true] {
+                test_stage(&format!("dispatch begin asked={asked} batched={batched} expected_groups={runs}"));
                 let (src, src_ptr, src_gpu) = gpu.shared_buffer(1024);
                 let (_budget, budget_ptr, budget_gpu) = gpu.shared_buffer(256);
                 let (_table, table_ptr, table_gpu) = gpu.shared_buffer(batch::TABLE);
@@ -3022,9 +3107,11 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
                 let word = |i: usize| unsafe { back_ptr.cast::<u32>().add(i).read_volatile() };
                 assert_eq!([word(0), word(1), word(2)], [runs, runs - 1, runs - 1], "asked for {asked}, batched {batched}");
                 let wrong = (0..runs as usize).find(|&g| word(4 + g) != 1);
+                test_stage(&format!("dispatch readback asked={asked} batched={batched} observed=[{},{},{}] wrong_group={wrong:?}", word(0), word(1), word(2)));
                 assert_eq!((wrong, word(4 + runs as usize)), (None, 0), "every group once, asked for {asked}");
             }
         }
+        test_stage("card_runs_wide_indirect_dispatches complete");
     }
 
     /// What a batch's table says of records added to it: one job per
@@ -3203,18 +3290,25 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
     /// the debug layer on no barrier names a state the buffer is not in.
     #[test]
     fn host_list_batches() {
+        test_stage("host_list_batches begin");
         let Some(host) = super::host() else {
+            test_stage("host D3D12 device unavailable; test returned early");
             return;
         };
+        test_stage("host D3D12 device available");
         let _ = host.log_messages();
         let Ok(list) = host.new_list() else {
+            test_stage("command list unavailable; test returned early");
             return;
         };
+        test_stage("command list created");
         let worker = compile_cs(&host.device, WORKER_CS).expect("worker shader must compile");
+        test_stage("worker pipeline ready");
         let signature = one_argument(&host.device, 2, 12);
         let mut sources = Vec::new();
         for first in [1u32, 100] {
             let Some((buffer, ptr)) = host.shared_buffer(1024) else {
+                test_stage("source buffer unavailable; test returned early");
                 return;
             };
             for i in 0..16u32 {
@@ -3226,11 +3320,13 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
             sources.push(buffer);
         }
         let Some((hits_buf, hits_ptr)) = host.shared_buffer(256) else {
+            test_stage("hits buffer unavailable; test returned early");
             return;
         };
         // SAFETY: a live buffer.
         let hits_gpu = unsafe { hits_buf.GetGPUVirtualAddress() };
         for _ in 0..2 {
+            test_stage("batch pass begin");
             // SAFETY: the mapping holds 256 bytes; nothing runs.
             unsafe { std::ptr::write_bytes(hits_ptr, 0, 256) };
             let mut expected = 0;
@@ -3253,13 +3349,19 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
                 }
             }
             list.close();
-            assert_eq!(host.log_messages(), None, "the debug layer found an error");
+            if let Some(messages) = host.log_messages() {
+                test_stage(&format!("D3D12 debug messages: {messages:?}"));
+                assert!(false, "the debug layer found an error");
+            }
+            test_stage("executing command list");
             host.execute(&[&list]);
             list.reset();
             // SAFETY: the list has run; a mapped buffer.
             let hits = unsafe { (hits_ptr as *const u32).read_volatile() };
+            test_stage(&format!("readback hits={hits} expected={expected}"));
             assert_eq!(hits, expected, "every execution runs what it asked for");
         }
+        test_stage("host_list_batches complete");
     }
 
     /// What clamps of a frame cost on the card one by one and in batches
@@ -3268,11 +3370,15 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
     #[test]
     #[ignore]
     fn batch_costs() {
+        test_stage("batch_costs begin");
         let Some(mut gpu) = WarpHarness::on(false) else {
+            test_stage("adapter 0 unavailable; benchmark returned early");
             return;
         };
+        test_stage(&format!("adapter 0 D3D12 device created amd={} widest={}", amd(&gpu.device), widest(true)));
         const EXECUTIONS: u32 = 2355;
         let pass = make_from(&gpu.device, batch::SOURCE).expect("the batched clamp must compile");
+        test_stage("fork batch clamp compiled");
         let sig = gpu.signature(2, 12);
         let groups: Vec<u32> = vec![1; 2048];
         let src = dispatch_records(&gpu, &groups, 32);
@@ -3285,6 +3391,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
         let (_tables, tables_ptr, tables_gpu) = gpu.shared_buffer(batch::TABLE * 2400);
         let dst = gpu.default_uav(4 << 20);
         for run in [0u32, 2355 / 49, 5, 1] {
+            test_stage(&format!("benchmark variant begin batch_interval={run}"));
             let mut best = f64::MAX;
             for _ in 0..6 {
                 let mut state = D3D12_RESOURCE_STATE_COMMON;
@@ -3316,7 +3423,9 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
             }
             let what = if run == 0 { "each clamped on its own".to_owned() } else { format!("a batch every {run}") };
             println!("{EXECUTIONS} indirect dispatches, {what}: {best:.2} ms");
+            test_stage(&format!("benchmark variant complete batch_interval={run} best_gpu_submit_ms={best:.2}"));
         }
+        test_stage("batch_costs complete");
     }
 }
 
