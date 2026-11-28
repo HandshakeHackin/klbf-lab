@@ -430,14 +430,7 @@ mod tests {
                 rest = &after[end + 1..];
             }
         }
-        let lightprobe = include_str!("lightprobe.rs");
-        for marker in ["const RS_EXPOSURE: &str = \"", "const RS_LUX: &str = \""] {
-            let at = lightprobe.find(marker).expect("lightprobe signature exists");
-            let after = &lightprobe[at + marker.len()..];
-            let end = after.find('"').expect("lightprobe signature is closed");
-            signatures.push(after[..end].to_owned());
-        }
-        assert_eq!(signatures.len(), 18, "built-in signature inventory changed");
+        assert_eq!(signatures.len(), 16, "published signature inventory changed");
         signatures
     }
 
@@ -549,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a working D3D12 host device"]
+    #[ignore = "requires a working D3D12 host device and the optional src/lightprobe.rs fixture"]
     fn creates_builtin_root_signatures_on_host_device() {
         let mut device: Option<ID3D12Device> = None;
         unsafe {
@@ -576,7 +569,17 @@ mod tests {
         let desc = unsafe { adapter.GetDesc1().expect("adapter description") };
         let name_end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         let adapter_name = String::from_utf16_lossy(&desc.Description[..name_end]);
-        let signatures = builtin_signatures();
+        // The contributor's optional probe shaders are separate from the 16 public signatures.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lightprobe.rs");
+        let lightprobe = std::fs::read_to_string(path)
+            .expect("this device test requires the contributor's src/lightprobe.rs fixture");
+        let mut signatures = builtin_signatures();
+        for marker in ["const RS_EXPOSURE: &str = \"", "const RS_LUX: &str = \""] {
+            let at = lightprobe.find(marker).expect("lightprobe signature exists");
+            let after = &lightprobe[at + marker.len()..];
+            let end = after.find('"').expect("lightprobe signature is closed");
+            signatures.push(after[..end].to_owned());
+        }
         for signature in &signatures {
             let source = format!("#define RS \"{signature}\"");
             make(&device, &source).unwrap_or_else(|e| {
@@ -689,7 +692,6 @@ void main() { output.Store4(0, input.Load4(0)); }
                 .CreateComputePipelineState(&batch_desc)
                 .expect("indirect batching compute PSO creation")
         };
-        let lightprobe = include_str!("lightprobe.rs");
         const HLSL_MARK: &str = "const SOURCE: &str = r#\"";
         let source_at = lightprobe.find(HLSL_MARK).expect("lightprobe HLSL source exists");
         let source_after = &lightprobe[source_at + HLSL_MARK.len()..];
