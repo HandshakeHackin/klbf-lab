@@ -828,6 +828,15 @@ fn scripted_now(elapsed_ms: u64) -> u32 {
         return 0;
     };
     let draws = victory_gpu::frame::PRESENTED_DRAWS.load(Ordering::Relaxed);
+    {
+        let mut since = lock(&WORLD_SINCE);
+        if draws < WORLD_DRAWS {
+            *since = None;
+        } else if elapsed_ms - *since.get_or_insert(elapsed_ms) >= WORLD_HOLD_MS {
+            drop(since);
+            auto_input_stop("the game world is shown");
+        }
+    }
     let mut script = lock(script);
     let buttons = script.advance(elapsed_ms, draws);
     script.tapped.clear();
@@ -841,17 +850,23 @@ fn scripted_now(elapsed_ms: u64) -> u32 {
     buttons
 }
 
-/// The player pressed a real button: `VICTORY_AUTO_INPUT` stops for good.
+/// The player took over (pad, keys) or the game world is shown: `VICTORY_AUTO_INPUT` stops for good.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn auto_input_stop() {
+fn auto_input_stop(why: &str) {
     if let Some(script) = AUTO_INPUT.as_ref() {
         let mut script = lock(script);
         if !script.stopped && script.i < script.steps.len() {
             script.stopped = true;
-            tracing::info!("auto input: stopped, the player pressed a button");
+            tracing::info!("auto input: stopped at step {} of {}: {why}", script.i + 1, script.steps.len());
         }
     }
 }
+
+/// (v26.11.6) Draws a frame of the game world has at least (menus and loading screens have far fewer).
+const WORLD_DRAWS: u32 = 1000;
+/// How long the world must be shown before the start script is stopped.
+const WORLD_HOLD_MS: u64 = 10_000;
+static WORLD_SINCE: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 
 /// Pad buttons the auto inputs hold now (`VICTORY_AUTO_A`, `VICTORY_AUTO_INPUT`).
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -1721,8 +1736,14 @@ mod host {
             // the stand-in.
             // (v26.11.6) A button pressed on the real pad: the player has taken over, the script
             // stops for good (else a step waiting for a screen that never comes taps A in the game).
-            if slot == 0 && pad.buttons != 0 {
-                super::auto_input_stop();
+            let moved = |v: f32| v.abs() > 0.3;
+            if slot == 0
+                && (pad.buttons != 0
+                    || [pad.left_x, pad.left_y, pad.right_x, pad.right_y, pad.left_trigger, pad.right_trigger]
+                        .into_iter()
+                        .any(moved))
+            {
+                super::auto_input_stop("the player used the pad");
             }
             if slot == 0 {
                 pad.buttons |= super::auto_buttons();
@@ -1746,6 +1767,9 @@ mod host {
                     .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
                     .collect();
                 self.held = held.iter().map(|&vk| KeyState { virtual_key: vk, ..Default::default() }).collect();
+                if !held.is_empty() {
+                    super::auto_input_stop("the player pressed a key");
+                }
                 down.extend(held);
             }
             // Outside the focus check: the keys feed the keyboard device and,
