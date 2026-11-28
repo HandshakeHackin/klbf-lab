@@ -24,6 +24,12 @@
 #              | performance (1/2) | ultraperformance (1/3), AMD's presets. -Output 2560x1440 sets the title's output (one of its modes; 3840x2160 without).
 # -FrameGen    AMD FSR frame generation on top (KLBF_FRAMEGEN=1), with -FsrX or -Fsr only: two frames shown per
 #              real one. AMD recommends a base of 60 fps; at ~16 real fps it adds latency and artifacts.
+# -Dlss        NVIDIA DLSS Super Resolution in place of AMD FSR's upscale (KLBF_DLSS=1), with -FsrX or -Fsr:
+#              GeForce RTX. -DlssFrames 2..6 NVIDIA DLSS frame generation instead of AMD's (KLBF_DLSS_FG): frames
+#              shown per real one, 2 on RTX 40/50, 3 and more on RTX 50 (no more than the driver makes).
+#              NVIDIA Streamline 2.14.16 is fetched once into streamline\ beside victory.exe from NVIDIA's
+#              GitHub release (276 MB, SHA-256 checked). Whatever cannot run on this PC falls back to AMD FSR.
+# -FpsCap      30, 40 or 60: a frame rate cap (KLBF_FPS_CAP).
 # -FfxDir      the folder with AMD's signed FidelityFX DLLs (SDK 2.4.0, FSR 4.1.2). Default: ffx\ beside
 #              victory.exe, fetched there once from AMD's GitHub (hash-checked), or D:\KLBF-Lab\ffx-4.1.2 when
 #              ffx\ has none and that has. Without them FSR is turned off: the built-in upscaler is used.
@@ -67,6 +73,9 @@ param(
     [switch]$Fsr,
     [switch]$FsrX,
     [switch]$FrameGen,
+    [switch]$Dlss,
+    [ValidateSet(0, 2, 3, 4, 5, 6)][int]$DlssFrames = 0,
+    [ValidateSet(0, 30, 40, 60)][int]$FpsCap = 0,
     [ValidateSet('quality', 'balanced', 'performance', 'ultraperformance')][string]$FsrQuality = 'quality',
     [ValidateSet('', '1280x720', '1664x936', '1920x1080', '2560x1440', '3840x2160')][string]$Output = '',
     [string]$FfxDir = '',
@@ -234,6 +243,13 @@ if (-not $FfxDir) {
         try { Add-Type -AssemblyName System.Windows.Forms; $null = [System.Windows.Forms.MessageBox]::Show($msg, 'KLBF Lab', 'OK', 'Information') } catch {}
     }
 }
+# (KLBF Lab) NVIDIA DLSS: streamline\ beside the exe, fetched once from NVIDIA's GitHub release (hash-checked).
+# Offline or a mismatch: AMD FSR, as before, and said in the log.
+$slDir = Join-Path $buildDir 'streamline'
+if (($Dlss -or $DlssFrames) -and -not (Install-KlbfComponent streamline $buildDir)) {
+    Write-Warning 'NVIDIA DLSS could not be downloaded (offline, or the file did not match): AMD FSR is used.'
+    $Dlss = [switch]$false; $DlssFrames = 0
+}
 if (-not $Cache) { $Cache = Get-KlbfCacheDir '' }
 if (-not $Data) { $Data = Join-Path (Get-KlbfHome) 'data' }
 # (27/11) Never a new game over saves left in an older folder: said, and nothing starts
@@ -258,7 +274,7 @@ if ($startPlan.note) { Write-Host $startPlan.note }
 
 # Settings left in this window by an earlier start go: only what is below counts.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -ne 'VICTORY_HALF_VIEWS' -and $_.Name -ne 'VICTORY_AUTO_INPUT' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
-Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_WHERE', 'KLBF_BENCH_SAVE_ID', 'KLBF_HEAP_SKIP', 'KLBF_HEAP_SKIP_VERIFY', 'KLBF_REBAR_UPLOAD', 'KLBF_REFRESH_COALESCE' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_DLSS', 'KLBF_DLSS_FG', 'KLBF_STREAMLINE_DIR', 'KLBF_FPS_CAP', 'KLBF_TEX_TRIM', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_WHERE', 'KLBF_BENCH_SAVE_ID', 'KLBF_HEAP_SKIP', 'KLBF_HEAP_SKIP_VERIFY', 'KLBF_REBAR_UPLOAD', 'KLBF_REFRESH_COALESCE' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 
 $set = [ordered]@{
     VICTORY_GAME_DIR  = $Game
@@ -340,6 +356,13 @@ if ($FrameGen) {
     }
     $set.KLBF_FRAMEGEN = '1'
 }
+# (KLBF Lab) NVIDIA DLSS on the FSR path (victory.exe checks the card and turns off what cannot run)
+if (($Dlss -or $DlssFrames) -and ($FsrX -or $Fsr)) {
+    $set.KLBF_STREAMLINE_DIR = $slDir
+    if ($Dlss) { $set.KLBF_DLSS = '1' }
+    if ($DlssFrames) { $set.KLBF_DLSS_FG = [string]$DlssFrames }
+}
+if ($FpsCap) { $set.KLBF_FPS_CAP = [string]$FpsCap }
 if (-not $NoProbeRays -and -not $RayTracing) { $set.VICTORY_PROBE_RAYS = '1' }
 if ($RayTracing) { $set.VICTORY_BVH_BUILDER = '1' }
 if ($AutoStart) {
@@ -472,6 +495,7 @@ if ($startPlan.save) { Set-KlbfNewestSave $startPlan.save }
 Write-Host ("KLBF Lab, Profile {0}, {1} build, ray tracing {2}, memory hooks {3}" -f $(if ($Fsr) { 'S' } else { 'X' }), $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
 if ($FsrX) { Write-Host "AMD FSR (Profile X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
 if ($FrameGen) { Write-Host 'AMD frame generation: on (two frames shown per real one; more latency at a low base frame rate)' }
+if ($set.KLBF_DLSS -or $set.KLBF_DLSS_FG) { Write-Host "NVIDIA DLSS: super resolution $(if ($set.KLBF_DLSS) { 'on' } else { 'off' }), frame generation $(if ($DlssFrames) { "x$DlssFrames" } else { 'off' })" }
 Write-Host "Cache: $Cache"
 Write-Host "Saves: $Data"
 # -Fsr (KLBF Lab): Profile S, whose title upscales with FSR 4, the calls going to the PC's FSR DLL

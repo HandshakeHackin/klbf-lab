@@ -371,7 +371,9 @@ impl Shown {
             Upscaler::Fsr => {
                 // "FSR 4"; below 4, major.minor ("FSR 3.1": the provider the DLL picks outside RDNA 4)
                 let mut parts = self.fsr.split('.');
+                // (KLBF Lab) NVIDIA DLSS does the FSR path's upscales (`KLBF_DLSS=1`)
                 let name = match (parts.next(), parts.next()) {
+                    _ if crate::streamline::upscaling() => "DLSS".into(),
                     (Some("4") | Some("5"), _) => format!("FSR {}", &self.fsr[..1]),
                     (Some(major), Some(minor)) if !major.is_empty() => format!("FSR {major}.{minor}"),
                     (Some(major), None) if !major.is_empty() => format!("FSR {major}"),

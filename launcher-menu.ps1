@@ -112,6 +112,8 @@ function Test-KlbfLostSaves([string]$Data, [string[]]$From = (Get-KlbfOldHomes))
 # (= -Tout -FsrQuality performance -Output 3840x2160).
 function Get-KlbfDefaults {
     [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1; borderless = $false
+        # (KLBF Lab) Frame generation's kind: 'fsr' (AMD, x2) or NVIDIA DLSS 'dlss2' to 'dlss6'; a frame rate cap (0: none)
+        fgType = 'fsr'; fpsCap = 0
         # (low-end beta) Experimental switches, all off: Experimental tab, play.ps1's -HeapSkip and siblings
         heapSkip = $false; heapSkipVerify = $false; rebarUpload = $false; refreshCoalesce = $false; pagePool = $false; safe8gb = $false; emergencyReclaim = $false
         # (28/11) How Play starts: the game's menu, a new game, the autosave, or a save (Get-KlbfStartPlan)
@@ -129,12 +131,18 @@ $script:KlbfExperimental = [ordered]@{
     emergencyReclaim = @{ switch = 'EmergencyReclaim'; text = 'Emergency memory reclaim (KLBF_EMERGENCY_RECLAIM)'; tip = 'Frees idle command memory when free commit is under 2.5 GB or shared GPU memory is at 88%.' }
 }
 
+# (KLBF Lab) Frame generation's kinds and their names: AMD FSR (x2, every card) and NVIDIA DLSS (x2 on RTX 40
+# and 50; x3 and more, Multi Frame Generation, on RTX 50: the game asks for no more than the driver makes).
+$script:KlbfFgTypes = [ordered]@{ fsr = 'AMD FSR x2'; dlss2 = 'NVIDIA DLSS x2'; dlss3 = 'NVIDIA DLSS x3'; dlss4 = 'NVIDIA DLSS x4'; dlss6 = 'NVIDIA DLSS x6' }
+
 # Any object (a parsed JSON) over the defaults: unknown or invalid values keep the default.
 function ConvertTo-KlbfChoice($o) {
     $c = Get-KlbfDefaults
     if (-not $o) { return $c }
     if ($o.profile -in 'X', 'S') { $c.profile = [string]$o.profile }
-    if ($o.upscaler -in 'fsr', 'title') { $c.upscaler = [string]$o.upscaler }
+    if ($o.upscaler -in 'fsr', 'title', 'dlss') { $c.upscaler = [string]$o.upscaler }
+    if ($o.fgType -in $script:KlbfFgTypes.Keys) { $c.fgType = [string]$o.fgType }
+    if ($o.fpsCap -in 0, 30, 40, 60) { $c.fpsCap = [int]$o.fpsCap }
     if ($o.preset -in 'quality', 'balanced', 'performance', 'ultraperformance') { $c.preset = [string]$o.preset }
     if ($o.output -in $script:KlbfModes) { $c.output = [string]$o.output }
     if ($o.frameGen -is [bool]) { $c.frameGen = $o.frameGen }
@@ -221,7 +229,10 @@ function Get-KlbfStarterText {
 # 'agility' (Microsoft's DirectX 12 Agility SDK 1.620.2, NuGet, into D3D12\) and 'ffx' (AMD's signed
 # FidelityFX DLLs, SDK v2.4.0 / FSR 4.1.2, AMD's GitHub at the tag's commit, into ffx\), each file checked
 # against its SHA-256 before it is put in place, the license beside them. $true when all are there.
-function Install-KlbfComponent([ValidateSet('agility', 'ffx')][string]$Name, [string]$BuildDir, [switch]$CheckOnly) {
+# (KLBF Lab) 'streamline': NVIDIA Streamline SDK 2.14.16 with DLSS, NVIDIA's own release on GitHub (276 MB,
+# fetched only when DLSS is picked), into streamline\: the zip checked against the SHA-256 GitHub publishes
+# for it, then only its bin\x64 DLLs taken out (NVIDIA-signed; victory.exe checks the signature too).
+function Install-KlbfComponent([ValidateSet('agility', 'ffx', 'streamline')][string]$Name, [string]$BuildDir, [switch]$CheckOnly) {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
     $c = @{
@@ -236,17 +247,38 @@ function Install-KlbfComponent([ValidateSet('agility', 'ffx')][string]$Name, [st
                 'signedbin/amd_fidelityfx_upscaler_dx12.dll'        = 'aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace'
                 'signedbin/amd_fidelityfx_framegeneration_dx12.dll' = 'e6843252f58b0341a0d80f6a20bc0d840643ee95bc48c22cac08745344577bb6'
             } }
+        streamline = @{ dir = 'streamline'; zip = 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip'
+            zipSha = '32041e51db0cab709a271b72a352281b690c2abbd669a827809401a5dd23956b'; license = @('license.txt', 'LICENSE-NVIDIA-Streamline.txt')
+            files = [ordered]@{ 'bin/x64/sl.interposer.dll' = ''; 'bin/x64/sl.common.dll' = ''; 'bin/x64/sl.dlss.dll' = ''; 'bin/x64/sl.dlss_g.dll' = ''
+                'bin/x64/sl.reflex.dll' = ''; 'bin/x64/sl.pcl.dll' = ''; 'bin/x64/nvngx_dlss.dll' = ''; 'bin/x64/nvngx_dlssg.dll' = '' } }
     }[$Name]
     $dst = Join-Path $BuildDir $c.dir
     # (27/11) Checked by hash, not only there: a newer launcher with other component versions fetches them again
-    $have = { param($rel) $p = Join-Path $dst (Split-Path -Leaf $rel); (Test-Path -LiteralPath $p) -and (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash -eq $c.files[$rel] }
+    # (A file of a hash-checked zip: there, beside the zip's hash noted when it was taken out.)
+    $stamp = Join-Path $dst 'zip.sha256'
+    $have = { param($rel) $p = Join-Path $dst (Split-Path -Leaf $rel); (Test-Path -LiteralPath $p) -and $(if ($c.zipSha) { (Test-Path -LiteralPath $stamp) -and (Get-Content -LiteralPath $stamp -TotalCount 1) -eq $c.zipSha } else { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash -eq $c.files[$rel] }) }
     if (@($c.files.Keys | Where-Object { -not (& $have $_) }).Count -eq 0) { return $true }
     if ($CheckOnly) { return $false }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "klbf-$Name-$([guid]::NewGuid().ToString('N'))"
     try {
         New-Item -ItemType Directory -Force -Path $tmp | Out-Null
         $get = { param($rel) $out = Join-Path $tmp ($rel -replace '/', '_'); Invoke-WebRequest -UseBasicParsing "$($c.base)/$rel" -OutFile $out; $out }
-        if ($c.zip) {
+        if ($c.zipSha) {
+            $zip = Join-Path $tmp 'p.zip'
+            Invoke-WebRequest -UseBasicParsing $c.zip -OutFile $zip
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash -ne $c.zipSha) { return $false }
+            # Only the files named, each from its shortest path in the zip (bin/x64, not a sub-folder of it)
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $z = [IO.Compression.ZipFile]::OpenRead($zip)
+            try {
+                foreach ($rel in @($c.files.Keys) + $c.license[0]) {
+                    $e = @($z.Entries | Where-Object { ('/' + $_.FullName.Replace([char]92, [char]47)) -like "*/$rel" } | Sort-Object { $_.FullName.Length })[0]
+                    if (-not $e) { return $false }
+                    [IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $tmp ($rel -replace '/', '_')), $true)
+                }
+            } finally { $z.Dispose() }
+            $get = { param($rel) Join-Path $tmp ($rel -replace '/', '_') }
+        } elseif ($c.zip) {
             Invoke-WebRequest -UseBasicParsing $c.zip -OutFile (Join-Path $tmp 'p.zip')
             Expand-Archive -LiteralPath (Join-Path $tmp 'p.zip') -DestinationPath (Join-Path $tmp 'p')
             $get = { param($rel) Join-Path (Join-Path $tmp 'p') $rel }
@@ -254,13 +286,14 @@ function Install-KlbfComponent([ValidateSet('agility', 'ffx')][string]$Name, [st
         $got = [ordered]@{}
         foreach ($rel in $c.files.Keys) {
             $f = & $get $rel
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash -ne $c.files[$rel]) { return $false }
+            if (-not $c.zipSha -and (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash -ne $c.files[$rel]) { return $false }
             $got[$rel] = $f
         }
         $lic = & $get $c.license[0]
         New-Item -ItemType Directory -Force -Path $dst | Out-Null
         foreach ($rel in $got.Keys) { Copy-Item -LiteralPath $got[$rel] -Destination (Join-Path $dst (Split-Path -Leaf $rel)) -Force }
         Copy-Item -LiteralPath $lic -Destination (Join-Path $dst $c.license[1]) -Force
+        if ($c.zipSha) { Set-Content -LiteralPath $stamp -Value $c.zipSha -Encoding ascii }
         $true
     } catch { $false } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -609,14 +642,17 @@ function Get-KlbfPresetNames {
 function Get-KlbfSwitches($Choice) {
     $on = [switch]$true
     $s = [ordered]@{}
-    $fsr = $Choice.profile -eq 'S' -or $Choice.upscaler -eq 'fsr'
+    $fsr = $Choice.profile -eq 'S' -or $Choice.upscaler -in 'fsr', 'dlss'
     if ($Choice.profile -eq 'S') {
         $s.Fsr = $on
     } else {
         if ($fsr) { $s.FsrX = $on; $s.FsrQuality = $Choice.preset }
+        # (KLBF Lab) NVIDIA DLSS does the FSR path's upscale, at the preset's render size
+        if ($Choice.upscaler -eq 'dlss') { $s.Dlss = $on }
         $s.Output = $Choice.output
     }
-    if ($fsr -and $Choice.frameGen) { $s.FrameGen = $on }
+    if ($fsr -and $Choice.frameGen) { if ($Choice.fgType -match '^dlss(\d)$') { $s.DlssFrames = [int]$Matches[1] } else { $s.FrameGen = $on } }
+    if ($Choice.fpsCap) { $s.FpsCap = [int]$Choice.fpsCap }
     if ($Choice.advanced) { $s.Hooks = $on; $s.TexTrim = $on }
     foreach ($k in $script:KlbfExperimental.Keys) { if ($Choice.$k -and ($k -ne 'heapSkipVerify' -or $Choice.heapSkip)) { $s[$script:KlbfExperimental[$k].switch] = $on } }
     $s
@@ -1139,14 +1175,15 @@ function Get-KlbfBugReport($Choice, $Hw, [string]$Victory, [string]$Log, [string
     } else { 'unknown' }
     $git = Join-Path $PSScriptRoot '.git'
     if (Test-Path -LiteralPath $git) { try { $build += ', commit ' + (git -C $PSScriptRoot rev-parse --short HEAD 2>$null) } catch {} }
-    $up = if ($Choice.profile -eq 'S') { "the title's FSR (Profile S)" } elseif ($Choice.upscaler -eq 'fsr') { (Get-KlbfUpscalerName $Hw) + ' ' + $script:KlbfPresets[$Choice.preset] } else { "the title's own" }
+    $up = if ($Choice.profile -eq 'S') { "the title's FSR (Profile S)" } elseif ($Choice.upscaler -eq 'dlss') { 'NVIDIA DLSS ' + $script:KlbfPresets[$Choice.preset] } elseif ($Choice.upscaler -eq 'fsr') { (Get-KlbfUpscalerName $Hw) + ' ' + $script:KlbfPresets[$Choice.preset] } else { "the title's own" }
     @(
         '### System (KLBF Lab Settings)'
         "- KLBF Lab: $build"
         "- Profile: $($Choice.profile)"
         "- Upscaler: $up"
         "- Output: $(if ($Choice.profile -eq 'S') { "the title's" } else { $Choice.output })"
-        "- Frame generation: $(if ($Choice.frameGen -and ($Choice.profile -eq 'S' -or $Choice.upscaler -eq 'fsr')) { 'on (FG x2)' } else { 'off' })"
+        "- Frame generation: $(if ($Choice.frameGen -and ($Choice.profile -eq 'S' -or $Choice.upscaler -in 'fsr', 'dlss')) { $script:KlbfFgTypes[$Choice.fgType] } else { 'off' })"
+        "- Frame rate cap: $(if ($Choice.fpsCap) { "$($Choice.fpsCap) fps" } else { 'none' })"
         "- Memory hooks and texture trim: $(if ($Choice.advanced) { 'on' } else { 'off' })"
         "- Graphics card: $($Hw.gpu)$(if ($k.gen) { " ($($k.gen))" }), $($Hw.vramGB) GB"
         "- Memory: $($Hw.ramGB) GB"
@@ -1397,8 +1434,12 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
 
     $g = & $group $page 'Upscaler' 304 118
     $c.upFsr = & $white (& $radio $g (& $mark (Get-KlbfUpscalerName $Hardware $Info.cache) ($rec.upscaler -eq 'fsr')) 12 20 460)
-    $c.upTitle = & $white (& $radio $g 'Built-in (console) upscaler' 12 42 460)
+    $c.upTitle = & $white (& $radio $g 'Built-in (console) upscaler' 12 42 230)
+    # (KLBF Lab) NVIDIA DLSS on GeForce RTX: the FSR presets' render sizes, upscaled by DLSS
+    $c.rtx = (Get-KlbfGpuKind $Hardware.gpu).gen -eq 'NVIDIA RTX'
+    $c.upDlss = & $white (& $radio $g 'NVIDIA DLSS (GeForce RTX)' 246 42 226)
     $c.tips = New-Object System.Windows.Forms.ToolTip
+    $c.tips.SetToolTip($c.upDlss, 'NVIDIA DLSS Super Resolution (GeForce RTX): the preset sets the render size. Downloaded once from NVIDIA (276 MB); AMD FSR is used if it cannot run.')
     $c.tips.SetToolTip($c.upTitle, "The game's own upscaler, translated: works on every card; softer image, no frame generation.")
     $c.tips.SetToolTip($c.upFsr, 'AMD FSR (FSR 4 on RX 9000, FSR 3.1 elsewhere): sharper, presets, frame generation.')
     $c.presetText = if ($tested) { "Preset (recommended for your hardware: $($script:KlbfPresets[$rec.preset]))" } else { 'Preset' }
@@ -1431,9 +1472,16 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
 
     $g = & $group $page 'Options' 520 64
     $c.fg = New-Object System.Windows.Forms.CheckBox
-    $c.fgText = & $mark 'Frame generation (FG x2)' $rec.frameGen
+    $c.fgText = if ($tested -and $rec.frameGen) { 'Frame generation (recommended)' } else { 'Frame generation' }
     $c.fg.Text = $c.fgText
-    [void](& $white (& $add $g $c.fg 12 16 460 22))
+    [void](& $white (& $add $g $c.fg 12 16 236 22))
+    # (KLBF Lab) Which frame generation (NVIDIA DLSS on RTX only) and a frame rate cap
+    $c.fgType = & $combo $g 250 14 136
+    foreach ($k in $script:KlbfFgTypes.Keys) { if ($c.rtx -or $k -eq 'fsr') { [void]$c.fgType.Items.Add($script:KlbfFgTypes[$k]) } }
+    $c.tips.SetToolTip($c.fgType, 'NVIDIA DLSS x2 needs an RTX 40 or 50, x3 and more an RTX 50 (the game asks for no more than the driver makes). AMD FSR x2 runs everywhere.')
+    $c.fpsCap = & $combo $g 392 14 82
+    foreach ($v in 'No cap', '30 fps', '40 fps', '60 fps') { [void]$c.fpsCap.Items.Add($v) }
+    $c.tips.SetToolTip($c.fpsCap, 'Frame rate cap: steadier frame pacing (30, 40 or 60 frames a second at most).')
     $c.optionsGroup = $g
     $c.adv = New-Object System.Windows.Forms.CheckBox
     $c.adv.Text = 'Advanced: memory hooks and texture trim (faster, uses less RAM)'
@@ -1605,10 +1653,11 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $fCopy = ${function:Copy-KlbfSave}; $fSaveName = ${function:Get-KlbfSaveName}; $fReport = ${function:Get-KlbfBugReport}; $fLog = ${function:Get-KlbfLatestLog}
     $fGamePath = ${function:Set-KlbfGamePath}; $fGuide = ${function:Show-KlbfBenchGuide}; $repo = $script:KlbfRepo; $backupDir = Get-KlbfBackupDir
     $update = { & $fUpdate $c }.GetNewClosure()
-    foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle)) { $r.add_CheckedChanged($update) }
+    foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle, $c.upDlss)) { $r.add_CheckedChanged($update) }
     $fMark = ${function:Update-KlbfProfileMark}; $fKey = ${function:Get-KlbfProfileKey}
     $markIt = { & $fMark $c }.GetNewClosure()
-    foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle, $c.fg, $c.adv) + @($c.presets.Values)) { $r.add_CheckedChanged($markIt) }
+    foreach ($r in @($c.profX, $c.profS, $c.upFsr, $c.upTitle, $c.upDlss, $c.fg, $c.adv) + @($c.presets.Values)) { $r.add_CheckedChanged($markIt) }
+    $c.fgType.add_SelectedIndexChanged($markIt); $c.fpsCap.add_SelectedIndexChanged($markIt)
     $c.output.add_SelectedIndexChanged($markIt)
     $c.output.add_SelectedIndexChanged($update)
     $fCentre = ${function:Get-KlbfCentre}
@@ -1836,7 +1885,7 @@ function Set-KlbfShotsPath($c, [string]$Path) {
 
 # What a saved profile holds of a choice, to compare (the game and screenshot folders apart).
 function Get-KlbfProfileKey($Choice) {
-    ($Choice.profile, $Choice.upscaler, $Choice.preset, $Choice.output, $Choice.frameGen, $Choice.advanced) -join '|'
+    ($Choice.profile, $Choice.upscaler, $Choice.preset, $Choice.output, $Choice.frameGen, $Choice.advanced, $Choice.fgType, $Choice.fpsCap) -join '|'
 }
 
 # The loaded profile's entry in the list: "name", or "name *" when the settings differ from it.
@@ -1851,7 +1900,11 @@ function Update-KlbfProfileMark($c) {
 function Set-KlbfFormChoice($c, $Choice) {
     if ($Choice.game) { Set-KlbfGamePath $c $Choice.game }
     $c.profX.Checked = $Choice.profile -ne 'S'; $c.profS.Checked = $Choice.profile -eq 'S'
-    $c.upFsr.Checked = $Choice.upscaler -ne 'title'; $c.upTitle.Checked = $Choice.upscaler -eq 'title'
+    # (KLBF Lab) DLSS saved on a PC without an RTX card: AMD FSR
+    $dlss = $Choice.upscaler -eq 'dlss' -and $c.rtx
+    $c.upFsr.Checked = $Choice.upscaler -ne 'title' -and -not $dlss; $c.upTitle.Checked = $Choice.upscaler -eq 'title'; $c.upDlss.Checked = $dlss
+    $c.fgType.SelectedIndex = [math]::Max(0, $c.fgType.Items.IndexOf($script:KlbfFgTypes[$Choice.fgType]))
+    $c.fpsCap.SelectedIndex = [math]::Max(0, @(0, 30, 40, 60).IndexOf([int]$Choice.fpsCap))
     $c.presets[$Choice.preset].Checked = $true
     $c.output.SelectedIndex = $c.output.Items.IndexOf($Choice.output)
     $c.fg.Checked = $Choice.frameGen; $c.adv.Checked = $Choice.advanced
@@ -1865,7 +1918,9 @@ function Set-KlbfFormChoice($c, $Choice) {
 function Get-KlbfFormChoice($c) {
     ConvertTo-KlbfChoice ([pscustomobject]@{
         profile = $(if ($c.profS.Checked) { 'S' } else { 'X' })
-        upscaler = $(if ($c.upTitle.Checked) { 'title' } else { 'fsr' })
+        upscaler = $(if ($c.upTitle.Checked) { 'title' } elseif ($c.upDlss.Checked) { 'dlss' } else { 'fsr' })
+        fgType = @($script:KlbfFgTypes.Keys | Where-Object { $script:KlbfFgTypes[$_] -eq [string]$c.fgType.SelectedItem })[0]
+        fpsCap = @(0, 30, 40, 60)[[math]::Max(0, $c.fpsCap.SelectedIndex)]
         preset = @($c.presets.Keys | Where-Object { $c.presets[$_].Checked })[0]
         output = [string]$c.output.SelectedItem
         frameGen = [bool]$c.fg.Checked
@@ -1893,16 +1948,16 @@ function Get-KlbfOutputNote([bool]$ProfileS, [string]$Output, [string]$Screen) {
 # What applies to what: Profile S has the title's FSR, render size and output; frame generation needs FSR.
 function Update-KlbfForm($c) {
     $s = $c.profS.Checked
-    $fsr = $s -or $c.upFsr.Checked
-    $c.upFsr.Enabled = -not $s; $c.upTitle.Enabled = -not $s
+    $fsr = $s -or $c.upFsr.Checked -or $c.upDlss.Checked
+    $c.upFsr.Enabled = -not $s; $c.upTitle.Enabled = -not $s; $c.upDlss.Enabled = -not $s -and $c.rtx
     foreach ($k in $c.presets.Keys) { $c.presets[$k].Enabled = -not $s -and $fsr }
     $c.output.Enabled = -not $s
     $c.outputNote.Text = Get-KlbfOutputNote $s ([string]$c.output.SelectedItem) $(if ($c.display.SelectedIndex -ge 0) { $m = @($c.screens)[$c.display.SelectedIndex]; if (-not $m) { '' } elseif ($m.mode) { $m.mode } else { $m.bounds } } else { '' })
-    $c.fg.Enabled = $fsr
+    $c.fg.Enabled = $fsr; $c.fgType.Enabled = $fsr
     # (27/11) A control greyed by a rule says why, beside it and in a tooltip (a greyed control shows no
     # tooltip of its own: its group's says it too).
     $why = @{ fg = $(if (-not $fsr) { 'needs AMD FSR' } else { '' }); preset = $(if ($s) { 'set by the game in Profile S' } elseif (-not $fsr) { 'needs AMD FSR' } else { '' }) }
-    $c.fg.Text = if ($why.fg) { "Frame generation (FG x2) - $($why.fg)" } else { $c.fgText }
+    $c.fg.Text = if ($why.fg) { "Frame generation - $($why.fg)" } else { $c.fgText }
     $c.presetLabel.Text = if ($why.preset) { "$($c.presetText) - $($why.preset):" } else { "$($c.presetText):" }
     $c.tips.SetToolTip($c.optionsGroup, $(if ($why.fg) { 'Frame generation is fed by the AMD FSR upscale: pick AMD FSR to use it.' } else { '' }))
     $c.tips.SetToolTip($c.upscalerGroup, $(if ($s) { 'Profile S: the game sets its own upscaler, render size and output.' } elseif ($why.preset) { 'The presets are AMD FSR''s: pick AMD FSR to choose one.' } else { '' }))

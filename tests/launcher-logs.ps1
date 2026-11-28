@@ -80,6 +80,12 @@ try {
     Check 'new pipelines written down: made at the next start' (Test-KlbfWarmNeeded $bookC (Get-KlbfWarmMark $cache))
     $play = Get-KlbfSwitches (Get-KlbfDefaults); $bench = Get-KlbfBenchSwitches (Get-KlbfDefaults) 'someone'
     Check 'the bench translates as Play does (same settings but -Bench)' ((@($bench.Keys | Where-Object { $_ -notin 'Bench', 'BenchPlayer' }) -join ',') -eq (@($play.Keys) -join ','))
+    # (KLBF Lab) NVIDIA DLSS: off by default; picked, it rides the FSR path, its frame generation replaces AMD's
+    Check 'defaults: no DLSS, no cap' (-not $play.Contains('Dlss') -and -not $play.Contains('DlssFrames') -and -not $play.Contains('FpsCap'))
+    $nv = ConvertTo-KlbfChoice ([pscustomobject]@{ upscaler = 'dlss'; fgType = 'dlss4'; fpsCap = 40; frameGen = $true })
+    $sw = Get-KlbfSwitches $nv
+    Check 'DLSS: FSR path, DLSS x4, cap 40' ($sw.FsrX -and $sw.Dlss -and $sw.DlssFrames -eq 4 -and -not $sw.Contains('FrameGen') -and $sw.FpsCap -eq 40)
+    Check 'unknown frame generation kind and cap: the defaults' ((ConvertTo-KlbfChoice ([pscustomobject]@{ fgType = 'dlss9'; fpsCap = 45 })).fgType -eq 'fsr')
 
     # (27/11) A failed start is never silent: play.ps1 stopped early (no game folder) writes launcher-error.txt
     # with what helps, says it and exits 3
