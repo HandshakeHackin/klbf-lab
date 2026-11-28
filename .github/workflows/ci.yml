@@ -1,33 +1,35 @@
-name: CI
-
+name: Compare the proposed Proton helper parser with the native Windows compiler
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/rdna2-static-sampler-defaults']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  native:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
+        with:
+          ref: e28c1c59dc0ee31a098f89aa26990aeb53d3d1ac
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - name: Demonstrate descriptor mismatch on original PR 152
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_name=rootstring::tests::static_sampler_defaults_match_the_native_hlsl_compiler
+          if cargo test --locked -p victory-gpu --lib "$test_name" -- --exact --nocapture > baseline.txt 2>&1; then
+            cat baseline.txt
+            exit 1
+          fi
+          tail -n 30 baseline.txt
+          grep -F 'parser comparison/border' baseline.txt
+          grep -F 'test result: FAILED. 0 passed; 1 failed;' baseline.txt
+      - name: Check the two corrected defaults against the native result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin d9353ecc271fa6df00f18f4f6602b642269b8e3a
+          git restore --source=FETCH_HEAD -- crates/victory-gpu/src/rootstring.rs
+          cargo test --locked -p victory-gpu --lib rootstring::tests:: -- --nocapture
