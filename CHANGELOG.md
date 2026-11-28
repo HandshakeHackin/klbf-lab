@@ -13,6 +13,7 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
   none of its switches was on by default. The earlier Op-lite base stays.
 
 ### Launcher
+- Clear shader cache no longer freezes the window: the cache is moved aside at once and deleted in the background.
 - Quick tab: Copy JSON beside Copy summary, the full result file for the results form (HandshakeHackin, #161).
 - First start: the built-in (console) upscaler by default instead of AMD FSR, which can flash black planes from
   the character on water and in low sun. AMD FSR and NVIDIA DLSS stay one click away; a saved choice is kept.

@@ -616,11 +616,17 @@ function Clear-KlbfShaderCache([string]$Cache) {
     $d = Get-KlbfCacheDir $Cache
     if (-not (Test-Path -LiteralPath $d -PathType Container) -or (Split-Path -Leaf $d) -ne 'cache') { throw 'Not a KLBF Lab cache folder: nothing deleted.' }
     $keep = Join-Path $d 'pipelines\known-pipelines.bin'
+    # (v26.11.6) Moved aside first (a rename on the same drive: instant), then deleted by a hidden process,
+    # so the window never freezes on a cache of many GB.
+    $trash = Join-Path (Split-Path -Parent $d) ('cache-cleared-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Path $trash -Force | Out-Null
     foreach ($i in (Get-ChildItem -LiteralPath $d -Force)) {
         if ($i.Name -eq 'pipelines' -and (Test-Path -LiteralPath $keep)) {
-            Get-ChildItem -LiteralPath $i.FullName -Force | Where-Object Name -ne 'known-pipelines.bin' | Remove-Item -Recurse -Force
-        } else { Remove-Item -LiteralPath $i.FullName -Recurse -Force }
+            $tp = New-Item -ItemType Directory -Path (Join-Path $trash 'pipelines') -Force
+            Get-ChildItem -LiteralPath $i.FullName -Force | Where-Object Name -ne 'known-pipelines.bin' | Move-Item -Destination $tp.FullName -Force
+        } else { Move-Item -LiteralPath $i.FullName -Destination $trash -Force }
     }
+    Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', 'rd', '/s', '/q', "`"$trash`"" -WindowStyle Hidden
 }
 
 function Get-KlbfSpace([string]$Cache) {
