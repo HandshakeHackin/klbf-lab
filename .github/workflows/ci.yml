@@ -1,33 +1,67 @@
-name: CI
-
+name: Verify release depth-bound pixels on WARP
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/v26.11.5-bounds-only-depth']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
-    runs-on: windows-latest
-    timeout-minutes: 60
+  depth-bounds:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
+        with:
+          fetch-depth: 3
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - name: Require a device, shader compiler and depth-bounds support
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("crates/victory-gpu/src/pipeline/host.rs")
+          s = p.read_text()
+          a = s.index("fn depth_bounds_pipeline_loads_and_filters_draws()")
+          b = s.index("let (root, root_blob)", a)
+          pre = s[a:b]
+          assert pre.count("return;") == 3
+          assert '"vs_6_0"' in pre and '"ps_6_0"' in pre
+          p.write_text(s[:a] + pre.replace("return;", 'panic!("required depth fixture unavailable");') + s[b:])
+      - name: Run descriptor assertions and two pixel readbacks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p victory-gpu --lib pipeline::host::tests::bounds_only_reads_depth_without_enabling_writes -- --exact --nocapture
+          cargo test --locked -p victory-gpu --lib pipeline::host::tests::depth_bounds_pipeline_loads_and_filters_draws -- --exact --nocapture
+      - name: Restore release production code, retaining exactly the same test and required capabilities
+        shell: python
+        run: |
+          from pathlib import Path
+          from subprocess import check_output
+          name = "crates/victory-gpu/src/pipeline/host.rs"
+          marker = "#[cfg(test)]\nmod tests {"
+          p = Path(name)
+          old = check_output(["git", "show", "6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088:" + name]).decode().replace("\r\n","\n")
+          new = p.read_text()
+          assert old.count(marker) == new.count(marker) == 1
+          tail = new.split(marker, 1)[1]
+          # Keep the pixel test. The new descriptor unit test calls the patched private helper.
+          assert tail.count("fn bounds_only_reads_depth_without_enabling_writes()") == 1
+          start = tail.index("    #[test]\n    fn bounds_only_reads_depth_without_enabling_writes()")
+          end = tail.index("    /// A graphics pipeline with", start)
+          p.write_text(old.split(marker, 1)[0] + marker + tail[:start] + tail[end:])
+      - name: Require the unpatched out-of-bounds pixel to be 255
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo test --locked -p victory-gpu --lib pipeline::host::tests::depth_bounds_pipeline_loads_and_filters_draws -- --exact --nocapture > "$RUNNER_TEMP/control.txt" 2>&1; then
+            cat "$RUNNER_TEMP/control.txt"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/control.txt"
+          grep -F 'outside [0.6, 1.0] must be rejected' "$RUNNER_TEMP/control.txt"
+          grep -F 'left: 255' "$RUNNER_TEMP/control.txt"
+          grep -F 'right: 0' "$RUNNER_TEMP/control.txt"
