@@ -10,6 +10,9 @@
 //! written yet log once with their caller, so a run lists what to do next.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::mem::offset_of;
 
 use crate::object::{
@@ -161,7 +164,11 @@ fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::dra
     let started = crate::copystep::list_meter().then(std::time::Instant::now);
     // SAFETY: the title passes one of our lists.
     let state = unsafe { &(*this.cast::<List>()).state };
-    f(list, &mut state.lock().unwrap_or_else(|e| e.into_inner()));
+    #[cfg(feature = "diagnostics")]
+    crate::drawmeter::call_begins();
+    f(list, &mut crate::drawmeter::lock(crate::drawmeter::L::ListState, state));
+    #[cfg(feature = "diagnostics")]
+    crate::drawmeter::call_ends();
     #[cfg(feature = "diagnostics")]
     if let Some(started) = started {
         crate::copystep::list_call(at, started.elapsed().as_nanos() as u64);
@@ -222,7 +229,16 @@ pub(crate) fn host_list<'a>(this: This) -> Option<&'a crate::host::HostList> {
         return None;
     }
     // SAFETY: the title passes one of our lists.
-    unsafe { (*this.cast::<List>()).host.as_ref() }
+    let host = unsafe { (*this.cast::<List>()).host.as_ref() };
+    // (VICTORY_LISTS_OPEN) Counted: a list left open and recorded into
+    // before the reset is closed and reset as before.
+    #[cfg(windows)]
+    if let Some(host) = host
+        && crate::host::lists_open()
+    {
+        host.title_call();
+    }
+    host
 }
 
 /// The host side of a submitted list, taken from it: a queue that waits
@@ -553,14 +569,16 @@ pub(crate) fn detach_parts(lists: &[This]) -> Parts {
             continue;
         };
         // A new host list is open; the title's next call on its list is a
-        // reset, which wants it closed.
-        fresh.close();
+        // reset, which finds it so (VICTORY_LISTS_OPEN=1) or wants it closed.
+        fresh.leave_open();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
         let list = unsafe { &mut *this.cast_mut().cast::<List>() };
         let Some(host) = list.host.replace(fresh) else {
             continue;
         };
+        // (Submitted again without a reset: it runs closed, empty.)
+        host.close_if_left_open();
         let earlier = std::mem::take(&mut list.earlier);
         let gate = std::mem::take(&mut list.gate);
         let uploads = std::mem::take(&mut *list.uploads.lock().unwrap_or_else(|e| e.into_inner()));
@@ -625,8 +643,8 @@ pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
             continue;
         };
         // A new host list is open; the title's next call on its list is a
-        // reset, which wants it closed.
-        fresh.close();
+        // reset, which finds it so (VICTORY_LISTS_OPEN=1) or wants it closed.
+        fresh.leave_open();
         let list = this.cast_mut().cast::<List>();
         // SAFETY: one of our lists, closed and submitted: nothing records
         // into it until the title resets it.
@@ -634,6 +652,8 @@ pub(crate) fn detach(lists: &[This]) -> (Vec<Detached>, Vec<usize>) {
             let Some(host) = (*list).host.replace(fresh) else {
                 continue;
             };
+            // (Submitted again without a reset: it runs closed, empty.)
+            host.close_if_left_open();
             let uploads =
                 std::mem::take(&mut *(*list).uploads.lock().unwrap_or_else(|e| e.into_inner()));
             let state =
@@ -831,9 +851,13 @@ extern "system" fn reset(this: This, allocator: This, pipeline: This) -> HRESULT
         list.earlier.clear();
         list.gate.clear();
     }
+    // (VICTORY_LISTS_OPEN) Asked before the lookup below, which counts.
+    #[cfg(windows)]
+    // SAFETY: the title passes one of our lists.
+    let left_open = unsafe { (*this.cast::<List>()).host.as_ref() }.is_some_and(|h| h.still_left_open());
     #[cfg(windows)]
     with_state(this, |host, state| {
-        host.reset();
+        host.reset_as(left_open);
         state.reset(pipeline);
     });
     crate::pipeline::bound(pipeline);
@@ -947,6 +971,8 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::WaitsForBuffers, 1);
         }
+        #[cfg(feature = "diagnostics")]
+        crate::drawmeter::title_barriers(count, host.len(), host.last().is_some_and(|b| b.kind == UAV_BARRIER.kind && b.first.is_null()));
         if !host.is_empty() {
             use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_BARRIER;
             const _: () = assert!(size_of::<Barrier>() == size_of::<D3D12_RESOURCE_BARRIER>());
@@ -959,7 +985,7 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
                 )
             };
             // SAFETY: an open list and live resources.
-            unsafe { list.list.ResourceBarrier(host) };
+            unsafe { list.list.barriers_counted(host) };
         }
     }
     0
@@ -973,7 +999,7 @@ pub(crate) fn ensure_state(list: &crate::host::HostList, resource: This, state: 
         let state = crate::host::legal_state(texture, state);
         let barrier = crate::host::transition(texture, State(before as i32), State(state as i32));
         // SAFETY: an open list and a live texture.
-        unsafe { list.list.ResourceBarrier(&[barrier]) };
+        unsafe { list.list.barriers_counted(&[barrier]) };
     }
 }
 
@@ -1539,7 +1565,7 @@ extern "system" fn clear_rtv(
         unsafe {
             if let Some((_, before)) = list.transition(record.resource, RENDER_TARGET) {
                 use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_STATES as State;
-                list.list.ResourceBarrier(&[crate::host::transition(
+                list.list.barriers_counted(&[crate::host::transition(
                     texture,
                     State(before as i32),
                     State(RENDER_TARGET as i32),
@@ -1753,7 +1779,7 @@ extern "system" fn sync(this: This, flags: u32, control: u32, address: u64, size
             // SAFETY: the same layout; no resource named.
             let barrier = unsafe { std::mem::transmute::<Barrier, D3D12_RESOURCE_BARRIER>(UAV_BARRIER) };
             // SAFETY: an open list.
-            unsafe { list.list.ResourceBarrier(&[barrier]) };
+            unsafe { list.list.barriers_counted(&[barrier]) };
         }
     }
     let _ = (this, flags, control, address, size);
@@ -2332,7 +2358,7 @@ extern "system" fn barrier_groups(this: This, count: u32, _groups: *const u8) {
         // SAFETY: the same layout; no resource named.
         let barrier = unsafe { std::mem::transmute::<Barrier, D3D12_RESOURCE_BARRIER>(UAV_BARRIER) };
         // SAFETY: an open list.
-        unsafe { list.list.ResourceBarrier(&[barrier]) };
+        unsafe { list.list.barriers_counted(&[barrier]) };
     }
     #[cfg(not(windows))]
     let _ = (this, count);

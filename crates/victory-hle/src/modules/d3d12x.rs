@@ -48,6 +48,21 @@ fn host_gpu_failed(what: &str) -> ! {
     unreachable!("the process has ended")
 }
 
+/// (CGBJ main) The `victory shaders` pass writes the precompiled pipelines' index
+/// (`victory_gpu::precompiled`).
+pub fn record_precompiled_on() {
+    #[cfg(windows)]
+    victory_gpu::precompiled::record_on();
+}
+
+/// (CGBJ main) Notes `container`'s programs in the precompiled pipelines' index.
+pub fn record_precompiled(container: &[u8]) {
+    #[cfg(windows)]
+    victory_gpu::precompiled::record(container);
+    #[cfg(not(windows))]
+    let _ = container;
+}
+
 /// Translates `container` into the cache ([`use_shader_cache`]) ahead of
 /// any run: whether it was there already, or why it does not translate.
 pub fn precompile(container: &[u8]) -> Result<bool, String> {
@@ -83,6 +98,7 @@ pub fn use_shader_cache(dir: std::path::PathBuf) {
     #[cfg(windows)]
     {
         victory_gpu::pipeline::use_pipeline_cache(dir.with_file_name("pipelines"));
+        victory_gpu::precompiled::use_precompiled(dir.with_file_name("precompiled"));
         victory_gpu::shader_cache::use_shader_cache(dir);
     }
     #[cfg(not(windows))]

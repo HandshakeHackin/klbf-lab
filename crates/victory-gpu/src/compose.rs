@@ -2,6 +2,9 @@
 //! (the interface) over the first (the scene), each scaled to the screen.
 //! Grand Theft Auto VI presents so on Series S.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
@@ -281,7 +284,7 @@ mod tests {
                 };
                 cmds.ClearRenderTargetView(overlay_rtv, color, Some(&[rect]));
             }
-            cmds.ResourceBarrier(&[
+            cmds.barriers_counted(&[
                 crate::host::transition(&base, target, read),
                 crate::host::transition(&overlay, target, read),
             ]);
@@ -295,7 +298,7 @@ mod tests {
                     (3, 1),
                 )
                 .unwrap();
-            cmds.ResourceBarrier(&[crate::host::transition(
+            cmds.barriers_counted(&[crate::host::transition(
                 &output,
                 target,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,

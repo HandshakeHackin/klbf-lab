@@ -418,6 +418,7 @@ mod tests {
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
             table_reads: None,
+            wave: Default::default(),
         };
         (
             host(crate::native::HwStage::Vs, vs),

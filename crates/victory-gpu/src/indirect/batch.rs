@@ -12,6 +12,9 @@
 //! What the records charge the list's budget is as for records clamped
 //! alone, times the executions that read them.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use windows::Win32::Graphics::Direct3D12::*;
 
 use super::{Clamp, uav_barrier};
@@ -88,6 +91,12 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
             cost = record[0] * record[1];
         } else if (kind == 2) {
             uint3 g = uint3(record[0], record[1], record[2]);
+            // Diagnostics: records that ask for more than 65,535 groups in a dimension.
+            if (max(g.x, max(g.y, g.z)) > 65535u && g.x * g.y <= GROUPS) {
+                uint was;
+                budget.InterlockedAdd(20, 1, was);
+                budget.InterlockedMax(24, max(g.x, max(g.y, g.z)), was);
+            }
             g = min(g, uint3(g.x <= WIDEST ? WIDEST : 65535u, 65535u, 65535u));
             if ((g.y != 0 && g.x > GROUPS / g.y) || (g.z != 0 && g.x * g.y > GROUPS / g.z)) {
                 g = uint3(0, 0, 0);
@@ -280,7 +289,7 @@ pub(super) fn record(
     // SAFETY: an open list; our root signature and pipeline; live buffers:
     // the sources and the table are read in the common state (promoted).
     unsafe {
-        l.ResourceBarrier(&[
+        l.barriers_counted(&[
             uav_barrier(),
             transition(dst, before, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
         ]);
@@ -295,6 +304,6 @@ pub(super) fn record(
         l.Dispatch(JOBS.div_ceil(64), 1, 1);
         // Nothing else the pass writes is read before the next full wait
         // (the budget, by the next pass): only the records have to be there.
-        l.ResourceBarrier(&[after]);
+        l.barriers_counted(&[after]);
     }
 }

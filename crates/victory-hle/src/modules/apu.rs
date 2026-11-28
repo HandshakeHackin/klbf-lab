@@ -12,6 +12,7 @@ use std::alloc::Layout;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 use opus_pure::OpusDecoder;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -273,8 +274,13 @@ pub extern "system" fn XApuEnqueueCommand(
     match id.kind {
         ACTIVATE => {
             // SAFETY: an activate command is this struct.
-            let channels = unsafe { command.cast::<Activate>().read_unaligned() }.channels;
+            let activate = unsafe { command.cast::<Activate>().read_unaligned() };
+            let (channels, start_pitch) = (activate.channels, activate.start_pitch);
             tracing::debug!(stream, channels, "Opus stream activated");
+            ACTIVATES.fetch_add(1, Relaxed);
+            once_per(&SEEN_ACTIVATE, (u64::from(channels) << 32) | u64::from(start_pitch.to_bits()), || {
+                tracing::debug!(stream, channels, start_pitch, "Opus: first activate with these channels / start pitch")
+            });
             result.error = if decoder.is_some() {
                 ALREADY_ACTIVE
             } else if !(1..=2).contains(&channels) {
@@ -299,13 +305,32 @@ pub extern "system" fn XApuEnqueueCommand(
         PROCESS => {
             // SAFETY: a process command is this struct.
             let command = unsafe { command.cast::<Process>().read_unaligned() };
+            PROCESSES.fetch_add(1, Relaxed);
+            let (ramp, target) = (command.pitch_ramp, command.target_pitch);
+            once_per(&SEEN_PITCH, (u64::from(target.to_bits()) << 32) | u64::from((ramp != 0.0) as u32), || {
+                tracing::debug!(stream, target_pitch = target, pitch_ramp = ramp, "Opus: first process with this target pitch")
+            });
             match decoder {
                 Some(d) => process(d, connection.options, &command, &mut result),
                 None => result.error = INVALID_STREAM,
             }
+            if opus_result() {
+                // As scarlettport's independent implementation: output ready, more input wanted; the pitch asked.
+                result.state = 1 | 2;
+                result.pitch = target;
+                RESULT_SET.fetch_add(1, Relaxed);
+            }
         }
         _ => return INVALID_COMMAND,
     }
+    if result.error != S_OK {
+        ERRORS.fetch_add(1, Relaxed);
+        let (error, kind) = (result.error, id.kind);
+        once_per(&SEEN_ERROR, error as u32 as u64, || {
+            tracing::debug!(error = format_args!("{:#x}", error as u32), kind, stream, "Opus: first result with this error")
+        });
+    }
+    every_5s();
     state.queued[stream] += 1;
     state.commands = state.commands.wrapping_add(1);
     state.results.push_back(result);
@@ -369,6 +394,66 @@ fn process(decoder: &mut OpusDecoder, options: u32, command: &Process, result: &
     }
     result.frames = frames as u32;
     result.output_length = bytes as u32;
+    FRAMES_OUT.fetch_add(frames as u64, Relaxed);
+    let peak = kept.iter().fold(0f32, |m, &x| m.max(x.abs()));
+    PEAK.fetch_max(peak.to_bits(), Relaxed);
+}
+
+/// `VICTORY_OPUS_RESULT=1` (off by default): process results say "output
+/// ready, more input wanted" (`state = 1|2`) and echo the command's target
+/// pitch, instead of state 0 and pitch 1.0.
+fn opus_result() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("VICTORY_OPUS_RESULT").is_ok_and(|v| v == "1");
+        if on {
+            tracing::info!("VICTORY_OPUS_RESULT: Opus process results report state 1|2 and the target pitch");
+        }
+        on
+    })
+}
+
+static ACTIVATES: AtomicU64 = AtomicU64::new(0);
+static PROCESSES: AtomicU64 = AtomicU64::new(0);
+static ERRORS: AtomicU64 = AtomicU64::new(0);
+static FRAMES_OUT: AtomicU64 = AtomicU64::new(0);
+static RESULT_SET: AtomicU64 = AtomicU64::new(0);
+/// The largest absolute sample decoded, as f32 bits (non-negative floats order as their bits).
+static PEAK: AtomicU32 = AtomicU32::new(0);
+static SEEN_ACTIVATE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static SEEN_PITCH: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static SEEN_ERROR: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// `say` the first time `key` is seen (at most 64 keys kept).
+fn once_per(seen: &Mutex<Vec<u64>>, key: u64, say: impl FnOnce()) {
+    let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+    if !seen.contains(&key) && seen.len() < 64 {
+        seen.push(key);
+        say();
+    }
+}
+
+/// A line of the counters every 5 seconds while commands come.
+fn every_5s() {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    match *last {
+        Some(t) if now.duration_since(t).as_secs() < 5 => {}
+        Some(_) => {
+            *last = Some(now);
+            tracing::debug!(
+                activates = ACTIVATES.load(Relaxed),
+                processes = PROCESSES.load(Relaxed),
+                frames_out = FRAMES_OUT.load(Relaxed),
+                errors = ERRORS.load(Relaxed),
+                results_set = RESULT_SET.load(Relaxed),
+                peak = f32::from_bits(PEAK.swap(0, Relaxed)),
+                "Opus: 5 s counters (totals; peak since the last line)"
+            );
+        }
+        None => *last = Some(now),
+    }
 }
 
 pub extern "system" fn XApuDequeueResult(handle: *mut Connection, out: *mut ApuResult) -> HRESULT {

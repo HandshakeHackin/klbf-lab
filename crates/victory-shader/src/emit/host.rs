@@ -614,6 +614,7 @@ fn stub(pixel: bool, outputs: Vec<SigElement>) -> HostShader {
         root_indexed_views: Vec::new(),
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     }
 }
 

@@ -77,3 +77,11 @@ debug = "line-tables-only"
 # kept in its own folder so it does not evict the plain release build.
 [profile.diag]
 inherits = "release"
+
+# The diag build with whole-program optimization, for timing runs: one code-generation unit and
+# fat LTO across crates (`cargo build --profile diagfast -p victory --features diagnostics`).
+# No target-cpu=native.
+[profile.diagfast]
+inherits = "diag"
+lto = "fat"
+codegen-units = 1

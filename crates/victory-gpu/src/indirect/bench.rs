@@ -6,6 +6,9 @@
 //! `cargo test -p victory-gpu --release --lib indirect::bench -- --ignored --nocapture`.
 //! It needs no title files: the draws are tiny triangles of ours.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use super::*;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
@@ -414,7 +417,7 @@ fn bench_indirect_draw_barriers() {
                 for k in 0..records {
                     list.ExecuteIndirect(&signature, 1, &scratch, u64::from(k * STEP), None, 0);
                     if barriers == Barriers::Old {
-                        list.ResourceBarrier(&[transition(
+                        list.barriers_counted(&[transition(
                             &scratch,
                             D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
                             D3D12_RESOURCE_STATE_COMMON,
@@ -424,7 +427,7 @@ fn bench_indirect_draw_barriers() {
                 }
             }
             if state != D3D12_RESOURCE_STATE_COMMON {
-                list.ResourceBarrier(&[transition(&scratch, state, D3D12_RESOURCE_STATE_COMMON)]);
+                list.barriers_counted(&[transition(&scratch, state, D3D12_RESOURCE_STATE_COMMON)]);
             }
             list.EndQuery(&stamps, D3D12_QUERY_TYPE_TIMESTAMP, 1);
             list.ResolveQueryData(&stamps, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, &back, 0);

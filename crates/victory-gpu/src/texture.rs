@@ -15,6 +15,9 @@
 //! (directly indexed views are not known per draw); plane 0 is uploaded
 //! (every mip and array slice), depth and stencil planes are not.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 pub(crate) mod ahead;
 pub(crate) mod cause;
 pub(crate) mod delta;
@@ -314,7 +317,7 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
             D3D12_RESOURCE_STATES(state as i32),
         );
         // SAFETY: an open list and a live texture.
-        unsafe { list.list.ResourceBarrier(&[barrier]) };
+        unsafe { list.list.barriers_counted(&[barrier]) };
         before
     });
     if !new_source && before.is_none() {
@@ -349,19 +352,19 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
     // the footprints and rests in the common state between copies.
     unsafe {
         list.list
-            .ResourceBarrier(&[crate::host::transition(&through.buffer, common, written)]);
+            .barriers_counted(&[crate::host::transition(&through.buffer, common, written)]);
         for (index, (of_written, _)) in through.parts.iter().enumerate() {
             list.list
                 .CopyTextureRegion(&rows(of_written), 0, 0, 0, &part(from, index), None);
         }
         list.list
-            .ResourceBarrier(&[crate::host::transition(&through.buffer, written, read)]);
+            .barriers_counted(&[crate::host::transition(&through.buffer, written, read)]);
         for (index, (_, of_read)) in through.parts.iter().enumerate() {
             list.list
                 .CopyTextureRegion(&part(to, index), 0, 0, 0, &rows(of_read), None);
         }
         list.list
-            .ResourceBarrier(&[crate::host::transition(&through.buffer, read, common)]);
+            .barriers_counted(&[crate::host::transition(&through.buffer, read, common)]);
     }
     list.keep(&through.buffer);
     // A draw that also writes the source (a view of it handled before
@@ -640,6 +643,16 @@ pub(crate) fn placed_in_host_written(address: u64, desc: &[u32; 14]) {
     }
 }
 
+/// (`texrecheck` diagnostics) A texture the host copied into whose title
+/// memory holds `address`: its start, bytes, width, height, format.
+pub(crate) fn host_written_cover(address: u64) -> Option<(u64, u64, u32, u32, u32)> {
+    let map = HOST_WRITTEN_AT.lock().unwrap_or_else(|e| e.into_inner());
+    map.range(..=address)
+        .next_back()
+        .filter(|(at, d)| address < **at + d.0)
+        .map(|(at, d)| (*at, d.0, d.1, d.2, d.4))
+}
+
 /// Whether the host GPU wrote `resource` by a copy or resolve
 /// ([`host_written`]): its host copy cannot be made again from title
 /// memory.
@@ -769,7 +782,7 @@ pub(crate) fn digest(bytes: &[u8]) -> Digest {
 
 /// See [`digest`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Digest(u128);
+pub(crate) struct Digest(pub(crate) u128);
 
 /// [`upload`] of the levels from `first` on, the ones a view shows: of a
 /// texture the title placed there may be no memory of the larger ones, and
@@ -1020,7 +1033,7 @@ fn record_upload(
             },
         };
         // SAFETY: an open list and a live texture.
-        unsafe { list.list.ResourceBarrier(&[aliasing]) };
+        unsafe { list.list.barriers_counted(&[aliasing]) };
     }
     crate::list::ensure_state(list, resource, COPY_DEST);
     // The staging/plane upload buffer lives until the list is reset.

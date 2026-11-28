@@ -721,19 +721,40 @@ fn scheduler() -> Option<&'static Scheduler> {
         .as_ref()?;
     STARTED.call_once(|| {
         let workers = worker_count();
+        // (foxhound 454ffea) `VICTORY_DSTORAGE_PRIORITY=<-2..2>`: the workers' thread priority
+        // (0 or unset: normal, as before; foxhound's default is -1). While a scene streams in,
+        // all of them unpack at once; foxhound measured the threads a frame waits for standing
+        // "woken, not running yet" for 9.5 ms of each frame's chain (a crowded cutscene, 16
+        // workers of 10 ms a frame each). Below normal they take the processors no thread of
+        // the frame wants; the process runs above normal, so they still come before other
+        // programs' threads. The loading meters show whether unpacking keeps up.
+        let priority = std::env::var("VICTORY_DSTORAGE_PRIORITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .map_or(0, |p| p.clamp(-2, 2));
+        PRIORITY.store(priority, Ordering::Relaxed);
         let started = (0..workers)
             .filter(|i| {
                 std::thread::Builder::new()
                     .name(format!("dstorage {i}"))
-                    .spawn(|| work(scheduler))
+                    .spawn(move || {
+                        #[cfg(windows)]
+                        if priority != 0 {
+                            use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
+                            // SAFETY: this thread's own priority.
+                            unsafe { SetThreadPriority(GetCurrentThread(), priority) };
+                        }
+                        work(scheduler)
+                    })
                     .is_ok()
             })
             .count();
         tracing::info!(
             workers = started,
+            priority,
             logical = std::thread::available_parallelism().map_or(0, |n| n.get()),
             oldest_first = oldest_first(),
-            "dstorage: workers (VICTORY_DSTORAGE_WORKERS; physical cores unless set; VICTORY_DSTORAGE_OLDEST_FIRST)"
+            "dstorage: workers (VICTORY_DSTORAGE_WORKERS; physical cores unless set; VICTORY_DSTORAGE_PRIORITY, 0 normal; VICTORY_DSTORAGE_OLDEST_FIRST)"
         );
     });
     Some(scheduler)
@@ -868,6 +889,9 @@ pub(crate) mod stream_log {
 }
 
 /// A worker: runs the next read of the most deserving queue.
+/// The workers' thread priority (`VICTORY_DSTORAGE_PRIORITY`; 0 normal).
+static PRIORITY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 fn work(scheduler: &'static Scheduler) {
     let mut lanes = scheduler.lock();
     loop {
@@ -912,6 +936,21 @@ impl Lanes {
         if elapsed.as_secs() >= 5 {
             let waiting: usize = self.lanes.values().map(|l| l.reads.len()).sum();
             let reading = READING.swap(0, Ordering::Relaxed) as f64 / 1e9;
+            // (shown at info with `VICTORY_DSTORAGE_PRIORITY` set to a priority other than
+            // normal, to see whether unpacking keeps up below it)
+            if PRIORITY.load(Ordering::Relaxed) != 0 {
+                tracing::info!(
+                    requests = *requests,
+                    mb_per_s = format_args!("{:.1}", *bytes as f64 / elapsed.as_secs_f64() / 1e6),
+                    busy_workers = format_args!("{:.2}", busy.as_secs_f64() / elapsed.as_secs_f64()),
+                    reading_workers = format_args!("{:.2}", reading / elapsed.as_secs_f64()),
+                    staging_waits = self.refused,
+                    waiting,
+                    priority = PRIORITY.load(Ordering::Relaxed),
+                    "dstorage: unpacked in the last {:.1} s",
+                    elapsed.as_secs_f64()
+                );
+            }
             tracing::debug!(
                 requests = *requests,
                 mb_per_s = format_args!("{:.1}", *bytes as f64 / elapsed.as_secs_f64() / 1e6),

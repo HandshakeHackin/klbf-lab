@@ -54,6 +54,8 @@ tempfile.workspace = true
 [features]
 # Debugging switches (scripted keys and the like).
 diagnostics = ["victory-gpu/diagnostics", "victory-loader/diagnostics", "dep:windows", "dep:windows-core"]
+# mimalloc as the global allocator (see victory-gpu).
+mimalloc = ["victory-gpu/mimalloc"]
 
 [lints]
 workspace = true

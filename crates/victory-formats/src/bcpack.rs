@@ -717,6 +717,24 @@ const ANCHOR3B: [u8; 64] = [
     15, 15, 15, 15, 15, 15, 15, 3, 15, 15, 8,
 ];
 
+/// The channel rotation of a BC7 block's control word. Only modes 4 and 5 carry a rotation field; in the other
+/// modes bits 3-4 belong to something else, and read as a rotation they swapped alpha with a colour channel.
+/// (Same fix as upstream VIctory #3111; found through ZigZagBoi1/ScarlettPort 01d5cf9, re-written here.)
+fn bc7_rotation(ctrl: u16) -> usize {
+    if matches!(ctrl & 7, 4 | 5) { usize::from(ctrl >> 3 & 3) } else { 0 }
+}
+
+#[cfg(test)]
+mod bc7_rotation_tests {
+    #[test]
+    fn rotation_is_read_only_in_modes_4_and_5() {
+        for mode in 0u16..8 {
+            let ctrl = mode | 2 << 3;
+            assert_eq!(super::bc7_rotation(ctrl), if matches!(mode, 4 | 5) { 2 } else { 0 }, "mode {mode}");
+        }
+    }
+}
+
 /// Endpoint bits of R G B A per mode (public), before p-bits and rotation.
 const BC7_BITS: [[u8; 4]; 8] = [
     [4, 4, 4, 0],
@@ -747,7 +765,7 @@ fn pbits(mode: u16) -> bool {
 /// Channel precisions: the p-bit is red's lowest bit; rotation swaps alpha
 /// with the rotated channel.
 fn bc7_precision(ctrl: u16) -> [u8; 4] {
-    let (mode, rot) = (ctrl & 7, usize::from(ctrl >> 3 & 3));
+    let (mode, rot) = (ctrl & 7, bc7_rotation(ctrl));
     let mut p = BC7_BITS[usize::from(mode)];
     if rot != 0 {
         p.swap(3, rot - 1);
@@ -852,7 +870,7 @@ fn bc7_pack(ep: &Bc7Ep, ix: &Bc7Ix, prec: [u8; 4], out: &mut [u8]) {
     let mode = ctrl & 7;
     let subsets = usize::from((ctrl & 0xff) >> 6);
     let part = usize::from(ctrl >> 8 & 63);
-    let rot = usize::from(ctrl >> 3 & 3);
+    let rot = bc7_rotation(ctrl);
     let mut w = Bits::default();
     w.put(1 << mode, u32::from(mode) + 1);
     match mode {

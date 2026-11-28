@@ -126,13 +126,13 @@ use crate::{ShaderError, io, ir, resource, structure};
 pub use bitcode::census;
 pub use link::{link_mesh, mesh_fits};
 pub use sampler::StaticSampler;
-pub use lower::{host_settings, set_host_max_wave, set_host_rdna};
+pub use lower::{LDS_FIRST_INITS, LOOPS_WAVE_TAKEN, PAIRED_STEPS, host_settings, set_host_max_wave, set_host_rdna};
 pub use lower::{D16_BITS_ACCESSES, D16_VIEW_KIND_ACCESSES, HALVES_PLACES, d16_view_kinds};
 pub use PAIRED_BEFORE_WIDE as WAVE_PAIRED_BEFORE_WIDE;
 pub use rect::rect_list_gs;
 pub use shader::{
     MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES, SLOT_WALK, WALK_SLOTS,
-    SLOT_STRIDES_COUNT, SLOT_TABLE_STRIDES, USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X, USER_NAN_SLOT, USER_BVH_EMPTY, SLOT_NAN, NAN_SLOTS, NAN_ORIGIN_DWORDS, NAN_ORIGINS, USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
+    SLOT_STRIDES_COUNT, SLOT_TABLE_STRIDES, USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X, USER_NAN_SLOT, USER_BVH_EMPTY, USER_GROUP_OFFSET, groups_split, groups_split_mode, SLOT_NAN, NAN_SLOTS, NAN_ORIGIN_DWORDS, NAN_ORIGINS, USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
     raw_views, set_raw_views, set_view_heap_limit, view_heap_limit,
 };
 
@@ -493,6 +493,94 @@ pub struct HostShader {
     /// `u32::MAX` for a table read at a computed place (any of its descriptors). `None`:
     /// not known (a shader made here, a spilled user-data table): every descriptor.
     pub table_reads: Option<Vec<(u8, u32)>>,
+    /// (diagnostics) The form a console wave64 compute program took on a host of 32-lane
+    /// waves ([`WaveForm`]); the default (`form` 0) for every other program.
+    pub wave: WaveForm,
+}
+
+/// The form a console wave64 compute program took on a host of 32-lane waves
+/// ([`wave_form`] names the values), and for an approximate one why the paired form did not
+/// take it instead. Kept with the translation (the shader cache stores it), so that a run
+/// can tell every start which programs run how ([`wave_form::name`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WaveForm {
+    pub form: u8,
+    pub note: String,
+}
+
+/// The values of [`WaveForm::form`].
+pub mod wave_form {
+    /// Not a console wave64 compute program on a host of 32-lane waves.
+    pub const NONE: u8 = 0;
+    /// 32-lane waves as it is (no cross-half code, or what crosses is exchanged as it stands).
+    pub const PLAIN: u8 = 1;
+    /// Without its early-outs (`ir::without_early_outs`): exact.
+    pub const NO_EARLY_OUTS: u8 = 2;
+    /// Without skips no lane is left for (`ir::without_skips`): exact.
+    pub const NO_SKIPS: u8 = 3;
+    /// Without skips the code after cannot see (`ir::without_skips`, deep): exact.
+    pub const DEEP_SKIPS: u8 = 4;
+    /// Each host wave on its own where the wave operations are the allocation idiom: exact.
+    pub const LOCAL_IDIOM: u8 = 5;
+    /// Per-lane branches around the cross-lane code taken wave-wide, two host waves meeting at
+    /// group barriers (`widen`).
+    pub const WIDE: u8 = 6;
+    /// One host wave for each console wave, two lanes a thread (`paired`): exact but for the
+    /// in-step shortcut (`VICTORY_WAVE_PAIRED_STEP=1` leaves that out where a group is one wave).
+    pub const PAIRED: u8 = 7;
+    /// APPROXIMATE: each half-wave its own wave (`lower::with_local_waves`).
+    pub const LOCAL_HALVES: u8 = 8;
+    /// APPROXIMATE: the same, every mask and lane read per half (`with_local_waves_any`).
+    pub const LOCAL_ANY: u8 = 9;
+    /// APPROXIMATE: LDS ordered only where a lane-branch region is entered and left.
+    pub const LOOSE_LDS: u8 = 10;
+    /// APPROXIMATE: loose LDS and every mask per half.
+    pub const LOOSE_LOCAL: u8 = 11;
+    /// A 32-lane console program whose skip is taken wave-wide (a mask's SCC with a scalar test).
+    pub const SKIP_WIDE_32: u8 = 12;
+
+    /// A short name of `form`.
+    pub fn name(form: u8) -> &'static str {
+        match form {
+            NONE => "none",
+            PLAIN => "plain",
+            NO_EARLY_OUTS => "without early-outs",
+            NO_SKIPS => "without skips",
+            DEEP_SKIPS => "without skips (deep)",
+            LOCAL_IDIOM => "local waves (idiom)",
+            WIDE => "wave-wide branches",
+            PAIRED => "paired lanes",
+            LOCAL_HALVES => "APPROXIMATE local waves",
+            LOCAL_ANY => "APPROXIMATE local waves, any mask",
+            LOOSE_LDS => "APPROXIMATE loose LDS",
+            LOOSE_LOCAL => "APPROXIMATE loose LDS + local waves",
+            SKIP_WIDE_32 => "32-lane skip wave-wide",
+            _ => "?",
+        }
+    }
+
+    /// Whether `form` gives what the console computes (the paired form: but for its in-step
+    /// shortcut).
+    pub fn exact(form: u8) -> bool {
+        !matches!(form, LOCAL_HALVES | LOCAL_ANY | LOOSE_LDS | LOOSE_LOCAL | WIDE)
+    }
+}
+
+thread_local! {
+    /// The form the program being emitted on this thread has taken so far ([`emit`]).
+    static FORM: std::cell::RefCell<WaveForm> = std::cell::RefCell::new(WaveForm::default());
+}
+
+fn set_form(form: u8) {
+    FORM.with(|f| f.borrow_mut().form = form);
+}
+
+fn set_form_note(form: u8, note: String) {
+    FORM.with(|f| *f.borrow_mut() = WaveForm { form, note });
+}
+
+fn take_form() -> WaveForm {
+    FORM.with(|f| std::mem::take(&mut *f.borrow_mut()))
 }
 
 /// See [`HostShader::table_reads`].
@@ -622,7 +710,13 @@ pub fn emit(
     io: &io::Io,
     res: &resource::Resources,
 ) -> Result<HostShader, ShaderError> {
+    take_form();
     let r = emit_any(c, native, p, st, io, res);
+    let form = take_form();
+    let r = r.map(|mut s| {
+        s.wave = form;
+        s
+    });
     // (portB: the retry of a program that translated, soldsawn's, `VICTORY_WHOLE_SECTIONS=1`)
     if r.is_ok() && (!permutes_outside_sections(p) || !base_switch("VICTORY_WHOLE_SECTIONS")) {
         return r;
@@ -651,8 +745,12 @@ pub fn emit(
         let res = resource::track(&q, &native.layout, native.stage, Some(&st))?;
         emit_any(c, native, &q, &st, &io, &res)
     })();
+    let form = take_form();
     match again {
-        Ok(shader) => Ok(shader),
+        Ok(mut shader) => {
+            shader.wave = form;
+            Ok(shader)
+        }
         Err(_) => r,
     }
 }
@@ -703,6 +801,7 @@ fn emit_any(
             }
         }
         if let Ok((shader, _)) = again {
+            set_form(wave_form::PAIRED);
             return Ok(shader);
         }
     }
@@ -766,6 +865,8 @@ fn emit_forms(
     // soldsawn's `ir::without_pops_wait`, not ported.)
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
+    let wave64_on_32 = native.stage == HwStage::Cs && native.wave64 && lower::host_max_wave() == 32;
+    set_form(if wave64_on_32 { wave_form::PLAIN } else { wave_form::NONE });
     let original = emit_program(c, native, p, st, io, res);
     // A console wave64 compute program on a host of 32-lane waves that
     // still needs 64 lanes, or whose cross-lane code sits where not every
@@ -851,11 +952,12 @@ fn emit_forms(
             ("without early-outs", form("without early-outs", ir::without_early_outs(p))),
             ("without skips", form("without skips", ir::without_skips(p, false))),
         ];
-        for (name, f) in &forms {
+        for (n, (name, f)) in forms.iter().enumerate() {
             if let Some((p, st, io, res)) = f {
                 let again = emit_program(c, native, p, st, io, res);
                 report(name, &again);
                 if done(&again) {
+                    set_form(if n == 0 { wave_form::NO_EARLY_OUTS } else { wave_form::NO_SKIPS });
                     return again;
                 }
             }
@@ -897,14 +999,23 @@ fn emit_forms(
         // an approximate form does not take goes on as before, and the paired form stays
         // last for it (`emit_any`). (`VICTORY_WAVE_PAIRS=0` turns the paired form off here
         // too.)
-        let exactly = |approximate: Result<(HostShader, Option<u32>), ShaderError>| {
-            if pairs_on() && pairs_first() {
+        let exactly = |approximate: Result<(HostShader, Option<u32>), ShaderError>, form: u8| {
+            let note = if pairs_on() && pairs_first() {
                 let again = paired(c, native, p, io, res);
                 report("paired lanes, before an approximate form", &again);
-                if again.is_ok() {
-                    return again;
+                match again {
+                    Ok(_) => {
+                        set_form(wave_form::PAIRED);
+                        return again;
+                    }
+                    Err(e) => format!("the paired form: {e}"),
                 }
-            }
+            } else if !pairs_on() {
+                "VICTORY_WAVE_PAIRS=0".to_owned()
+            } else {
+                "VICTORY_WAVE_PAIRS_FIRST unset".to_owned()
+            };
+            set_form_note(form, note);
             approximate
         };
         // exact first: each host wave on its own where that is exact (the idiom, every
@@ -922,6 +1033,7 @@ fn emit_forms(
                     let again = emit_program(c, native, p, st, io, res);
                     report("without skips, scalars followed", &again);
                     if done(&again) {
+                        set_form(wave_form::DEEP_SKIPS);
                         return again;
                     }
                 }
@@ -940,6 +1052,7 @@ fn emit_forms(
                         report("paired lanes, before cool_fox's wave-wide default", &again);
                         if done(&again) {
                             PAIRED_BEFORE_WIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            set_form(wave_form::PAIRED);
                             return again;
                         }
                     }
@@ -953,6 +1066,7 @@ fn emit_forms(
                         let again = widen(c, native, base, why, driver_loop);
                         report("wave-wide branches", &again);
                         if done(&again) {
+                            set_form(wave_form::WIDE);
                             return again;
                         }
                     }
@@ -971,7 +1085,11 @@ fn emit_forms(
                     let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
                     report(&format!("local waves ({}), {name}", if exact { "idiom" } else { "APPROXIMATE" }), &local);
                     if done(&local) {
-                        return if exact { local } else { exactly(local) };
+                        if exact {
+                            set_form(wave_form::LOCAL_IDIOM);
+                            return local;
+                        }
+                        return exactly(local, wave_form::LOCAL_HALVES);
                     }
                 }
             }
@@ -979,7 +1097,11 @@ fn emit_forms(
                 let local = lower::with_local_waves(|| emit_program(c, native, p, st, io, res));
                 report(if exact { "local waves (idiom)" } else { "local waves (APPROXIMATE)" }, &local);
                 if done(&local) {
-                    return if exact { local } else { exactly(local) };
+                    if exact {
+                        set_form(wave_form::LOCAL_IDIOM);
+                        return local;
+                    }
+                    return exactly(local, wave_form::LOCAL_HALVES);
                 }
             }
         }
@@ -991,14 +1113,14 @@ fn emit_forms(
                         let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
                         report(&format!("local waves (APPROXIMATE, any mask), {name}"), &local);
                         if done(&local) {
-                            return exactly(local);
+                            return exactly(local, wave_form::LOCAL_ANY);
                         }
                     }
                 }
                 let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
                 report("local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
-                    return exactly(local);
+                    return exactly(local, wave_form::LOCAL_ANY);
                 }
             }
         }
@@ -1014,20 +1136,20 @@ fn emit_forms(
                     let again = lower::with_loose_lds(|| emit_program(c, native, p, st, io, res));
                     report(&format!("loose LDS (APPROXIMATE), {name}"), &again);
                     if done(&again) {
-                        return exactly(again);
+                        return exactly(again, wave_form::LOOSE_LDS);
                     }
                 }
             }
             let again = lower::with_loose_lds(|| emit_program(c, native, p, st, io, res));
             report("loose LDS (APPROXIMATE)", &again);
             if done(&again) {
-                return exactly(again);
+                return exactly(again, wave_form::LOOSE_LDS);
             }
             if local_on && !exact_only {
                 let local = lower::with_loose_lds(|| lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res)));
                 report("loose LDS + local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
-                    return exactly(local);
+                    return exactly(local, wave_form::LOOSE_LOCAL);
                 }
             }
         }
@@ -1043,7 +1165,10 @@ fn emit_forms(
         {
             let again = widen(c, native, p, std::env::var_os("VICTORY_WAVE_WHY").is_some(), false);
             match again {
-                Ok(_) => again,
+                Ok(_) => {
+                    set_form(if wave64_on_32 { wave_form::WIDE } else { wave_form::SKIP_WIDE_32 });
+                    again
+                }
                 Err(_) => emit_program(c, native, p, st, io, res),
             }
         }
@@ -1289,8 +1414,62 @@ fn paired(
     lower::with_paired_lanes(|| emit_program(c, native, p, &st, io, res))
 }
 
-/// The translated program, and the wave size it requires of the host.
+/// [`emit_program_plain`]; with `VICTORY_LOOPS_WAVE` ([`lower::loops_wave`], foxhound
+/// 454ffea), a program that comes out depending on the host's waves is translated once more
+/// with the per-lane branches that close or leave its loops taken by each host wave together
+/// ([`structure::structure_wide_host`]), and that translation is the one given if it needs no
+/// wider waves. (The paired form takes every per-lane branch wave-wide already: no loop
+/// branch is left for it.)
 fn emit_program(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+) -> Result<(HostShader, Option<u32>), ShaderError> {
+    let first = emit_program_plain(c, native, p, st, io, res);
+    let Ok((_, Some(wave))) = &first else {
+        return first;
+    };
+    if !lower::loops_wave(native) || !st.host_wide.is_empty() {
+        return first;
+    }
+    let loops = lower::loop_branches(p, st);
+    if loops.is_empty() {
+        return first;
+    }
+    let needs = lower::take_needs();
+    let again = structure::structure_wide_host(p, &st.wide, &loops).and_then(|st| {
+        let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
+        emit_program_plain(c, native, p, &st, io, &res)
+    });
+    let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
+    match again {
+        Ok((shader, Some(w))) if w <= *wave => {
+            if why {
+                eprintln!("WAVE-LOOPS {} loop branches taken by each host wave together", loops.len());
+            }
+            lower::take_needs();
+            lower::LOOPS_WAVE_TAKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok((shader, Some(w)))
+        }
+        other => {
+            if why {
+                let what = match &other {
+                    Ok((_, w)) => format!("wave {w:?}"),
+                    Err(e) => e.to_string(),
+                };
+                eprintln!("WAVE-LOOPS not taken ({} loop branches): {what}", loops.len());
+            }
+            lower::set_needs(needs);
+            first
+        }
+    }
+}
+
+/// The translated program, and the wave size it requires of the host.
+fn emit_program_plain(
     c: &Container,
     native: &NativeProgram,
     p: &ir::Program,
@@ -1396,6 +1575,7 @@ fn emit_program(
         root_indexed_views: res.root_indexed_views.clone(),
         half_views: l.half_views,
         table_reads: table_reads(native, p, res),
+        wave: Default::default(),
     };
     Ok((shader, wave_size))
 }
@@ -2268,6 +2448,7 @@ mod tests {
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
             table_reads: None,
+            wave: Default::default(),
         };
         let file = |var: &str, stage| {
             std::env::var(var).ok().map(|p| super::HostShader {
@@ -2282,6 +2463,7 @@ mod tests {
                 root_indexed_views: Vec::new(),
                 half_views: Vec::new(),
                 table_reads: None,
+                wave: Default::default(),
             })
         };
         let ps = file("VICTORY_REF_PS", crate::HwStage::Ps).unwrap_or(ps);
@@ -2893,6 +3075,7 @@ mod tests {
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
             table_reads: None,
+            wave: Default::default(),
         };
         let (root, pso) = host.compute_pipeline(&cs).unwrap();
         // Twelve dwords: the loads below run across the view's end.
@@ -3048,6 +3231,7 @@ mod tests {
                 root_indexed_views: Vec::new(),
                 half_views: Vec::new(),
                 table_reads: None,
+                wave: Default::default(),
             };
             let (root, pso) = host.compute_pipeline(&cs).unwrap();
             let inputs: Vec<u32> = [
@@ -3614,6 +3798,7 @@ mod barycentric_tests {
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
             table_reads: None,
+            wave: Default::default(),
         };
         validate(&vs);
         // One triangle covers an 8x8 target, with attribute values 2, 6, 10.

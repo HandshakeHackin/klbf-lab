@@ -2,6 +2,9 @@
 //! still write, done on the card in the flights' order instead of on the
 //! CPU after a wait for them (`VICTORY_CARD_STEPS`, see [`stage`]).
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::sync::Arc;
 
 use super::*;
@@ -132,6 +135,13 @@ pub(super) struct Writer {
     from: usize,
     to: usize,
     copy: bool,
+}
+
+impl Writer {
+    /// (`VICTORY_TAKE_AHEAD`) The title memory it writes (address, end).
+    pub(super) fn span(&self) -> (usize, usize) {
+        (self.from, self.to)
+    }
 }
 
 /// What `items` of the line write.
@@ -473,7 +483,22 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
                     to: at.saturating_add(len),
                     asked: touches(written, at, at.saturating_add(len)),
                 },
-                &Step::Host(_, (from, to)) if from < to => Does::Read { from, to, asked: false },
+                // Host work runs on the CPU at submission: it cannot be done on the card, so with
+                // `VICTORY_HOST_READ_WAIT=1` what it reads of flights' writes stops the plan
+                // (VIctoryUnified card_steps.rs:452; off, `asked: false` as before, and
+                // `expand_rects` may read vertices still being written).
+                &Step::Host(_, (from, to)) if from < to => Does::Read {
+                    from,
+                    to,
+                    asked: {
+                        let asked = host_read_wait() && touches(written, from, to);
+                        HOST_READS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if asked {
+                            HOST_READS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        asked
+                    },
+                },
                 Step::Refresh(shadow, at, len) => Does::Refresh {
                     shadow: Arc::as_ptr(shadow) as usize,
                     from: *at,
@@ -599,7 +624,7 @@ fn record(
     unsafe {
         if first {
             // What earlier lists' shaders wrote, first.
-            list.ResourceBarrier(&[D3D12_RESOURCE_BARRIER {
+            list.barriers_counted(&[D3D12_RESOURCE_BARRIER {
                 Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
                 Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
                 Anonymous: D3D12_RESOURCE_BARRIER_0 {
@@ -609,17 +634,17 @@ fn record(
                 },
             }]);
         } else {
-            list.ResourceBarrier(&[transition(between, constants, dest)]);
+            list.barriers_counted(&[transition(between, constants, dest)]);
         }
         for &(buffer, offset, at, len) in reads {
             list.CopyBufferRegion(between, at, buffer, offset, len);
         }
-        list.ResourceBarrier(&barriers);
+        list.barriers_counted(&barriers);
         for &(buffer, offset, at, len) in writes {
             list.CopyBufferRegion(buffer, offset, between, at, len);
         }
         if !done.is_empty() {
-            list.ResourceBarrier(&done);
+            list.barriers_counted(&done);
         }
     }
 }
@@ -1294,7 +1319,7 @@ mod tests {
                 }
                 a.list.CopyBufferRegion(&first.buffer, 4500, &upload, 0, 300);
                 a.list
-                    .ResourceBarrier(&[transition(&first.buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON)]);
+                    .barriers_counted(&[transition(&first.buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON)]);
             }
             a.close();
             host.execute_own(&a);

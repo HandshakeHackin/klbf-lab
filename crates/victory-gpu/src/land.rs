@@ -250,6 +250,8 @@ impl Pool {
     }
 
     fn help(&self) {
+        // (The thread that calls `each` waits for this one's share.)
+        crate::cores::raise_helper();
         let mut state = self.state();
         loop {
             let Some((work, i)) = take(&mut state) else {

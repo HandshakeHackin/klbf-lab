@@ -14,6 +14,7 @@ victory-loader.workspace = true
 victory-hle.workspace = true
 victory-shader = { workspace = true, features = ["host"] }
 victory-game.workspace = true
+victory-formats.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 memchr.workspace = true
@@ -29,6 +30,9 @@ diagnostics = [
     "victory-loader/diagnostics",
     "victory-shader/diagnostics",
 ]
+# mimalloc (MIT) as the global allocator instead of the Windows heap (lives in victory-gpu, where
+# the diagnostics build's counting allocator forwards to it).
+mimalloc = ["victory-hle/mimalloc"]
 
 [lints]
 workspace = true

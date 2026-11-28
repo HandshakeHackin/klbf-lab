@@ -27,6 +27,9 @@
 //!   byte; then they rest [`REST`] like any page given back. A mismatch maps
 //!   the copy back to its old pages, stops moving for the run, and is logged.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::*;
@@ -573,7 +576,7 @@ fn one(
             let (Some(at), Some(size)) = (at.first(), size.first()) else { continue };
             slot.list.CopyTiles(&source, at, size, &scratch, k as u64 * PAGE, D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
         }
-        slot.list.ResourceBarrier(&[crate::host::transition(&scratch, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+        slot.list.barriers_counted(&[crate::host::transition(&scratch, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
         for (k, m) in moved.iter().enumerate() {
             let (at, size) = regions(tiling, m.0, m.0 + 1);
             let (Some(at), Some(size)) = (at.first(), size.first()) else { continue };
@@ -589,10 +592,10 @@ fn one(
                 }),
             },
         };
-        slot.list.ResourceBarrier(&[alias]);
+        slot.list.barriers_counted(&[alias]);
         if let Some((a, b)) = &checks {
             // The new pages through ours (after the copy) and the old ones.
-            slot.list.ResourceBarrier(&[crate::host::transition(&dest, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+            slot.list.barriers_counted(&[crate::host::transition(&dest, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
             for (k, m) in moved.iter().enumerate() {
                 let (at, size) = regions(tiling, m.0, m.0 + 1);
                 let (Some(at), Some(size)) = (at.first(), size.first()) else { continue };
@@ -791,7 +794,7 @@ mod tests {
             std::ptr::copy_nonoverlapping(pattern.as_ptr(), data.cast::<u8>(), bytes);
             upload.Unmap(0, None);
             list.CopyTextureRegion(&location(&t, None), 0, 0, 0, &location(&upload, Some(foot)), None);
-            list.ResourceBarrier(&[crate::host::transition(&t, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+            list.barriers_counted(&[crate::host::transition(&t, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
             list.Close().unwrap();
             host.queue().ExecuteCommandLists(&[Some(list.cast().unwrap())]);
             host.queue().Signal(&fence, 1).unwrap();

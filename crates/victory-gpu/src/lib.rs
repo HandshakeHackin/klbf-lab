@@ -35,6 +35,15 @@ mod compose;
 pub mod console;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
+/// mimalloc as the global allocator (`mimalloc` feature) where the counting allocator in
+/// `copystat` (which forwards to it) is not built.
+#[cfg(all(feature = "mimalloc", not(all(windows, feature = "diagnostics"))))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod cover; // (fox draw-cost) work that covers less than its target (VICTORY_LIST_CALLS)
+#[cfg(windows)]
+mod drawmeter; // (fox draw-cost) per-draw meters (VICTORY_LIST_CALLS), barrier counts
 mod copystep; // (coder W) VICTORY_REFRESH_ACCOUNT=1 (per-copy refresh account)
 #[cfg(all(windows, feature = "diagnostics"))]
 mod faultbook;
@@ -63,12 +72,14 @@ mod host;
 #[cfg(windows)]
 mod indirect;
 #[cfg(windows)]
+#[cfg(windows)]
 mod inplace;
 #[cfg(windows)]
 mod land;
 pub mod list;
 pub mod object;
 pub mod pipeline;
+pub mod precompiled; // (CGBJ main) device method 0x218 from the title's containers (VICTORY_PRECOMPILED)
 #[cfg(windows)]
 mod picked;
 #[cfg(windows)]
@@ -108,6 +119,8 @@ mod switch;
 mod ab;
 #[cfg(windows)]
 mod tdr;
+#[cfg(windows)]
+mod texrecheck;
 #[cfg(windows)]
 mod texture;
 pub mod timeline;

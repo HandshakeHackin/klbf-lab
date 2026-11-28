@@ -35,6 +35,9 @@
 //! the card has read or written it. So are those of more than 8 MiB out of
 //! memory shaders do not write (streaming).
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use super::*;
 use crate::shadow::Shadow;
 
@@ -210,7 +213,7 @@ pub(super) unsafe fn wait_for_all(host: &Host, list: &ID3D12GraphicsCommandList)
                 }),
             },
         };
-        list.ResourceBarrier(&[alias, uav]);
+        list.barriers_counted(&[alias, uav]);
     }
 }
 
@@ -258,7 +261,7 @@ impl HostList {
                     };
                     unsafe {
                         self.list.CopyBufferRegion(&between, 0, &from.buffer, offset, len as u64);
-                        self.list.ResourceBarrier(&[transition(&between, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                        self.list.barriers_counted(&[transition(&between, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                         wait_for_all(host, &self.list);
                         self.list.CopyBufferRegion(&to.buffer, at, &between, 0, len as u64);
                     }
@@ -305,7 +308,7 @@ impl HostList {
         unsafe {
             wait_for_all(host, &self.list);
             self.list.CopyBufferRegion(&between, 0, &from.buffer, from.offset(src as u64), len as u64);
-            self.list.ResourceBarrier(&[transition(&between, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+            self.list.barriers_counted(&[transition(&between, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
             wait_for_all(host, &self.list);
         }
         Some(between)

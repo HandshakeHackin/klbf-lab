@@ -145,6 +145,10 @@ pub enum T {
     ReadChangedNo,
     ReadWaitFlights,
     ReadWaitLists,
+    /// Of the read waits: those for host work reading title memory (`VICTORY_HOST_READ_WAIT=1`),
+    /// and their time.
+    HostReadWaits,
+    HostReadWaitUs,
     /// Fills read ahead of flights; of them found changed by a flight.
     FillAhead,
     FillAheadChanged,
@@ -588,7 +592,7 @@ fn text(f: &Frame, fia_max: f64) -> String {
             // (C3, item 4) `crate::host::readwait` (diagnostics builds).
             "read waits {:.0} (fill {:.0}, copy {:.0}, other {:.0}), {:.1} ms (card still running the flights {:.1}, landing after \
              the card had finished {:.1}), bytes read had changed after the wait: yes {:.0} no {:.0}; flights in the air at them {:.0} \
-             (lists {:.0}) | {}",
+             (lists {:.0}); of them host work reading title memory {:.0}, {:.1} ms | {}",
             t(T::ReadWaits),
             t(T::ReadWaitFill),
             t(T::ReadWaitCopy),
@@ -600,6 +604,8 @@ fn text(f: &Frame, fia_max: f64) -> String {
             t(T::ReadChangedNo),
             t(T::ReadWaitFlights),
             t(T::ReadWaitLists),
+            t(T::HostReadWaits),
+            ms(T::HostReadWaitUs),
             inside_text(&|x| f.t[x as usize], fia_max)
         ),
     )

@@ -3,6 +3,9 @@
 //! two (the frames the log reports) is saved as `frame-<n>.png`, at half
 //! size. Only in builds with diagnostics.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::path::PathBuf;
 
 use windows::Win32::Graphics::Direct3D12::*;
@@ -408,7 +411,7 @@ fn dump_one(
     let read = unsafe {
         if state != copy {
             list.list
-                .ResourceBarrier(&[crate::host::transition(texture, state, copy)]);
+                .barriers_counted(&[crate::host::transition(texture, state, copy)]);
         }
         let read = read_back(&host.device, &list.list, texture);
         // The stencil plane of a depth-stencil target, which the title's
@@ -422,7 +425,7 @@ fn dump_one(
             .flatten();
         if state != copy {
             list.list
-                .ResourceBarrier(&[crate::host::transition(texture, copy, state)]);
+                .barriers_counted(&[crate::host::transition(texture, copy, state)]);
         }
         (read, stencil)
     };

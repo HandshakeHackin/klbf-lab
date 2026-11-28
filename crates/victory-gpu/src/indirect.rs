@@ -33,6 +33,9 @@
 //! dispatches, the budget) cut legitimate work beyond them; raise them if
 //! the title needs more.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
@@ -91,7 +94,10 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     // Threads past the records take part in the group's charge (cost 0)
     // and store nothing.
     bool active = id.x < eff_count;
-    uint src_at = args_offset + id.x * stride;
+    // Bit 2: the parts of one dispatch record split along X (`bound_split`): record k runs the
+    // groups k * 65,535 on of the one source record.
+    bool split = (has_count & 4u) != 0;
+    uint src_at = split ? args_offset : args_offset + id.x * stride;
     uint dst_at = id.x * stride;
     uint cost = 0;
     uint asked = 0;
@@ -120,6 +126,23 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         draw_counts = uint2(count, instances);
     } else if (active && kind == 2) {
         uint3 g = src_args.Load3(src_at);
+        // Diagnostics: records that ask for more than 65,535 groups in a dimension (not the
+        // unfilled slots of a window clamped ahead), and the most asked.
+        if (!ahead && !split && max(g.x, max(g.y, g.z)) > 65535u && g.x * g.y <= GROUPS) {
+            uint was;
+            budget.InterlockedAdd(20, 1, was);
+            budget.InterlockedMax(24, max(g.x, max(g.y, g.z)), was);
+        }
+        if (split) {
+            uint lo = id.x * 65535u;
+            g.x = g.x > lo ? min(g.x - lo, 65535u) : 0u;
+            // The record asked for more than one part holds: told to the host, which then
+            // splits its program's records from now on (`crate::draw`, learned).
+            if (id.x == 1 && g.x > 0) {
+                uint was;
+                budget.InterlockedOr(28, 1, was);
+            }
+        }
         // Up to WIDEST groups in x run as asked (`widest`).
         g = min(g, uint3(g.x <= WIDEST ? WIDEST : 65535u, 65535u, 65535u));
         // x * y fits 32 bits where it is looked at; the whole count may not.
@@ -424,6 +447,27 @@ pub(crate) fn bound(
     clamp_into(list, c, &dst, budget, src, count, spec, false).then_some(dst)
 }
 
+/// (`VICTORY_GROUPS_SPLIT=1`) The clamp of one dispatch record at `src` as `parts` records,
+/// `stride` bytes apart, at offset 0 of the list's scratch buffer: record k holds the record's
+/// groups in X from k * 65,535 on, at most 65,535 of them (0: none), its Y and Z as clamped.
+/// Executed one by one with the program's [`victory_shader::emit::USER_GROUP_OFFSET`] at
+/// k * 65,535, they run what the console runs for a count up to `parts` * 65,535.
+pub(crate) fn bound_split(
+    list: &HostList,
+    src: (&ID3D12Resource, u64),
+    (stride, parts): (u32, u32),
+) -> Option<ID3D12Resource> {
+    let spec = (2, stride, parts);
+    let bytes = validate_layout(spec, src.1, None)?;
+    let (c, budget, dst) = (clamp()?, list.budget()?, list.indirect_scratch(bytes)?);
+    let before = list.indirect_state(&dst);
+    let recorded = record_clamp_with(c, &list.list, (&dst, before), budget, src, None, spec, 4);
+    if recorded {
+        list.indirect_readable(&dst);
+    }
+    recorded.then_some(dst)
+}
+
 /// [`bound`] for a window of records clamped ahead of the draws that will
 /// read them (`crate::draw`'s windows; no count buffer). The records past
 /// the ones the title filled are whatever the buffer holds, and each
@@ -475,13 +519,30 @@ fn clamp_into(
 fn record_clamp_as(
     c: &Clamp,
     l: &ID3D12GraphicsCommandList,
+    dst: (&ID3D12Resource, D3D12_RESOURCE_STATES),
+    budget: u64,
+    src: (&ID3D12Resource, u64),
+    count: Option<(&ID3D12Resource, u64)>,
+    spec: (u32, u32, u32),
+    ahead: bool,
+) -> bool {
+    record_clamp_with(c, l, dst, budget, src, count, spec, u32::from(ahead) << 1)
+}
+
+/// [`record_clamp_as`] with the clamp's flag bits (`ahead` bit 1, `split` bit 4) as given.
+#[allow(clippy::too_many_arguments)]
+fn record_clamp_with(
+    c: &Clamp,
+    l: &ID3D12GraphicsCommandList,
     (dst, before): (&ID3D12Resource, D3D12_RESOURCE_STATES),
     budget: u64,
     (src, src_offset): (&ID3D12Resource, u64),
     count: Option<(&ID3D12Resource, u64)>,
     (kind, stride, records): (u32, u32, u32),
-    ahead: bool,
+    flags: u32,
 ) -> bool {
+    let ahead = flags & 2 != 0;
+    let flags = flags & 4;
     let Some(bytes) = validate_layout(
         (kind, stride, records),
         src_offset,
@@ -525,7 +586,7 @@ fn record_clamp_as(
         }
         None => (src_gpu, 0u32, 0u32),
     };
-    let constants = [kind, stride, records, args_offset, has_count | (u32::from(ahead) << 1), count_offset];
+    let constants = [kind, stride, records, args_offset, has_count | (u32::from(ahead) << 1) | flags, count_offset];
     // SAFETY: an open list; our root signature and pipeline; live source,
     // count, scratch destination, and budget buffers. `src` and `count` stay
     // in `COMMON` / `GENERIC_READ` via implicit buffer promotion while `dst`
@@ -555,7 +616,7 @@ fn record_clamp_as(
     let skip = usize::from(!waits);
     unsafe {
         // Earlier shader writes (the title's argument and count passes) first.
-        l.ResourceBarrier(&first[skip..]);
+        l.barriers_counted(&first[skip..]);
         if records > 0 {
             l.SetComputeRootSignature(&c.root);
             l.SetPipelineState(&c.pso);
@@ -566,7 +627,7 @@ fn record_clamp_as(
             l.SetComputeRootUnorderedAccessView(4, budget);
             l.Dispatch(records.div_ceil(64), 1, 1);
         }
-        l.ResourceBarrier(&second[skip..]);
+        l.barriers_counted(&second[skip..]);
     }
     true
 }
@@ -1034,7 +1095,7 @@ void main() {
                             gpu.list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
                             gpu.list.Dispatch(if walked_alone { pieces.div_ceil(64) } else { pieces }, 1, 1);
                         }
-                        gpu.list.ResourceBarrier(&[D3D12_RESOURCE_BARRIER {
+                        gpu.list.barriers_counted(&[D3D12_RESOURCE_BARRIER {
                             Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
                             Anonymous: D3D12_RESOURCE_BARRIER_0 {
                                 UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
@@ -1320,7 +1381,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
                     Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
                 };
                 gpu.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
-                gpu.list.ResourceBarrier(&[crate::host::transition(
+                gpu.list.barriers_counted(&[crate::host::transition(
                     texture,
                     D3D12_RESOURCE_STATE_COPY_DEST,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -1572,7 +1633,7 @@ void main(uint3 t : SV_DispatchThreadID) {
                     Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
                 };
                 gpu.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
-                gpu.list.ResourceBarrier(&[crate::host::transition(
+                gpu.list.barriers_counted(&[crate::host::transition(
                     &texture,
                     D3D12_RESOURCE_STATE_COPY_DEST,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2132,6 +2193,56 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
     /// (b) `src_args` (and `count_buf`) are NOT mutated in-place, and
     /// (c) full `stride` bytes (`stride = 24` > `12`) are copied for active
     ///     records into `dst_args` at offset `0`.
+    /// (`VICTORY_GROUPS_SPLIT`) One dispatch record of 150,000 groups in X (more than the 65,535
+    /// D3D12 runs in a dimension) clamped as three parts: 65,535, 65,535 and 18,930 groups, Y
+    /// and Z kept; the record's other dwords copied. Executed with the groups before each part
+    /// told, they run the console's 150,000.
+    #[test]
+    fn warp_a_record_over_65535_groups_is_clamped_in_parts() {
+        let Some(mut warp) = WarpHarness::new() else {
+            return;
+        };
+        const STRIDE: u32 = 16;
+        let (src_buf, src_ptr, _) = warp.shared_buffer(256);
+        let (_budget_buf, budget_ptr, budget_gpu) = warp.shared_buffer(256);
+        let (readback_buf, readback_ptr, _) = warp.shared_buffer(u64::from(STRIDE * 3));
+        let dst_buf = warp.default_uav(u64::from(STRIDE * 3));
+        let words: [u32; 4] = [150_000, 2, 1, 0x1234_5678];
+        // SAFETY: mapped buffers of these sizes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), src_ptr.add(32), 16);
+            (budget_ptr as *mut u32).write_volatile(0);
+            std::ptr::write_bytes(readback_ptr, 0, (STRIDE * 3) as usize);
+        }
+        assert!(record_clamp_with(
+            &warp.clamp,
+            &warp.list,
+            (&dst_buf, D3D12_RESOURCE_STATE_COMMON),
+            budget_gpu,
+            (&src_buf, 32),
+            None,
+            (2, STRIDE, 3),
+            4,
+        ));
+        // SAFETY: open list; the clamp left `dst_buf` in `INDIRECT_ARGUMENT`.
+        unsafe {
+            warp.list.barriers_counted(&[transition(
+                &dst_buf,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            )]);
+            warp.list.CopyBufferRegion(&readback_buf, 0, &dst_buf, 0, u64::from(STRIDE * 3));
+        }
+        warp.submit_and_wait();
+        // SAFETY: the GPU is done.
+        let got = unsafe { std::slice::from_raw_parts(readback_ptr.cast::<u32>().cast_const(), 12).to_vec() };
+        assert_eq!(
+            got,
+            [65_535, 2, 1, 0x1234_5678, 65_535, 2, 1, 0x1234_5678, 18_930, 2, 1, 0x1234_5678],
+            "the parts of 150,000 groups"
+        );
+    }
+
     #[test]
     fn warp_count_buffer_ignores_garbage_tail_and_preserves_source() {
         let Some(mut warp) = WarpHarness::new() else {
@@ -2237,14 +2348,14 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         // `dst_buf` readable as arguments again, as the clamp left it).
         // SAFETY: open command list; the clamp left `dst_buf` in `INDIRECT_ARGUMENT`.
         unsafe {
-            warp.list.ResourceBarrier(&[transition(
+            warp.list.barriers_counted(&[transition(
                 &dst_buf,
                 D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
             )]);
             warp.list
                 .CopyBufferRegion(&readback_buf, 0, &dst_buf, 0, u64::from(STRIDE * 5));
-            warp.list.ResourceBarrier(&[transition(
+            warp.list.barriers_counted(&[transition(
                 &dst_buf,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
                 D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
@@ -2385,7 +2496,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
             // SAFETY: an open list; the scratch buffer, which the clamp left
             // readable as arguments, is copied for the check.
             unsafe {
-                warp.list.ResourceBarrier(&[transition(
+                warp.list.barriers_counted(&[transition(
                     &dst_buf,
                     D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
                     D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -2470,7 +2581,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         // SAFETY: open command list; copy clamped scratch buffer (left
         // readable as arguments) for verification.
         unsafe {
-            warp.list.ResourceBarrier(&[transition(
+            warp.list.barriers_counted(&[transition(
                 &dst_buf,
                 D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -2679,7 +2790,7 @@ void main(uint3 g : SV_GroupID, uint i : SV_GroupIndex) {
         ));
         // SAFETY: an open list; the clamped records are copied for the check.
         unsafe {
-            warp.list.ResourceBarrier(&[transition(
+            warp.list.barriers_counted(&[transition(
                 &dst_buf,
                 D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -3051,8 +3162,8 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
                     gpu.list.SetPipelineState(&worker.pso);
                     gpu.list.SetComputeRootUnorderedAccessView(0, seen.GetGPUVirtualAddress());
                     gpu.list.ExecuteIndirect(&sig, 1, &dst, 0, None, 0);
-                    gpu.list.ResourceBarrier(&[uav_barrier()]);
-                    gpu.list.ResourceBarrier(&[transition(&seen, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                    gpu.list.barriers_counted(&[uav_barrier()]);
+                    gpu.list.barriers_counted(&[transition(&seen, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                     gpu.list.CopyBufferRegion(&back, 0, &seen, 0, size);
                 }
                 gpu.submit_and_wait();
@@ -3169,9 +3280,9 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
                 }
                 // SAFETY: an open list; the records are readable as arguments.
                 unsafe {
-                    warp.list.ResourceBarrier(&[transition(&dst, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                    warp.list.barriers_counted(&[transition(&dst, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                     warp.list.CopyBufferRegion(&back, 0, &dst, 0, u64::from(stride));
-                    warp.list.ResourceBarrier(&[transition(&dst, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)]);
+                    warp.list.barriers_counted(&[transition(&dst, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)]);
                 }
                 warp.submit_and_wait();
                 // SAFETY: the list has run; mapped words.
@@ -3217,7 +3328,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
             }
             // SAFETY: an open list; the records are readable as arguments.
             unsafe {
-                warp.list.ResourceBarrier(&[transition(&dst, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                warp.list.barriers_counted(&[transition(&dst, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                 warp.list.CopyBufferRegion(&back, 0, &dst, 0, 256);
             }
             warp.submit_and_wait();
@@ -3375,6 +3486,8 @@ mod bench;
 /// `cargo test -p victory-gpu --release -- --ignored bare_command_cost --nocapture`
 #[cfg(test)]
 mod bare_cost {
+    #[allow(unused_imports)]
+    use crate::drawmeter::CountBarriers as _;
     use windows::Win32::Foundation::{HANDLE, RECT};
     use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_12_0, D3D_PRIMITIVE_TOPOLOGY};
     use windows::Win32::Graphics::Direct3D12::*;
@@ -3863,12 +3976,12 @@ void work() {
                             Between::Nothing => {}
                             Between::Pipeline => l.SetPipelineState(&self.pipelines[odd]),
                             Between::BarrierPair => {
-                                l.ResourceBarrier(&[transition(&self.other, target, read)]);
-                                l.ResourceBarrier(&[transition(&self.other, read, target)]);
+                                l.barriers_counted(&[transition(&self.other, target, read)]);
+                                l.barriers_counted(&[transition(&self.other, read, target)]);
                             }
                             Between::DepthMove => {
                                 let (from, to) = if odd == 0 { (written, tested) } else { (tested, written) };
-                                l.ResourceBarrier(&[transition(&self.depth, from, to)]);
+                                l.barriers_counted(&[transition(&self.depth, from, to)]);
                             }
                             Between::Heaps => {
                                 l.SetDescriptorHeaps(&self.heap_pairs[odd]);
@@ -3880,14 +3993,14 @@ void work() {
                             Between::Compute | Between::ComputeWithWaits => {
                                 let waits = between == Between::ComputeWithWaits;
                                 if waits {
-                                    l.ResourceBarrier(&[super::uav_barrier()]);
+                                    l.barriers_counted(&[super::uav_barrier()]);
                                 }
                                 l.SetComputeRootSignature(&self.work_root);
                                 l.SetPipelineState(&self.work);
                                 l.SetComputeRootUnorderedAccessView(0, self.words.GetGPUVirtualAddress());
                                 l.Dispatch(1, 1, 1);
                                 if waits {
-                                    l.ResourceBarrier(&[super::uav_barrier()]);
+                                    l.barriers_counted(&[super::uav_barrier()]);
                                 }
                                 l.SetPipelineState(&self.pipelines[0]);
                             }

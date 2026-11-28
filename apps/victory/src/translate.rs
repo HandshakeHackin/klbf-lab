@@ -397,6 +397,8 @@ pub fn run(
 pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
     let cfg = victory_core::Config::load()?;
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
+    // (CGBJ main) The index of precompiled pipelines' programs, written afresh.
+    victory_hle::modules::d3d12x::record_precompiled_on();
     let paths = crate::default_paths(paths)?;
     let threads =
         jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
@@ -427,6 +429,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
                             if !lock(&seen).insert(hash) {
                                 continue;
                             }
+                            victory_hle::modules::d3d12x::record_precompiled(&bytes);
                             match victory_hle::modules::d3d12x::precompile(&bytes) {
                                 Ok(_) => {
                                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;

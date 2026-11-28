@@ -75,6 +75,7 @@ fn build(words: &[u32], srv: (u8, u32)) -> Result<HostShader, ShaderError> {
         root_indexed_views: Vec::new(),
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone())

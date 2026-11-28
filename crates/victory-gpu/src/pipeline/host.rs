@@ -5,6 +5,9 @@
 //! user data, root views for the title's root views, static samplers for
 //! the immediate samplers, and directly indexed heaps.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
@@ -1571,7 +1574,7 @@ mod tests {
                 list.list
                     .IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                 list.list.DrawInstanced(3, 1, 0, 0);
-                list.list.ResourceBarrier(&[crate::host::transition(
+                list.list.barriers_counted(&[crate::host::transition(
                     &color,
                     D3D12_RESOURCE_STATE_RENDER_TARGET,
                     D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -1598,7 +1601,7 @@ mod tests {
                     Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
                 };
                 list.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
-                list.list.ResourceBarrier(&[crate::host::transition(
+                list.list.barriers_counted(&[crate::host::transition(
                     &color,
                     D3D12_RESOURCE_STATE_COPY_SOURCE,
                     D3D12_RESOURCE_STATE_RENDER_TARGET,

@@ -19,6 +19,9 @@
 //! sends only what changed makes many of, go as pairs of offset and value,
 //! stored by one dispatch per copy; the others as a copy each.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use super::*;
 use crate::shadow::Shadow;
 
@@ -343,7 +346,7 @@ impl Own {
         // SAFETY: the caller's; live objects.
         unsafe {
             if !first.is_empty() {
-                list.ResourceBarrier(&first);
+                list.barriers_counted(&first);
             }
             if let Some(pass) = pass(host)
                 && self.copies.iter().any(|c| c.pairs.1 > 0)
@@ -366,7 +369,7 @@ impl Own {
                 }
             }
             if !last.is_empty() {
-                list.ResourceBarrier(&last);
+                list.barriers_counted(&last);
             }
         }
     }

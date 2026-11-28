@@ -14,6 +14,9 @@
 //! slot (more than 4M threads, or rows wider than 4096) add up; dispatches of
 //! two lists that run at once on two queues mix.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -109,11 +112,11 @@ pub(crate) fn after(taken: &Taken, list: &ID3D12GraphicsCommandList, name: Arc<s
     };
     // SAFETY: an open list; our buffers, in the states named.
     unsafe {
-        list.ResourceBarrier(&[transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+        list.barriers_counted(&[transition(D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
         list.CopyResource(&back, &b.counts);
-        list.ResourceBarrier(&[transition(D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST)]);
+        list.barriers_counted(&[transition(D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST)]);
         list.CopyResource(&b.counts, &b.zeros);
-        list.ResourceBarrier(&[transition(D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)]);
+        list.barriers_counted(&[transition(D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS)]);
     }
     taken.lock().unwrap_or_else(|e| e.into_inner()).push((name, back));
 }

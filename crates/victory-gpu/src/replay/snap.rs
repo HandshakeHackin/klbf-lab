@@ -2,6 +2,9 @@
 //! memory held at its start, and what the CPU put into memory both see
 //! before each submission.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::os::windows::fs::FileExt;
@@ -1126,7 +1129,7 @@ fn copy_out(
     // SAFETY: an open list; live resources.
     unsafe {
         if !before.is_empty() {
-            list.ResourceBarrier(&before);
+            list.barriers_counted(&before);
         }
         for p in pieces {
             let object = p.res.object();
@@ -1149,7 +1152,7 @@ fn copy_out(
             }
         }
         if !after.is_empty() {
-            list.ResourceBarrier(&after);
+            list.barriers_counted(&after);
         }
     }
 }
@@ -1167,7 +1170,7 @@ pub(super) fn read_sub(
     // SAFETY: an open list; live resources.
     unsafe {
         if !there {
-            list.ResourceBarrier(&[gpu::transition(texture, ALL, state, COPY_SOURCE)]);
+            list.barriers_counted(&[gpu::transition(texture, ALL, state, COPY_SOURCE)]);
         }
         list.CopyTextureRegion(
             &gpu::placed_location(to, f),
@@ -1178,7 +1181,7 @@ pub(super) fn read_sub(
             None,
         );
         if !there {
-            list.ResourceBarrier(&[gpu::transition(texture, ALL, COPY_SOURCE, state)]);
+            list.barriers_counted(&[gpu::transition(texture, ALL, COPY_SOURCE, state)]);
         }
     }
 }

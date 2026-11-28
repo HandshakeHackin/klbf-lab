@@ -152,6 +152,7 @@ fn lowered_counted(
         root_indexed_views: res.root_indexed_views,
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     })
 }
 
@@ -299,6 +300,7 @@ fn on_64_lanes(native: &NativeProgram, p: &ir::Program) -> HostShader {
         root_indexed_views: res.root_indexed_views,
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         let mut copy = shader.dxil.clone();
@@ -1480,6 +1482,7 @@ fn partial_dispatch_with_a_cross_half_wave_op_runs_in_32_lane_waves() {
         root_indexed_views: res.root_indexed_views.clone(),
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone()).unwrap_or_else(|e| panic!("DXIL validation: {e}"));
@@ -1505,4 +1508,225 @@ fn partial_dispatch_with_a_cross_half_wave_op_runs_in_32_lane_waves() {
         }
     }
     eprintln!("ran on the hardware device: partial counts 45, 1, 33, 0 exact in 32-lane waves");
+}
+
+/// The title's tiled water light (`CS_TransmissionVolumetrics_Tiled`, groups of 8x8, one
+/// console wave) leaves a loop lane by lane: `v_cmpx` picks the lanes that are done,
+/// `s_andn2_b64` takes them out of the live mask and `s_cbranch_scc0` leaves when none is left;
+/// meanwhile `v_readfirstlane_b32` reads the first live lane. Here lanes 0-31 (a half-tile's
+/// upper rows) leave after one round and lanes 32-63 after three, so rounds 2 and 3 run on
+/// upper lanes only: the round count, the wave's rounds, and the first live lane of each
+/// lane's last round must be the console's in the paired form, with the in-step shortcut and
+/// with it left out (`VICTORY_WAVE_PAIRED_STEP=1`, a group barrier before each vector
+/// instruction), and emit must say it took the paired form.
+#[test]
+fn paired_lanes_leave_a_loop_by_halves_and_read_the_first_live_lane() {
+    let w = vec![
+        vop2(0x16, 1, k(5), 0),  // v_lshrrev_b32 v1, 5, v0: 0 lower, 1 upper
+        vop2(0x1A, 1, k(1), 1),  // v_lshlrev_b32 v1, 1, v1
+        vop2(0x25, 1, k(1), 1),  // v_add_nc_u32 v1, 1, v1: the rounds, 1 or 3
+        vop1(0x01, 4, k(0)),     // v_mov_b32 v4, 0
+        vop1(0x01, 6, k(0)),     // v_mov_b32 v6, 0
+        sop1(0x03, 7, k(0)),     // s_mov_b32 s7, 0
+        sop1(0x04, 20, EXEC),    // s_mov_b64 s[20:21], exec: the live lanes
+        sop1(0x04, 22, EXEC),    // s_mov_b64 s[22:23], exec
+        sop2(0x00, 7, 7, k(1)),  // loop: s_add_u32 s7, s7, 1
+        vop2(0x25, 4, k(1), 4),  // v_add_nc_u32 v4, 1, v4
+        vop1(0x02, 6, v(0)),     // v_readfirstlane_b32 s6, v0
+        vop1(0x01, 6, 6),        // v_mov_b32 v6, s6
+        sop1(0x04, 2, EXEC),     // s_mov_b64 s[2:3], exec
+        vopc(0xD3, v(1), 4),     // v_cmpx_le_u32 exec, v1, v4: the lanes done
+        sop2(0x15, 20, 20, EXEC), // s_andn2_b64 s[20:21], s[20:21], exec
+        sopp(0x04, 2),           // s_cbranch_scc0 done
+        sop2(0x0F, EXEC, 2, 20), // s_and_b64 exec, s[2:3], s[20:21]
+        sopp(0x02, -10),         // s_branch loop
+        sop1(0x04, EXEC, 22),    // done: s_mov_b64 exec, s[22:23]
+        vop1(0x01, 9, 7),        // v_mov_b32 v9, s7
+    ];
+    let mut w = w;
+    w.extend(stores([4, 6, 9, 1]));
+    let native = native_with(&w, true, 64, 0);
+    let want: Vec<u32> = (0..64u32)
+        .flat_map(|n| if n < 32 { [1, 0, 3, 1] } else { [3, 32, 3, 3] })
+        .collect();
+    for step in [false, true] {
+        let was = lower::TEST_PAIRED_STEP.replace(Some(step));
+        let before = lower::PAIRED_STEPS.load(std::sync::atomic::Ordering::Relaxed);
+        let shader = paired(&native);
+        let added = lower::PAIRED_STEPS.load(std::sync::atomic::Ordering::Relaxed) - before;
+        // the form emit records for the program
+        let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+        let st = structure::structure(&p).expect("structure");
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+        let io = io::raise(&p, &native).expect("io::raise");
+        let bytes = crate::dxbc::build(&[]);
+        let c = super::Container::parse(&bytes).expect("container");
+        let host = lower::TEST_HOST_WAVE.replace(Some(32));
+        let chosen = super::emit(&c, &native, &p, &st, &io, &res).expect("emit");
+        lower::TEST_HOST_WAVE.set(host);
+        lower::TEST_PAIRED_STEP.set(was);
+        if chosen.dxil == shader.dxil {
+            assert_eq!(chosen.wave.form, super::wave_form::PAIRED, "the form emit records");
+        }
+        assert_eq!(added > 0, step, "in-step barriers added only with VICTORY_WAVE_PAIRED_STEP=1");
+        let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(got) = run_paired(&shader, [0; 4], 256) else { return };
+        same_as_console(&got, &want);
+        eprintln!("ran on the hardware device: a loop left by halves, in step {step}: as on the console");
+    }
+}
+
+/// [`emit`](super::emit) records the form a wave64 program took on a host of 32-lane waves
+/// ([`super::WaveForm`]) and nothing for other programs: the wave OR of [`program`] inside a
+/// per-lane branch takes a form named in [`super::wave_form`]; on a host of 64-lane waves the form is none.
+#[test]
+fn emit_records_the_wave64_form() {
+    let native = program(0xBF88_0000);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let st = structure::structure(&p).expect("structure");
+    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+    let io = io::raise(&p, &native).expect("io::raise");
+    let bytes = crate::dxbc::build(&[]);
+    let c = super::Container::parse(&bytes).expect("container");
+    for (lanes, on_32) in [(32, true), (64, false)] {
+        let was = lower::TEST_HOST_WAVE.replace(Some(lanes));
+        let shader = super::emit(&c, &native, &p, &st, &io, &res);
+        lower::TEST_HOST_WAVE.set(was);
+        let shader = shader.expect("emit");
+        if on_32 {
+            assert_ne!(shader.wave.form, super::wave_form::NONE, "a form on 32 lanes");
+            assert_ne!(super::wave_form::name(shader.wave.form), "?");
+        } else {
+            assert_eq!(shader.wave.form, super::wave_form::NONE, "no form on 64 lanes");
+        }
+    }
+}
+
+/// (`VICTORY_LDS_FIRST_INIT`, foxhound 454ffea) One console wave of 64 with LDS: every lane
+/// writes 7 to dword 0; lanes 0-4 leave; then the group's first thread alone sets dword 0 to
+/// "none yet" (`v_cmpx_eq_u32 exec, 0, v0`, constants moved in, `ds_write_b32`), as the
+/// title's tiled water light does at 0x230; every lane reads dword 0. As the console (switch
+/// off): lane 0 is not running, nothing is set up, 7 is read. With the switch the first
+/// thread sets it up whether its lane runs or not: -1 is read, and the set-up is counted.
+#[test]
+fn the_first_thread_sets_shared_memory_up_when_asked_even_with_its_lane_gone() {
+    let mut w = vec![
+        vop1(0x01, 12, k(7)), // v_mov_b32 v12, 7
+        vop1(0x01, 11, k(0)), // v_mov_b32 v11, 0
+    ];
+    w.extend(ds(0x0D, 0, 11, 12, 0)); // ds_write_b32 v11, v12
+    w.extend([
+        sop1(0x04, 20, EXEC), // s_mov_b64 s[20:21], exec
+        vopc(0xD1, k(4), 0),  // v_cmpx_lt_u32 exec, 4, v0: lanes 5-63
+        vopc(0xD2, k(0), 0),  // v_cmpx_eq_u32 exec, 0, v0: the group's first thread
+        vop1(0x01, 19, k(0)), // v_mov_b32 v19, 0
+        vop1(0x01, 20, 193),  // v_mov_b32 v20, -1
+    ]);
+    w.extend(ds(0x0D, 0, 19, 20, 0)); // ds_write_b32 v19, v20
+    w.push(sop1(0x04, EXEC, 20)); // s_mov_b64 exec, s[20:21]
+    w.extend(ds(0x36, 6, 11, 0, 0)); // ds_read_b32 v6, v11
+    w.extend(stores([6, 6, 6, 6]));
+    let native = native_with(&w, true, 64, 256);
+    for on in [false, true] {
+        let was = lower::TEST_LDS_FIRST_INIT.replace(Some(on));
+        let before = lower::LDS_FIRST_INITS.load(std::sync::atomic::Ordering::Relaxed);
+        let shader = paired(&native);
+        let added = lower::LDS_FIRST_INITS.load(std::sync::atomic::Ordering::Relaxed) - before;
+        lower::TEST_LDS_FIRST_INIT.set(was);
+        assert_eq!(added > 0, on, "set-ups by the first thread only with the switch");
+        let x = if on { u32::MAX } else { 7 };
+        let want = vec![x; 64 * 4];
+        let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(got) = run_paired(&shader, [0; 4], 256) else { return };
+        same_as_console(&got, &want);
+        eprintln!("ran on the hardware device: shared memory set up by the first thread, switch {on}");
+    }
+}
+
+/// (`VICTORY_LOOPS_WAVE`, foxhound 454ffea) A console program of 32-lane waves (one wave of 32
+/// threads): each lane loops (lane & 3) + 1 times, leaving by EXEC; behind the loop the lanes
+/// that looped more than once are counted (`s_bcnt1_i32_b32` of a compare's mask) and the
+/// first lane's count read. With `VICTORY_LOOPS_WAVE=2` the loop's branch is taken by the host
+/// wave together (counted), and on the card the results are the console's.
+#[test]
+fn a_loop_kept_together_by_the_host_wave_gives_the_consoles_ballot_behind_it() {
+    let mut w = vec![
+        vop2(0x1B, 3, k(3), 0),      // v_and_b32 v3, 3, v0
+        vop2(0x25, 3, k(1), 3),      // v_add_nc_u32 v3, 1, v3: the rounds
+        vop1(0x01, 4, k(0)),         // v_mov_b32 v4, 0
+        sop1(0x03, 20, EXEC),        // s_mov_b32 s20, exec_lo
+        vop2(0x25, 4, k(1), 4),      // loop: v_add_nc_u32 v4, 1, v4
+        vop2(0x25, 3, 193, 3),       // v_add_nc_u32 v3, -1, v3
+        vopc(0xC5, k(0), 3),         // v_cmp_ne_u32 vcc, 0, v3
+        sop2(0x0E, EXEC, EXEC, VCC), // s_and_b32 exec_lo, exec_lo, vcc_lo
+        sopp(0x09, -5),              // s_cbranch_execnz loop
+        sop1(0x03, EXEC, 20),        // s_mov_b32 exec_lo, s20
+        vopc(0xC1, k(1), 4),         // v_cmp_lt_u32 vcc, 1, v4
+        sop1(0x0F, 16, VCC),         // s_bcnt1_i32_b32 s16, vcc_lo
+        vop1(0x02, 6, v(4)),         // v_readfirstlane_b32 s6, v4
+        vop1(0x01, 9, 16),           // v_mov_b32 v9, s16
+        vop1(0x01, 10, 6),           // v_mov_b32 v10, s6
+    ];
+    w.extend(stores([4, 9, 10, 3]));
+    let native = native_with(&w, false, 32, 0);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let st = structure::structure(&p).expect("structure");
+    let res = resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+    let io = io::raise(&p, &native).expect("io::raise");
+    let bytes = crate::dxbc::build(&[]);
+    let c = super::Container::parse(&bytes).expect("container");
+    let want: Vec<u32> = (0..32u32).flat_map(|n| [(n & 3) + 1, 24, 1, 0]).collect();
+    for mode in [0u8, 2] {
+        let was = lower::TEST_LOOPS_WAVE.replace(Some(mode));
+        let host = lower::TEST_HOST_WAVE.replace(Some(32));
+        let before = lower::LOOPS_WAVE_TAKEN.load(std::sync::atomic::Ordering::Relaxed);
+        let shader = super::emit(&c, &native, &p, &st, &io, &res).expect("emit");
+        let taken = lower::LOOPS_WAVE_TAKEN.load(std::sync::atomic::Ordering::Relaxed) - before;
+        lower::TEST_HOST_WAVE.set(host);
+        lower::TEST_LOOPS_WAVE.set(was);
+        assert_eq!(taken > 0, mode == 2, "the loop kept together only with the switch");
+        if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+            v.validate(&mut shader.dxil.clone()).unwrap_or_else(|e| panic!("DXIL validation: {e}"));
+        }
+        let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(got) = run_paired(&shader, [0; 4], 128) else { return };
+        same_as_console(&got, &want);
+        eprintln!("ran on the hardware device: a loop and a ballot behind it, VICTORY_LOOPS_WAVE={mode}");
+    }
+}
+
+/// (`VICTORY_SKIP_STALLS`, foxhound 454ffea) A skip (`s_cbranch_execz`) around a loop whose
+/// end is the SCC of a compare behind an inner skip: with no lane left the inner skip is
+/// taken, SCC is the inner `s_and_saveexec`'s "no lane", and the loop never ends. The console
+/// never runs the region without lanes; `ir::without_skips` would. With the switch it keeps
+/// that skip (counted); without, nothing is kept.
+#[test]
+fn a_skip_around_a_loop_that_stalls_without_lanes_is_kept_when_asked() {
+    let mut w = vec![
+        sop1(0x03, 7, k(0)),                      // s_mov_b32 s7, 0
+        vopc(0xC4, 0, 0),                         // v_cmp_gt_u32 vcc, s0, v0
+        sop1(0x24, 12, VCC),                      // s_and_saveexec_b64 s[12:13], vcc
+        sopp(0x08, 6),                            // s_cbranch_execz end
+        sop2(0x00, 7, 7, k(1)),                   // loop: s_add_u32 s7, s7, 1
+        sop1(0x24, 14, VCC),                      // s_and_saveexec_b64 s[14:15], vcc
+        sopp(0x08, 1),                            // s_cbranch_execz past the compare
+        0xBF00_0000 | 0x09 << 16 | k(5) << 8 | 7, // s_cmp_ge_u32 s7, 5
+        sop1(0x04, EXEC, 14),                     // s_mov_b64 exec, s[14:15]
+        sopp(0x04, -6),                           // s_cbranch_scc0 loop
+        sop1(0x04, EXEC, 12),                     // end: s_mov_b64 exec, s[12:13]
+    ];
+    w.extend(stores([0, 0, 0, 0]));
+    let native = native_with(&w, true, 64, 0);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let mut kept = [0u64; 2];
+    for (n, on) in [false, true].into_iter().enumerate() {
+        let was = crate::ir::TEST_SKIP_STALLS.replace(Some(on));
+        let before = crate::ir::SKIPS_KEPT.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = ir::without_skips(&p, false);
+        let _ = ir::without_skips(&p, true);
+        kept[n] = crate::ir::SKIPS_KEPT.load(std::sync::atomic::Ordering::Relaxed) - before;
+        crate::ir::TEST_SKIP_STALLS.set(was);
+    }
+    assert_eq!(kept[0], 0, "nothing kept without the switch");
+    assert!(kept[1] > 0, "the stalling skip kept with the switch");
 }

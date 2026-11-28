@@ -160,6 +160,10 @@ impl Shader {
                         let _ = std::fs::write(dir.join(format!("{stem}.dxil")), &t.host.dxil);
                     }
                 }
+                #[cfg(feature = "diagnostics")]
+                if let Ok(t) = &done {
+                    make::note_wave_form(&self.hash, &self.container, &t.host.wave);
+                }
                 if let Ok(t) = &done {
                     KEPT[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     KEPT[3].fetch_add(t.host.dxil.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -614,6 +618,46 @@ fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
     Some(shader(stage, unsafe {
         std::slice::from_raw_parts(code.code, code.size)
     }))
+}
+
+/// (CGBJ main, after LukeFarch) Device method 0x218: a compute pipeline from precompiled console
+/// code, `(desc, iid, out)`. The description: the root signature, then (address, size) pairs (0x1c
+/// bytes of state, 0x14 bytes, the code, ...), as our meter logged it (run-322: `[root, a, 1c, b,
+/// 14, code, 340, ...]`). The code's first 24 bytes are looked up in the index `victory shaders`
+/// writes (`crate::precompiled`) and the pipeline made from that container, as
+/// `CreateComputePipelineState` would. With `VICTORY_PRECOMPILED` off, or when the code is not
+/// in the index, the call fails as before ([`crate::device::unknown_pipeline`]).
+/// shortcut: the state blocks are not read; threads per group and bindings come from the
+/// container, which holds the same program.
+pub(crate) extern "system" fn create_precompiled_compute(this: This, desc: *const u8, iid: *const Iid, out: *mut This) -> HRESULT {
+    use std::sync::atomic::Ordering::Relaxed;
+    #[cfg(windows)]
+    if crate::precompiled::on(0x218) {
+        let mut bytes = [0u8; 7 * 8];
+        if !desc.is_null() && crate::host::read_into(desc, &mut bytes) {
+            let word = |i: usize| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap_or_default());
+            let (address, size) = (word(5), word(6));
+            let mut head = [0u8; crate::precompiled::HEAD];
+            if address >= 0x10000
+                && size as usize >= crate::precompiled::HEAD
+                && crate::host::read_into(address as *const u8, &mut head)
+                && let Some((stage, container)) = crate::precompiled::container(&head)
+                && stage == "Cs"
+            {
+                if !out.is_null() {
+                    // SAFETY: the title's out pointer.
+                    unsafe { *out = std::ptr::null() };
+                }
+                let n = crate::precompiled::MADE[0].fetch_add(1, Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::info!(made = n, not_found = crate::precompiled::MADE[1].load(Relaxed), "precompiled compute pipelines made from the title's containers (VICTORY_PRECOMPILED, method 0x218)");
+                }
+                return hand_out(vec![shader("compute", &container)], None, iid, out);
+            }
+        }
+        crate::precompiled::MADE[1].fetch_add(1, Relaxed);
+    }
+    crate::device::unknown_pipeline::<0x218>(this, desc, iid, out)
 }
 
 fn hand_out(

@@ -5,6 +5,9 @@
 //! buffers a host copy when a draw reads them (`shadow`).
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -87,11 +90,11 @@ pub(crate) struct HeapDesc {
 pub(crate) struct ResourceDesc {
     dimension: u32,
     alignment: u64,
-    width: u64,
-    height: u32,
+    pub(crate) width: u64,
+    pub(crate) height: u32,
     depth_or_array_size: u16,
-    mip_levels: u16,
-    format: u32,
+    pub(crate) mip_levels: u16,
+    pub(crate) format: u32,
     sample_count: u32,
     sample_quality: u32,
     layout: u32,
@@ -1583,6 +1586,17 @@ fn textures() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<usize
 static TARGETS_AT: std::sync::Mutex<std::collections::BTreeMap<u64, usize>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+/// (`texrecheck` diagnostics) The texture the host writes (target, depth or
+/// unordered access) placed nearest at or below `address + len`: its offset
+/// from `address` (negative: it starts before), width, height, format, flags.
+#[cfg(windows)]
+pub(crate) fn target_near(address: u64, len: u64) -> Option<(i64, u64, u32, u32, u32)> {
+    let targets = TARGETS_AT.lock().unwrap_or_else(|e| e.into_inner());
+    let (&at, &this) = targets.range(..address.saturating_add(len)).next_back()?;
+    let d = resource(this as This).desc;
+    Some((at as i64 - address as i64, d.width, d.height, d.format, d.flags))
+}
+
 /// For `this`, a texture made for a view the title placed in memory
 /// ([`texture_at`]): the title texture the host writes that lies in the
 /// same memory, if there is one of the same size, levels and layers with
@@ -1985,7 +1999,99 @@ pub(crate) fn targets_room_kept() -> u64 {
     });
     // Every host texture's bytes less those of the copies the title fills.
     let targets = HOST_TEXTURES[1].load(Relaxed).saturating_sub(KINDS[1].load(Relaxed));
-    most.saturating_sub(targets)
+    let settle = targets_settle_ms();
+    if settle == 0 {
+        return most.saturating_sub(targets);
+    }
+    // (3070 port of b4ed67d, `VICTORY_CARD_ROOM_FOR_TARGETS_SETTLE_MS`) The
+    // targets' bytes at their last change of 64 MiB or more, and when they
+    // last grew by that much. (Two threads may race on the record: either
+    // one's view is kept, off by one asking at most.)
+    let now = crate::host::now_ms();
+    let (last, since) = (TARGETS_GREW[0].load(Relaxed), TARGETS_GREW[1].load(Relaxed));
+    let (last, since) = targets_seen(last, since, targets, now);
+    TARGETS_GREW[0].store(last, Relaxed);
+    TARGETS_GREW[1].store(since, Relaxed);
+    let kept = targets_kept(most, targets, now.saturating_sub(since), settle);
+    let was_released = TARGETS_RELEASED[0].swap(u64::from(kept == 0 && targets < most), Relaxed) == 1;
+    if kept == 0 && targets < most && !was_released {
+        TARGETS_RELEASED[1].fetch_add(1, Relaxed);
+        TARGETS_RELEASED[2].store(most - targets, Relaxed);
+    }
+    kept
+}
+
+/// (3070 port of b4ed67d) `VICTORY_CARD_ROOM_FOR_TARGETS_SETTLE_MS`: once the
+/// render targets hold half of [`targets_room_kept`]'s reserve or more and
+/// have not grown by 64 MiB for this many ms, the rest of the reserve is
+/// given to the texture queue; it comes back when they grow again. 0 (the
+/// default): always kept, as before. (The fork's default was 20,000.)
+#[cfg(windows)]
+pub(crate) fn targets_settle_ms() -> u64 {
+    static SETTLE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SETTLE.get_or_init(|| {
+        std::env::var("VICTORY_CARD_ROOM_FOR_TARGETS_SETTLE_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0)
+    })
+}
+
+/// [`targets_room_kept`]'s record: the targets' bytes and the ms they last grew.
+#[cfg(windows)]
+static TARGETS_GREW: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// Whether the reserve is released now (1), how many times it was released,
+/// and the bytes the last release gave.
+#[cfg(windows)]
+pub(crate) static TARGETS_RELEASED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// [`targets_room_kept`]'s record of the targets' bytes (`last`) and of
+/// when they last grew by 64 MiB (`since`, ms), with `targets` now.
+#[cfg(any(windows, test))]
+fn targets_seen(last: u64, since: u64, targets: u64, now: u64) -> (u64, u64) {
+    const STEP: u64 = 64 << 20;
+    if targets >= last.saturating_add(STEP) {
+        (targets, now)
+    } else if targets.saturating_add(STEP) <= last {
+        (targets, since)
+    } else {
+        (last, since)
+    }
+}
+
+/// What [`targets_room_kept`] keeps of `most`: what the targets do not
+/// hold yet, or nothing once they hold half of it or more and have not
+/// grown for `settle` ms (`still_ms`; `settle` 0: always kept).
+#[cfg(any(windows, test))]
+fn targets_kept(most: u64, targets: u64, still_ms: u64, settle: u64) -> u64 {
+    if settle > 0 && targets >= most / 2 && still_ms >= settle {
+        0
+    } else {
+        most.saturating_sub(targets)
+    }
+}
+
+#[cfg(test)]
+mod targets_settle_tests {
+    use super::{targets_kept, targets_seen};
+    const MB: u64 = 1 << 20;
+
+    #[test]
+    fn the_reserve_goes_only_once_the_targets_are_settled_and_comes_back_when_they_grow() {
+        let most = 3072 * MB;
+        // Off: always what the targets do not hold.
+        assert_eq!(targets_kept(most, 2800 * MB, u64::MAX, 0), 272 * MB);
+        // Under half of the reserve: kept however long they are still.
+        assert_eq!(targets_kept(most, 1000 * MB, u64::MAX, 20_000), 2072 * MB);
+        // Half or more, not still long enough: kept; long enough: released.
+        assert_eq!(targets_kept(most, 2800 * MB, 19_999, 20_000), 272 * MB);
+        assert_eq!(targets_kept(most, 2800 * MB, 20_000, 20_000), 0);
+        // The record: growth of 64 MiB restarts the clock, smaller changes
+        // do not, a fall of 64 MiB is noted without restarting it.
+        let (last, since) = targets_seen(0, 0, 2000 * MB, 1_000);
+        assert_eq!((last, since), (2000 * MB, 1_000));
+        assert_eq!(targets_seen(last, since, 2060 * MB, 5_000), (2000 * MB, 1_000));
+        assert_eq!(targets_seen(last, since, 2064 * MB, 5_000), (2064 * MB, 5_000));
+        assert_eq!(targets_seen(last, since, 1936 * MB, 5_000), (1936 * MB, 1_000));
+    }
 }
 
 /// [`room`] as it was at most a tenth of a second ago, for a question
@@ -3147,6 +3253,31 @@ pub(crate) fn housekeeping() {
             _ => "0",
         },
     );
+    // (3070 ports) The three memory items' own counters, since the start.
+    {
+        let now: [u64; 4] = std::array::from_fn(|i| crate::host::EVICT_NOW[i].load(Relaxed));
+        let scratch: [u64; 3] = std::array::from_fn(|i| crate::shadow::MERGE_SCRATCH[i].load(Relaxed));
+        tracing::info!(
+            "memory items (3070 ports), since the start: idle copies let go at once when the card had no room {} looks, room after {} of \
+             them, {} MB let go, {} ms (VICTORY_IDLE_EVICT_NOW={}); render-target reserve kept {} MB, released now {}, released {} times, \
+             {} MB the last time (VICTORY_CARD_ROOM_FOR_TARGETS_SETTLE_MS={}); merges wholly left out read none {} ({} MB), scratch not \
+             zeroed {} MB (VICTORY_MERGE_SCRATCH={})",
+            now[0],
+            now[1],
+            mb(now[2]),
+            now[3] / 1000,
+            std::env::var("VICTORY_IDLE_EVICT_NOW").unwrap_or_else(|_| "0".into()),
+            mb(targets_room_kept()),
+            if TARGETS_RELEASED[0].load(Relaxed) == 1 { "yes" } else { "no" },
+            TARGETS_RELEASED[1].load(Relaxed),
+            mb(TARGETS_RELEASED[2].load(Relaxed)),
+            targets_settle_ms(),
+            scratch[0],
+            mb(scratch[1]),
+            mb(scratch[2]),
+            u8::from(crate::shadow::merge_scratch()),
+        );
+    }
     // (coder K2) Made again, by who let the copy go.
     {
         let by: [[u64; 2]; 5] = std::array::from_fn(|i| [MADE_AGAIN_BY[i][0].load(Relaxed), MADE_AGAIN_BY[i][1].load(Relaxed)]);
@@ -3522,8 +3653,11 @@ fn host_texture_as(
     };
     // A texture the title fills, whose every subresource is uploaded before
     // anything reads it: cut from a block (what the piece held before shows
-    // in no texel).
-    if fills(desc)
+    // in no texel). Not one asked for without memory (levels on demand, `crate::tiles`;
+    // ScarlettPort 1deb0be): a texture from a block is a committed one, which cannot be
+    // given levels, so every such texture was dropped and made whole again.
+    if !reserved
+        && fills(desc)
         && d.sample_count <= 1
         && clear_value.is_none()
         && texture_layout(desc).is_some_and(|t| !t.planes[0].layout.desc.swizzle.xor())
@@ -4809,7 +4943,7 @@ mod tests {
         };
         // SAFETY: an open list, live resources, locations in the host layout.
         unsafe {
-            back.list.ResourceBarrier(&[crate::host::transition(
+            back.list.barriers_counted(&[crate::host::transition(
                 host_image,
                 D3D12_RESOURCE_STATES(before as i32),
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -4977,19 +5111,19 @@ mod tests {
         unsafe {
             let l = &list.list;
             // The pattern into the twin, the twin into the depth texture.
-            l.ResourceBarrier(&[moved(twin, written, dest), moved(host_depth, tested, dest)]);
+            l.barriers_counted(&[moved(twin, written, dest), moved(host_depth, tested, dest)]);
             l.CopyTextureRegion(&whole(twin), 0, 0, 0, &rows(&upload, 0), None);
-            l.ResourceBarrier(&[moved(twin, dest, source)]);
+            l.barriers_counted(&[moved(twin, dest, source)]);
             l.CopyResource(host_depth, twin);
             // Zeros over the twin, then the depth texture back into it.
-            l.ResourceBarrier(&[moved(twin, source, dest)]);
+            l.barriers_counted(&[moved(twin, source, dest)]);
             l.CopyTextureRegion(&whole(twin), 0, 0, 0, &rows(&upload, 1024), None);
-            l.ResourceBarrier(&[moved(host_depth, dest, source)]);
+            l.barriers_counted(&[moved(host_depth, dest, source)]);
             l.CopyResource(twin, host_depth);
             // The twin read back; both textures to the states they had.
-            l.ResourceBarrier(&[moved(twin, dest, source)]);
+            l.barriers_counted(&[moved(twin, dest, source)]);
             l.CopyTextureRegion(&rows(&readback, 0), 0, 0, 0, &whole(twin), None);
-            l.ResourceBarrier(&[
+            l.barriers_counted(&[
                 moved(twin, source, written),
                 moved(host_depth, source, tested),
             ]);
@@ -5153,9 +5287,9 @@ mod tests {
         // SAFETY: an open list and live resources.
         unsafe {
             let l = &fill.list;
-            l.ResourceBarrier(&[moved(twin, written, dest)]);
+            l.barriers_counted(&[moved(twin, written, dest)]);
             l.CopyTextureRegion(&whole(twin, 0), 0, 0, 0, &rows(&upload, pattern_rows), None);
-            l.ResourceBarrier(&[moved(twin, dest, written)]);
+            l.barriers_counted(&[moved(twin, dest, written)]);
         }
         fill.close();
         host.execute(&[&fill]);
@@ -5175,10 +5309,10 @@ mod tests {
         // SAFETY: an open list and live resources; a whole subresource.
         unsafe {
             let l = &back.list;
-            l.ResourceBarrier(&[moved(host_depth, state, source)]);
+            l.barriers_counted(&[moved(host_depth, state, source)]);
             let (to, from) = (rows(&readback, plane), whole(host_depth, 1));
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
-            l.ResourceBarrier(&[moved(host_depth, source, state)]);
+            l.barriers_counted(&[moved(host_depth, source, state)]);
         }
         back.close();
         host.execute(&[&back]);
@@ -5380,9 +5514,9 @@ mod tests {
         // SAFETY: an open list and live resources.
         unsafe {
             let l = &fill.list;
-            l.ResourceBarrier(&[moved(plane, written, dest)]);
+            l.barriers_counted(&[moved(plane, written, dest)]);
             l.CopyTextureRegion(&whole(plane), 0, 0, 0, &rows(&upload, rows_of(53)), None);
-            l.ResourceBarrier(&[moved(plane, dest, written)]);
+            l.barriers_counted(&[moved(plane, dest, written)]);
         }
         fill.close();
         host.execute(&[&fill]);
@@ -5470,7 +5604,7 @@ float4 lit() : SV_Target { return 1.0; }
         unsafe {
             let l = &back.list;
             if state != tested {
-                l.ResourceBarrier(&[moved(host_depth, state, tested)]);
+                l.barriers_counted(&[moved(host_depth, state, tested)]);
             }
             l.ClearRenderTargetView(colour, &[0.0; 4], None);
             l.SetGraphicsRootSignature(&signature);
@@ -5496,7 +5630,7 @@ float4 lit() : SV_Target { return 1.0; }
                 l.SetGraphicsRoot32BitConstant(0, class, 0);
                 l.DrawInstanced(3, 1, 0, 0);
             }
-            l.ResourceBarrier(&[moved(&target, drawn, source)]);
+            l.barriers_counted(&[moved(&target, drawn, source)]);
             let (to, from) = (rows(&readback, rows_of(61)), whole(&target));
             l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
         }

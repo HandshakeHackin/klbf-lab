@@ -853,15 +853,30 @@ extern "system" fn submit(
     notification: u32,
 ) -> HRESULT {
     static SEEN: Mutex<u64> = Mutex::new(0);
-    if command < 64 && *lock(&SEEN) & 1 << command == 0 {
-        *lock(&SEEN) |= 1 << command;
-        tracing::info!(command, "first coprocessor command of this kind");
-    }
-    let mut state = state(this);
+    static SEEN_HIGH: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    let first = if command < 64 {
+        let mut seen = lock(&SEEN);
+        let first = *seen & 1 << command == 0;
+        *seen |= 1 << command;
+        first
+    } else {
+        let mut seen = lock(&SEEN_HIGH);
+        let first = !seen.contains(&command) && seen.len() < 64;
+        if first {
+            seen.push(command);
+        }
+        first
+    };
     let word = |at: usize| -> Option<u32> {
         // SAFETY: the command's data starts with these u32 fields.
         (!data.is_null()).then(|| unsafe { data.cast::<u32>().add(at).read_unaligned() })
     };
+    if first {
+        // (diagnostic) The first 4 data words; a command with less data shows the bytes after it.
+        let words: Vec<String> = (0..4).filter_map(word).map(|w| format!("{w:#x}")).collect();
+        tracing::info!(command, id, notification, words = ?words, "first coprocessor command of this kind");
+    }
+    let mut state = state(this);
     match command {
         REGISTER_MESSAGES => state.mask |= word(0).unwrap_or(0),
         UNREGISTER_MESSAGES => state.mask &= !word(0).unwrap_or(0),

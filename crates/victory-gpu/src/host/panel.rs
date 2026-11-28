@@ -8,6 +8,9 @@
 //! buffer, behind the title's picture: saved frames and the frame recorder
 //! see the title's own.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

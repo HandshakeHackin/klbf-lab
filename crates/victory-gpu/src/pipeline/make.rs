@@ -797,6 +797,78 @@ fn program_name(container: &[u8]) -> Option<String> {
     (at - start >= 4).then(|| String::from_utf8_lossy(&container[start..at]).into_owned())
 }
 
+/// (diagnostics) Console wave64 compute programs translated (or taken from the shader cache)
+/// since the start on a host of 32-lane waves: hash -> (form, why approximate, name).
+#[cfg(feature = "diagnostics")]
+static WAVE_FORMS: Mutex<std::collections::BTreeMap<String, (u8, String, String)>> =
+    Mutex::new(std::collections::BTreeMap::new());
+#[cfg(feature = "diagnostics")]
+static WAVE_FORMS_NEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// (diagnostics) Notes the form a program's translation took ([`wave_forms_line`]).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn note_wave_form(hash: &str, container: &[u8], wave: &victory_shader::emit::WaveForm) {
+    if wave.form == victory_shader::emit::wave_form::NONE {
+        return;
+    }
+    let name = program_name(container).unwrap_or_else(|| "?".to_owned());
+    let mut forms = WAVE_FORMS.lock().unwrap_or_else(|e| e.into_inner());
+    if forms.insert(hash.to_owned(), (wave.form, wave.note.clone(), name)).is_none() {
+        WAVE_FORMS_NEW.store(true, Ordering::Relaxed);
+    }
+}
+
+/// (diagnostics) One line, when programs were added since the last: how many console wave64
+/// compute programs took each form on this host of 32-lane waves, and by name the ones whose
+/// form is not exact (approximate, wave-wide) and the paired ones.
+#[cfg(feature = "diagnostics")]
+fn wave_forms_line() {
+    use victory_shader::emit::wave_form;
+    if !WAVE_FORMS_NEW.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let forms = WAVE_FORMS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut counts = std::collections::BTreeMap::<u8, usize>::new();
+    for (form, _, _) in forms.values() {
+        *counts.entry(*form).or_default() += 1;
+    }
+    let by_form: Vec<String> = counts.iter().map(|(f, n)| format!("{} {n}", wave_form::name(*f))).collect();
+    let named = |pick: &dyn Fn(u8) -> bool| -> Vec<String> {
+        forms
+            .iter()
+            .filter(|(_, (f, _, _))| pick(*f))
+            .map(|(hash, (f, note, name))| {
+                if note.is_empty() {
+                    format!("{name} #{hash} ({})", wave_form::name(*f))
+                } else {
+                    format!("{name} #{hash} ({}; {note})", wave_form::name(*f))
+                }
+            })
+            .collect()
+    };
+    let approximate = named(&|f| !wave_form::exact(f));
+    let paired = named(&|f| f == wave_form::PAIRED);
+    tracing::info!(
+        "wave64 forms on 32-lane waves, programs since the start: {} by form: {}; not exact {}: [{}]; paired {}: [{}]; \
+         in-step barriers added (VICTORY_WAVE_PAIRED_STEP={}): {}; VICTORY_WAVE_PAIRS_FIRST={}; translated this run:          loops kept by each host wave (VICTORY_LOOPS_WAVE={}) {}, shared-memory set-ups by the first thread          (VICTORY_LDS_FIRST_INIT={}) {}, skips kept before a stalling loop (VICTORY_SKIP_STALLS={}) {}",
+        forms.len(),
+        by_form.join(", "),
+        approximate.len(),
+        approximate.join(", "),
+        paired.len(),
+        paired.join(", "),
+        std::env::var("VICTORY_WAVE_PAIRED_STEP").unwrap_or_default(),
+        victory_shader::emit::PAIRED_STEPS.load(Ordering::Relaxed),
+        std::env::var("VICTORY_WAVE_PAIRS_FIRST").unwrap_or_default(),
+        std::env::var("VICTORY_LOOPS_WAVE").unwrap_or_default(),
+        victory_shader::emit::LOOPS_WAVE_TAKEN.load(Ordering::Relaxed),
+        std::env::var("VICTORY_LDS_FIRST_INIT").unwrap_or_default(),
+        victory_shader::emit::LDS_FIRST_INITS.load(Ordering::Relaxed),
+        std::env::var("VICTORY_SKIP_STALLS").unwrap_or_default(),
+        victory_shader::ir::SKIPS_KEPT.load(Ordering::Relaxed),
+    );
+}
+
 /// What `p` is made of, for the report: stage, hash and name if known.
 #[cfg(feature = "diagnostics")]
 fn describe(p: &Pending) -> String {
@@ -906,6 +978,7 @@ pub(crate) fn report(frames: f64) {
          unless =0)",
         families.join("; ")
     );
+    wave_forms_line();
 }
 
 /// The workers ran out of work: logged after a batch of 10 or more, and

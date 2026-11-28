@@ -21,6 +21,9 @@
 //! The looks cost memory and time (the bytes sent twice more, and each
 //! copy read over the bus at rest): the check is not for runs that are timed.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::collections::{BTreeMap, HashMap};
 
 use windows::Win32::Foundation::CloseHandle;
@@ -201,7 +204,7 @@ pub(super) fn record(
             .filter(|(s, _)| seen.insert(std::sync::Arc::as_ptr(s) as usize))
             .map(|(s, _)| transition(&s.buffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST))
             .collect();
-        list.ResourceBarrier(&done);
+        list.barriers_counted(&done);
     }
     Some(Looks {
         found: (found, answers as usize),
@@ -717,7 +720,7 @@ mod tests {
             unsafe {
                 for _ in 0..times {
                     list.list.CopyBufferRegion(&self.1, 0, &self.0, 0, 64 << 20);
-                    list.list.ResourceBarrier(&[
+                    list.list.barriers_counted(&[
                         transition(&self.1, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON),
                     ]);
                 }
@@ -733,7 +736,7 @@ mod tests {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
             list.list.CopyBufferRegion(&shadow.buffer, at as u64, &upload, 0, bytes.len() as u64);
             list.list
-                .ResourceBarrier(&[transition(&shadow.buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON)]);
+                .barriers_counted(&[transition(&shadow.buffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON)]);
         }
         list.keep(&upload);
     }
@@ -961,7 +964,7 @@ mod tests {
         unsafe {
             list.list.CopyBufferRegion(out.0, out.1, &shadow.buffer, at as u64, n as u64);
             list.list
-                .ResourceBarrier(&[transition(&shadow.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)]);
+                .barriers_counted(&[transition(&shadow.buffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)]);
         }
     }
 

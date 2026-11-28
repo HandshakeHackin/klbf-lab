@@ -754,6 +754,16 @@ pub(super) fn submit(this: This, lists: &[This]) {
         return;
     }
     let jobs = jobs_of(this, lists);
+    // (`VICTORY_TAKE_AHEAD`) Its refreshes taken ahead while what is ahead of it runs.
+    {
+        let behind = QUEUED.load(Relaxed) > 0;
+        for job in &jobs {
+            if let Job::Run(_, taken, _) = job {
+                let hosts: Vec<&crate::host::HostList> = taken.iter().map(crate::list::Detached::host).collect();
+                crate::host::ahead_take_joins(&hosts, behind);
+            }
+        }
+    }
     let runs = jobs.iter().filter(|j| j.runs()).count() as u64;
     let before = QUEUED.fetch_add(runs, Relaxed);
     STATS[RUNS].fetch_add(runs, Relaxed);

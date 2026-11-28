@@ -183,6 +183,7 @@ fn build_cs(body: &[u32], threads: u32, lds_bytes: u32) -> HostShader {
         root_indexed_views: res.root_indexed_views,
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
@@ -1978,6 +1979,7 @@ fn whole_wave_f64_sum_and_cvt_f32_f64() {
         root_indexed_views: Vec::new(),
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         let mut copy = shader.dxil.clone();
@@ -2190,6 +2192,7 @@ fn build_table_typed_cs(body: &[u32], used: Vec<UsedResource>) -> HostShader {
         root_indexed_views: res.root_indexed_views,
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         let mut copy = shader.dxil.clone();
@@ -2584,6 +2587,7 @@ fn a_place_only_d16_accesses_reach_moves_its_halves_as_unsigned_integers() {
         root_indexed_views: res.root_indexed_views,
         half_views: l.half_views,
         table_reads: None,
+        wave: Default::default(),
     };
     let bits: [u32; 8] =
         [0x3C00_0001, 0x7E00_BC00, 0xFFFF_8000, 0xABCD_1234, 0x0002_0000, 0x7BFF_FBFF, 0xDEAD_BEEF, 0xCAFE_BABE];

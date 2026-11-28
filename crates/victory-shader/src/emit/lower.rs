@@ -688,7 +688,10 @@ fn lane_regions(st: &Structured) -> Option<Vec<(usize, Vec<bool>)>> {
     let mut regions = Vec::new();
     for (d, e) in st.exits.iter().enumerate() {
         let LaneExit::Branch { when, .. } = *e else { continue };
-        if st.wide.contains(&d) || st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_))) {
+        // (a branch each host wave takes for itself separates the halves of a console wave)
+        if st.wide.contains(&d) && !st.host_wide.contains(&d)
+            || st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_)))
+        {
             continue; // a wave-wide or uniform branch: all lanes go the same way
         }
         // blocks reachable from the lane branch that do not post-dominate it
@@ -729,6 +732,122 @@ pub(super) fn needs_every_lane(what: &str) -> bool {
 
 /// The blocks where the last lowering on this thread wanted every lane and did not have it
 /// (its "... where not every lane runs" refusals), which it forgets.
+/// (foxhound 454ffea) `VICTORY_LOOPS_WAVE` (default off here; part of the translation, the
+/// shader cache keys on it): which compute programs get the per-lane branches that close or
+/// leave their loops taken by each host wave together where the translation depends on the
+/// host's waves (`emit::emit_program`):
+/// - unset or `0`: none, as before;
+/// - `1`: console wave64 compute programs on a host of 32-lane waves;
+/// - `2`: every compute program.
+///
+/// Why: the lowering turns the console's wave loops into loops each lane leaves on its own,
+/// and takes the code behind a loop as code the whole wave runs together. On NVIDIA the lanes
+/// that left a loop early run on as a wave of their own, so a ballot, a first-lane read or an
+/// exchange behind the loop sees a part of the wave (foxhound: `water_shading:
+/// CS_TransmissionVolumetrics_GenerateTiles`, the tiles with local lights never counted
+/// themselves in, their light list stayed empty: dark rectangles on the water beside lit
+/// objects).
+pub(super) fn loops_wave(native: &NativeProgram) -> bool {
+    if native.stage != HwStage::Cs {
+        return false;
+    }
+    #[cfg(test)]
+    let test = TEST_LOOPS_WAVE.get();
+    #[cfg(not(test))]
+    let test: Option<u8> = None;
+    let mode = test.unwrap_or_else(|| {
+        static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| match std::env::var("VICTORY_LOOPS_WAVE").ok().as_deref().map(str::trim) {
+            Some("1") => 1,
+            Some("2") => 2,
+            _ => 0,
+        })
+    });
+    match mode {
+        1 => native.wave64 && host_max_wave() == 32,
+        2 => true,
+        _ => false,
+    }
+}
+
+/// (foxhound 454ffea) `VICTORY_LDS_FIRST_INIT=1` (default off here; part of the translation):
+/// a thread group's set-up of its shared memory by its first thread alone (constants to
+/// constant addresses under `v_cmpx_eq_u32 exec, 0, <the thread's place>`) is done by that
+/// thread whether its lane still runs there or not ([`Lower::first_thread_init`]).
+pub(super) fn lds_first_init() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_LDS_FIRST_INIT.get() {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_LDS_FIRST_INIT").is_some_and(|v| v == "1"))
+}
+
+/// Set-ups of shared memory [`lds_first_init`] made unconditional, over every program
+/// translated in this process.
+pub static LDS_FIRST_INITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Programs [`loops_wave`] translated with their loop branches taken by each host wave.
+pub static LOOPS_WAVE_TAKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    /// A test's choice for [`loops_wave`]'s mode, for its thread only.
+    pub(super) static TEST_LOOPS_WAVE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+    /// A test's choice for [`lds_first_init`], for its thread only.
+    pub(super) static TEST_LDS_FIRST_INIT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The per-lane branches (by block) that close a loop or leave one, whose wave-wide meaning
+/// is known ([`Structured::wave_any`]): the ones a host wave takes together
+/// ([`crate::structure::structure_wide_host`]) so that its lanes stay one wave behind the
+/// loop. Not the branches the wave takes together already, nor those on scalar conditions.
+/// (foxhound 454ffea)
+pub(super) fn loop_branches(p: &Program, st: &Structured) -> HashSet<usize> {
+    let n = p.blocks.len();
+    let mut rpo = vec![usize::MAX; n];
+    for (i, b) in crate::ir::reverse_postorder(&p.blocks).into_iter().enumerate() {
+        rpo[b] = i;
+    }
+    let succ = |b: usize| -> Vec<usize> {
+        match p.blocks[b].exit {
+            Exit::Jump(t) => vec![t],
+            Exit::Branch { taken, not_taken } => vec![taken, not_taken],
+            _ => Vec::new(),
+        }
+    };
+    let mut out = HashSet::new();
+    for latch in (0..n).filter(|&b| rpo[b] != usize::MAX) {
+        for head in succ(latch).into_iter().filter(|&h| rpo[h] <= rpo[latch]) {
+            // the loop's blocks: the head, and what reaches the latch without passing it
+            let mut body = vec![false; n];
+            body[head] = true;
+            let mut stack = vec![latch];
+            while let Some(b) = stack.pop() {
+                if body[b] {
+                    continue;
+                }
+                body[b] = true;
+                stack.extend(p.blocks[b].preds.iter().copied().filter(|&q| rpo[q] != usize::MAX));
+            }
+            for b in (0..n).filter(|&b| body[b]) {
+                let LaneExit::Branch { when, taken, not_taken } = st.exits[b] else { continue };
+                let leaves = !body[taken] || !body[not_taken] || b == latch;
+                let per_lane = !st.wide.contains(&b)
+                    && !st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_)));
+                if leaves && per_lane && st.wave_any.get(b).copied().flatten().is_some() {
+                    out.insert(b);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Puts back what [`take_needs`] gave (a lowering tried in between is forgotten).
+pub(super) fn set_needs(needs: Vec<usize>) {
+    NEEDS.set(needs);
+}
+
 pub(super) fn take_needs() -> Vec<usize> {
     NEEDS.take()
 }
@@ -1140,7 +1259,33 @@ pub(super) fn host_max_wave() -> u32 {
 thread_local! {
     /// A test's host wave size, for its thread only ([`set_host_max_wave`] is the process's).
     pub(super) static TEST_HOST_WAVE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    /// A test's choice for [`paired_step`], for its thread only.
+    pub(super) static TEST_PAIRED_STEP: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
+
+/// `VICTORY_WAVE_PAIRED_STEP=1` (default off; part of the translation, the shader cache keys
+/// on it): the paired form ([`with_paired_lanes`]) of a program whose thread group is one
+/// console wave (one host wave of 32 threads) without the shortcut of a host wave's threads
+/// running in step: a group barrier (`GroupMemoryBarrierWithGroupSync`) before each of the
+/// console's vector, LDS and cross-lane instructions, so that every thread has done the
+/// console's previous instruction, for both its lanes, before any thread starts the next. The
+/// order of every LDS access and cross-lane read is then the console's by D3D12's own rules,
+/// not by the host's way of running a wave. Every thread of such a group reaches each barrier
+/// (each per-lane branch is the wave's in the paired form), so it is legal. Slow: a reference
+/// form, to tell whether the in-step shortcut is what makes a program differ from the console.
+/// Groups of several console waves are left as they are (a barrier in a branch one host wave
+/// takes and the other does not would wait for threads that never come).
+pub(super) fn paired_step() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_PAIRED_STEP.get() {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WAVE_PAIRED_STEP").is_some_and(|v| v == "1"))
+}
+
+/// Barriers [`paired_step`] added, over every program translated in this process.
+pub static PAIRED_STEPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(super) fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
     // A scalar select uses the condition of the whole guest wave, even
@@ -2557,6 +2702,17 @@ impl<'a> Lower<'a> {
             let mut i = 0;
             while i < p.blocks[b].insts.len() {
                 if self.twin.is_some() {
+                    // (`VICTORY_WAVE_PAIRED_STEP=1`: the group in step by barriers, not by the
+                    // host's way of running a wave)
+                    let one_wave = matches!(self.x.native.io, StageIo::Cs(cs) if cs.threads.iter().product::<u32>() <= 64);
+                    if one_wave
+                        && paired_step()
+                        && !matches!(p.blocks[b].insts[i].fields, Fields::Sop { .. } | Fields::Sopp { .. } | Fields::Smem { .. })
+                    {
+                        let (mode, void) = (self.s.m.i32(1 | 8), self.s.t.void);
+                        self.s.op(self.cur, "barrier", Attr::NoDuplicate, void, 80, &[mode]);
+                        PAIRED_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     self.paired_inst(b, i)?;
                 } else {
                     self.inst(b, i)?;
@@ -2842,11 +2998,15 @@ impl<'a> Lower<'a> {
 
     /// A component of a compute thread or group id, read in the entry block.
     fn compute_id(&mut self, name: &str, opcode: u32, c: u8) -> Val {
+        let split = opcode == 94 && c == 0 && self.x.native.stage == HwStage::Cs && super::shader::groups_split();
         let (entry, c) = (self.s.entry, self.s.m.i32(u32::from(c)));
-        Val::I32(
-            self.s
-                .op(entry, name, Attr::ReadNone, self.s.t.i32, opcode, &[c]),
-        )
+        let id = self.s.op(entry, name, Attr::ReadNone, self.s.t.i32, opcode, &[c]);
+        if !split {
+            return Val::I32(id);
+        }
+        // (`VICTORY_GROUPS_SPLIT`) The groups before this part of a split dispatch.
+        let offset = self.host_word(RootType::Other(super::shader::USER_GROUP_OFFSET), 0, 0);
+        Val::I32(self.s.m.bin(entry, Bin::Add, id, offset))
     }
 
     fn find_input(&self, row: u8, channel: u8) -> Option<(usize, u8)> {
@@ -4613,6 +4773,19 @@ impl<'a> Lower<'a> {
     fn wave_wide(&mut self, b: usize, when: Bool) -> Result<V, Why> {
         const WHY: Why = "a wave-wide branch where not every lane runs";
         let any = self.x.st.wave_any.get(b).copied().flatten().ok_or("a wave-wide branch on a scalar condition")?;
+        if self.x.st.host_wide.contains(&b) {
+            // (foxhound 454ffea, `VICTORY_LOOPS_WAVE`) A loop's branch each host wave takes for
+            // itself: the host wave's own answer. Its lanes then leave the loop together and
+            // are one wave behind it. A host wave whose lanes are all done goes on while the
+            // other half of its console wave still loops: the console would run the loop's
+            // code with those lanes off, which changes nothing of theirs.
+            let c = self.cur;
+            let mine = self.boolean(when, c)?;
+            let i1t = self.s.t.i1;
+            self.s.flags |= flags::WAVE_OPS;
+            let (name, code) = if any { ("waveAnyTrue", 113) } else { ("waveAllTrue", 114) };
+            return Ok(self.s.op(c, name, Attr::NoUnwind, i1t, code, &[mine]));
+        }
         if self.twin.is_some() {
             // The paired form: the host wave is the console's, each thread with two of its
             // lanes; every lane is here (control flow is the wave's), and a lane outside EXEC
@@ -5299,6 +5472,116 @@ impl<'a> Lower<'a> {
             .collect()
     }
 
+    /// (foxhound 454ffea, `VICTORY_LDS_FIRST_INIT=1`) An LDS write (instruction `i` of block
+    /// `b`) that is the thread group's set-up of its shared memory: constants to a constant
+    /// address, under `v_cmpx_eq_u32 exec, 0, <the thread's place in its group>`, so by the
+    /// group's first thread alone. Gives that thread's test and (byte address, constant) per
+    /// dword written.
+    ///
+    /// The console runs it only if the first thread's lane still runs there: a group whose
+    /// first thread has left (its pixel is not water, say) starts from what the group before
+    /// it left in LDS, on the console most often the neighbouring tile's values of the same
+    /// program, on a PC card anything. Seen in `water_shading:CS_TransmissionVolumetrics_Tiled`
+    /// (5dc3b25986622949, write at 0x230): it keeps the tile's least and greatest depth in LDS,
+    /// set to "none yet" by thread (0,0) after the lanes off the water have left; a tile whose
+    /// first pixel is not water then matches no lane to its depths and writes no light (dark
+    /// slabs on the water along the horizon and beside rocks, plants and hulls). With the
+    /// switch the first thread always sets it up: the tile works from its own depths alone.
+    fn first_thread_init(
+        &mut self,
+        b: usize,
+        i: usize,
+        addr: Option<&Operand>,
+        data: &[Operand],
+        elements: &[(u32, u32)],
+    ) -> Option<(V, Vec<(u32, u32)>)> {
+        if !lds_first_init() {
+            return None;
+        }
+        let StageIo::Cs(cs) = self.x.native.io else { return None };
+        let p = self.x.p;
+        let insts = &p.blocks[b].insts;
+        // the compare that left EXEC as it is at the write
+        let j = (0..i).rev().find(|&j| insts[j].write(Reg::S(EXEC)).is_some())?;
+        let Fields::Valu(cmp) = &insts[j].fields else { return None };
+        if insts[j].name() != "v_cmpx_eq_u32" {
+            return None;
+        }
+        let place = match cmp.src.as_slice() {
+            [Operand::Const(128), Operand::Vector { reg, .. }] | [Operand::Vector { reg, .. }, Operand::Const(128)] => {
+                insts[j].read(Reg::V(*reg))?
+            }
+            _ => return None,
+        };
+        // ... of the thread's place: its x, or x | y (| z), as the program entered with them
+        let input = |v: Value| {
+            p.inputs.iter().find(|i| i.1 == v).and_then(|i| match i.0 {
+                Reg::V(c @ 0..=2) => Some(c),
+                _ => None,
+            })
+        };
+        let mut parts: Vec<u8> = Vec::new();
+        let mut open = vec![place];
+        while let Some(v) = open.pop() {
+            if let Some(c) = input(v) {
+                parts.push(c as u8);
+                continue;
+            }
+            let made = p.blocks.iter().flat_map(|blk| &blk.insts).find(|k| k.writes.iter().any(|w| w.1 == v))?;
+            let Fields::Valu(or) = &made.fields else { return None };
+            if made.name() != "v_or_b32" || or.sdwa.is_some() || or.dpp.is_some() {
+                return None;
+            }
+            for op in &or.src {
+                let Operand::Vector { reg, .. } = op else { return None };
+                open.push(made.read(Reg::V(*reg))?);
+            }
+            if parts.len() + open.len() > 3 {
+                return None;
+            }
+        }
+        // (every dimension of the group that has more than one thread is tested)
+        if (0..3u8).any(|c| cs.threads[usize::from(c)] > 1 && !parts.contains(&c)) {
+            return None;
+        }
+        // the address and what is written: constants moved in since the compare
+        let constant = |op: &Operand| -> Option<u32> {
+            let Operand::Vector { reg, .. } = *op else { return None };
+            let k = (j + 1..i).rev().find(|&k| insts[k].write(Reg::V(reg)).is_some())?;
+            let Fields::Valu(mov) = &insts[k].fields else { return None };
+            if insts[k].name() != "v_mov_b32" || mov.sdwa.is_some() || mov.dpp.is_some() {
+                return None;
+            }
+            match mov.src.as_slice() {
+                [Operand::Const(c)] => crate::resource::inline(*c),
+                [Operand::Literal(x)] => Some(*x),
+                _ => None,
+            }
+        };
+        let at = constant(addr?)?;
+        let mut out = Vec::new();
+        for (e, &(off, w)) in elements.iter().enumerate() {
+            if w != 1 {
+                return None;
+            }
+            let bytes = at.checked_add(off)?;
+            if bytes % 4 != 0 || bytes / 4 >= cs.lds_bytes() / 4 {
+                return None;
+            }
+            out.push((bytes, constant(data.get(e)?)?));
+        }
+        // the first thread: every coordinate is 0, so its index in the group is
+        let flat = if self.console_lanes {
+            self.s.flags |= flags::WAVE_OPS;
+            self.console_thread()
+        } else {
+            let (e, i32t) = (self.s.entry, self.s.t.i32);
+            self.s.op(e, "flattenedThreadIdInGroup.i32", Attr::ReadNone, i32t, 96, &[])
+        };
+        let (c, zero) = (self.cur, self.s.m.i32(0));
+        Some((self.s.m.cmp(c, pred::EQ, flat, zero), out))
+    }
+
     /// LDS (thread-group shared memory) and `ds_swizzle`.
     fn ds(&mut self, inst: &Inst, b: usize, i: usize) -> Result<(), Why> {
         let Fields::Ds {
@@ -5547,6 +5830,20 @@ impl<'a> Lower<'a> {
             } else {
                 return Err("an LDS write of bytes or halves");
             };
+            if let Some((first, constants)) = self.first_thread_init(b, i, addr.as_ref(), data, &elements) {
+                // (`VICTORY_LDS_FIRST_INIT=1`) The group's first thread sets shared memory up,
+                // whether its lane runs or not.
+                let at = self.begin_guarded(Some(first));
+                for (bytes, x) in constants {
+                    let (index, x) = (self.s.m.i32(bytes / 4), self.s.m.i32(x));
+                    let lds = self.s.lds();
+                    let ptr = self.s.m.element(self.cur, lds, index);
+                    self.s.m.store(self.cur, ptr, x);
+                }
+                self.end_guarded(at, &[]);
+                LDS_FIRST_INITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
             let mut stores = Vec::new();
             for (e, (off, w)) in elements.into_iter().enumerate() {
                 let vals = self.vgprs(inst, data.get(e).ok_or("an LDS write")?, w as u8)?;
@@ -13366,7 +13663,7 @@ impl<'a> Lower<'a> {
                             && self.mask_data == MaskData::Console
                             && st.scc_some.contains_key(&arg) =>
                     {
-                        let per_lane = !st.wide.contains(&q)
+                        let per_lane = (!st.wide.contains(&q) || st.host_wide.contains(&q))
                             && matches!(st.exits[q], LaneExit::Branch { when, .. }
                                 if !st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_))));
                         if per_lane {

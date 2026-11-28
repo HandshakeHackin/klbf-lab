@@ -66,6 +66,9 @@
 //! shortcut: pages a list does not name are looked at again in turn, over
 //! [`SWEEP`] frames.
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -104,8 +107,52 @@ const BACK: u64 = 256 << 10;
 /// Pages taken from the faults, of one frame and in all, at most: a ray in a
 /// structure that is not right goes anywhere, and 2,048 a frame took all the
 /// pages there are in the first seconds (run light-4).
+/// `VICTORY_FAULTS` and `VICTORY_FAULTS_ALL` say otherwise ([`fault_caps`], CGBJ main).
 const FAULTS: usize = 128;
 const FAULTS_ALL: usize = 2048;
+/// The most those switches can ask for. Of one frame: half of [`SPARE`], so a builder list
+/// recorded earlier still finds free pages when it lands. In all: a third of [`MOST`] (1 GiB of
+/// arenas' pages), so the builder keeps the rest.
+const FAULTS_MOST: usize = SPARE / 2;
+const FAULTS_ALL_MOST: usize = 1 << 14;
+
+/// A cap from its switch's value: a whole number from 1 to `most` (more is `most`). No value, 0 or
+/// anything else: `default`.
+fn cap(value: Option<&str>, default: usize, most: usize) -> usize {
+    match value.map(|v| v.trim().parse::<usize>()) {
+        Some(Ok(n)) if n > 0 => n.min(most),
+        _ => default,
+    }
+}
+
+/// Pages taken from the faults, of one frame and in all, at most (`VICTORY_FAULTS`, 1 to 512, and
+/// `VICTORY_FAULTS_ALL`, 1 to 16384; [`FAULTS`] and [`FAULTS_ALL`] unless they say otherwise).
+/// With the title's ray tracing CGBJ found the 2,048 taken two minutes in, and the rays' programs
+/// then touched about a thousand pages a frame that had no copy (their run raytrace9).
+fn fault_caps() -> (usize, usize) {
+    static CAPS: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *CAPS.get_or_init(|| {
+        let read = |name: &str, default, most| cap(std::env::var(name).ok().as_deref(), default, most);
+        let (a_frame, in_all) = (read("VICTORY_FAULTS", FAULTS, FAULTS_MOST), read("VICTORY_FAULTS_ALL", FAULTS_ALL, FAULTS_ALL_MOST));
+        if (a_frame, in_all) != (FAULTS, FAULTS_ALL) {
+            tracing::info!(a_frame, in_all, "title memory by address: pages taken from faults at most (VICTORY_FAULTS, VICTORY_FAULTS_ALL)");
+        }
+        (a_frame, in_all)
+    })
+}
+
+/// (CGBJ main, `VICTORY_MEMORY_RETRY=1`, default off: tried at every draw that needs it, as
+/// before) Frames between tries to make [`Memory`] after one failed: each failed try reserved 16
+/// MiB below 2^37 afresh, which filled the range (CGBJ run E18).
+const TRY_AGAIN: u64 = 300;
+
+/// The frame from which [`Memory::new`] is tried again (0: at once).
+static NEXT_TRY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn memory_retry() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_MEMORY_RETRY").is_some_and(|v| v == "1"))
+}
 /// Frames over which every page is looked at once.
 const SWEEP: usize = 128;
 
@@ -223,8 +270,18 @@ impl Memory {
     fn new() -> Option<Memory> {
         let host = host()?;
         let bytes = u64::from(MEMORY_PAGES) * 8;
-        // Zeroed, and watched for writes as the title's memory is.
-        let entries = crate::upload::reserve(bytes as usize)?;
+        // Zeroed, and watched for writes as the title's memory is. (`VICTORY_MEMORY_RETRY=1`:
+        // reserved once, kept for the next try.)
+        static ENTRIES: Mutex<usize> = Mutex::new(0);
+        let entries = if memory_retry() {
+            let mut kept = ENTRIES.lock().unwrap_or_else(|e| e.into_inner());
+            if *kept == 0 {
+                *kept = crate::upload::reserve(bytes as usize)?;
+            }
+            *kept
+        } else {
+            crate::upload::reserve(bytes as usize)?
+        };
         let directory = crate::shadow::by_address(entries as u64, bytes)?;
         crate::host::name(&directory.buffer, || "title memory by address: directory".into());
         let (faults, data) = host.shared_buffer(u64::from(MEMORY_FAULTS) * 4)?;
@@ -675,8 +732,9 @@ impl Memory {
         }
         pages.sort_unstable();
         let mut made = 0;
+        let (a_frame, in_all) = fault_caps();
         for &page in &pages {
-            if made < FAULTS && self.faulted < FAULTS_ALL && self.copy_of(page).is_none() && self.map(page) {
+            if made < a_frame && self.faulted < in_all && self.copy_of(page).is_none() && self.map(page) {
                 made += 1;
                 self.faulted += 1;
                 self.bring(page, page + 1);
@@ -910,11 +968,16 @@ pub(crate) fn ready(
     threads: Option<[u32; 3]>,
 ) -> Option<Ready> {
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
+    let frame = crate::frame::current();
+    if guard.is_none() && (!memory_retry() || frame >= NEXT_TRY.load(std::sync::atomic::Ordering::Relaxed)) {
         *guard = Memory::new();
+        if guard.is_none() && memory_retry() {
+            NEXT_TRY.store(frame + TRY_AGAIN, std::sync::atomic::Ordering::Relaxed);
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::warn!("title memory by address could not be made: draws whose shaders read it are dropped (tried again every {TRY_AGAIN} frames)"));
+        }
     }
     let m = guard.as_mut()?;
-    let frame = crate::frame::current();
     if m.frame != frame {
         m.frame = frame;
         m.refused.clear();
@@ -1267,9 +1330,9 @@ mod dump {
                 // SAFETY: an open list; live buffers of those sizes. The list
                 // has not used the arena yet.
                 unsafe {
-                    list.list.ResourceBarrier(&[turn(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                    list.list.barriers_counted(&[turn(buffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                     list.list.CopyBufferRegion(&to, 0, buffer, 0, ARENA);
-                    list.list.ResourceBarrier(&[turn(buffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)]);
+                    list.list.barriers_counted(&[turn(buffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON)]);
                 }
                 list.keep(&to);
                 copies.push((to, data as usize));

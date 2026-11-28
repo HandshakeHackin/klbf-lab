@@ -477,6 +477,8 @@ pub(crate) fn list_call(at: &'static std::panic::Location<'static>, ns: u64) {
     bind_line(frames);
     #[cfg(feature = "diagnostics")]
     crate::draw::tables_line(frames);
+    #[cfg(all(windows, feature = "diagnostics"))]
+    crate::drawmeter::line(frames);
 }
 
 // ---------------------------------------------------------------------------------------------

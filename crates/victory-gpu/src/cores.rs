@@ -111,6 +111,29 @@ fn ask(what: &str, from: u32) {
     }
 }
 
+/// (kemerd-rt PR #22, Indy2l 80c70b7) `VICTORY_HELPER_PRIORITY=1` (default off): the threads the
+/// submitting thread waits for run at its priority, above normal, ahead of the title's threads and
+/// of the threads that translate lists: the wide pool (`shadow::wide`), the landing pools (`land`),
+/// the thread that makes the heaps' records and the one that passes over the heap's views beside
+/// the lists (`host::aside`). Their A/B (i5-12400F, RTX 3060, Series S at 540p, off / on): 8.6 /
+/// 9.6 fps, refreshes 23.1 / 17.6 ms a frame, waiting for the heaps' records 6.2 / 2.5 ms.
+pub(crate) fn helpers_raised() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_HELPER_PRIORITY").is_some_and(|v| v == "1"))
+}
+
+/// Raises the calling helper thread to above normal when [`helpers_raised`]; nothing otherwise.
+pub(crate) fn raise_helper() {
+    if !helpers_raised() {
+        return;
+    }
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
+    // SAFETY: our own thread.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| tracing::info!("the submitting thread's helpers run above normal (VICTORY_HELPER_PRIORITY=1)"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

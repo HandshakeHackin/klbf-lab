@@ -335,6 +335,7 @@ fn own(size: usize, made: bool) {
     let class = block_class(size);
     let own = &OWN[bank()].0;
     if made {
+        crate::drawmeter::allocated(size);
         own[class].fetch_add(size as u64, Relaxed);
         own[4 + class].fetch_add(1, Relaxed);
     } else {
@@ -379,16 +380,23 @@ fn big_blocks() -> String {
     if text.is_empty() { "none".into() } else { text.join(", ") }
 }
 
-/// The system's allocator with every block counted in [`OWN`] (two atomic
+/// The allocator underneath [`Counting`]: mimalloc with the `mimalloc` feature, else the
+/// system's (Windows heap).
+#[cfg(feature = "mimalloc")]
+static INNER: mimalloc::MiMalloc = mimalloc::MiMalloc;
+#[cfg(not(feature = "mimalloc"))]
+static INNER: std::alloc::System = std::alloc::System;
+
+/// The global allocator ([`INNER`]) with every block counted in [`OWN`] (two atomic
 /// additions per allocation and per release: diagnostics builds only).
 struct Counting;
 
-// SAFETY: every call goes to the system's allocator unchanged; only
+// SAFETY: every call goes to the inner allocator unchanged; only
 // counters are kept beside it.
 unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
-        let at = unsafe { std::alloc::System.alloc(layout) };
+        let at = unsafe { INNER.alloc(layout) };
         if !at.is_null() {
             own(layout.size(), true);
             big(at, layout.size(), true);
@@ -398,7 +406,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
 
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
-        let at = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        let at = unsafe { INNER.alloc_zeroed(layout) };
         if !at.is_null() {
             own(layout.size(), true);
             big(at, layout.size(), true);
@@ -410,12 +418,12 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
         own(layout.size(), false);
         big(at, layout.size(), false);
         // SAFETY: the caller's contract, passed on.
-        unsafe { std::alloc::System.dealloc(at, layout) };
+        unsafe { INNER.dealloc(at, layout) };
     }
 
     unsafe fn realloc(&self, at: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
-        let moved = unsafe { std::alloc::System.realloc(at, layout, size) };
+        let moved = unsafe { INNER.realloc(at, layout, size) };
         if !moved.is_null() {
             own(layout.size(), false);
             own(size, true);
@@ -954,6 +962,28 @@ fn log_memory() {
     let alive: Vec<u64> = crate::host::ALIVE.iter().map(|a| a.load(Relaxed)).collect();
     let window = crate::shadow::window_use();
     let views = crate::descriptor::views_kept();
+    {
+        let u: Vec<u64> = crate::descriptor::host::HEAP_USE.iter().map(|a| a.load(Relaxed)).collect();
+        tracing::info!(
+            "view heap: the title's has {} slots, the host's holds {} of them plus {} dynamic in {} (VICTORY_VIEW_HEAP_MAX=device: as the device allows); highest title slot used {} ; title slots past the host's read null so far: {}",
+            u[0],
+            u[1],
+            u[2],
+            u[3],
+            u[4],
+            u[5],
+        );
+    }
+    let placed = crate::descriptor::placed_counts();
+    tracing::info!(
+        "memory, placed views: {} shapes made, {} named by a shape seen before; {} had padding or unused words left out (VICTORY_PLACED_PAD_IGNORE=1); ownerless table entries: {} made, {} freed by the cap (VICTORY_OWNERLESS_VIEWS), {} kept now",
+        placed[0],
+        placed[1],
+        placed[2],
+        placed[3],
+        placed[4],
+        placed[5],
+    );
     let own: Vec<u64> = (0..8).map(owned).collect();
     tracing::info!(
         "memory, what holds it: {} host lists alive; their scratch memory: {} chunks {:.0} MB, of          them {} chunks {:.0} MB spare ({} taken from the spare ones so far); their other upload          buffers: {} alive {:.0} MB; windows outside buffers (grid {} KiB): {:.0} MB of their          pages ever copied, {} shown by descriptor slots {:.0} MB, {} held by lists or the pass          over the heap {:.0} MB, {} asked for without a length {:.0} MB; buffer views of the heap          whose slot showed another copy than the one brought up to date: {}; distinct views          kept: {} ({} free) {:.0} MB; our own allocations: {:.0} MB in {} blocks (under 4 KiB          {:.0} MB in {}, to 64 KiB {:.0} MB in {}, to 1 MiB {:.0} MB in {}, larger {:.0} MB in {})",

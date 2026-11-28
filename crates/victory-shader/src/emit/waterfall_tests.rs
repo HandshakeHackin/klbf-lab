@@ -86,6 +86,7 @@ fn build(words: &[u32], buffers: bool) -> HostShader {
         root_indexed_views: Vec::new(),
         half_views: Vec::new(),
         table_reads: None,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone())
@@ -390,6 +391,7 @@ fn immediate_sampler_chosen_by_control_flow() {
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
             table_reads: None,
+            wave: Default::default(),
         };
         if let Ok(mut v) =
             validator::Validator::load(validator::Validator::default_path().as_deref())

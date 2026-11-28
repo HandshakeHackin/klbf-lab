@@ -54,15 +54,94 @@ fn gap(taken: &[bool], n: usize) -> Option<usize> {
     None
 }
 
+const MEM_WRITE_WATCH: u32 = 0x20_0000;
+const MEM_TOP_DOWN: u32 = 0x10_0000;
+
+/// (CGBJ main, `VICTORY_KEEP_ROOM=1`, default off) Bytes of [4 GiB, 2^37) [`reserve`] keeps for
+/// itself from the moment the host GPU is made ([`keep_room`]), at the top of the range.
+///
+/// Memory that shaders reach by address (the directory of title memory by address, its pages, the
+/// lists' uploads) must lie below 2^37. NVIDIA's NGX (DLSS) reserves some 104 GiB when it starts
+/// and took that range in CGBJ's runs: every request was refused and every program that reads by
+/// address read nothing. 4 GiB holds the directory, the most pages it hands out (3 GiB) and the
+/// lists' uploads; past it a request is a fresh allocation, as before. (Memory by address is in use
+/// with the ray-tracing structure builder.)
+const ROOM: usize = 4 << 30;
+
+/// The bytes of the kept room handed out, from its start.
+static ROOM_USED: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+fn keep_room_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_ROOM").is_some_and(|v| v == "1"))
+}
+
+/// The kept room's start (0: none, or the switch is off).
+fn room() -> usize {
+    use windows_sys::Win32::System::Memory::{MEM_RESERVE, PAGE_NOACCESS};
+    static AT: OnceLock<usize> = OnceLock::new();
+    if !keep_room_on() {
+        return 0;
+    }
+    *AT.get_or_init(|| match allocate(ROOM, MEM_RESERVE | MEM_WRITE_WATCH | MEM_TOP_DOWN, PAGE_NOACCESS) {
+        Some(at) => {
+            tracing::info!(at = format_args!("{at:#x}"), bytes = ROOM, "room kept below 2^37 for memory shaders reach by address (VICTORY_KEEP_ROOM)");
+            at
+        }
+        None => {
+            tracing::warn!(bytes = ROOM, error = %std::io::Error::last_os_error(), "no room kept below 2^37 for memory shaders reach by address");
+            0
+        }
+    })
+}
+
+/// Keeps [`ROOM`] while the range has it (`VICTORY_KEEP_ROOM=1`): called when the host GPU is
+/// made, before the title, NGX and the host fill the range.
+pub(crate) fn keep_room() {
+    room();
+}
+
+/// `len` bytes in [4 GiB, 2^37) with `kind` and `protect`.
+fn allocate(len: usize, kind: u32, protect: u32) -> Option<usize> {
+    use windows_sys::Win32::System::Memory::{
+        MEM_ADDRESS_REQUIREMENTS, MEM_EXTENDED_PARAMETER, MemExtendedParameterAddressRequirements, VirtualAlloc2,
+    };
+    let mut requirements = MEM_ADDRESS_REQUIREMENTS {
+        LowestStartingAddress: (1usize << 32) as *mut _,
+        HighestEndingAddress: ((1usize << 37) - 1) as *mut _,
+        Alignment: 0,
+    };
+    let mut parameter = MEM_EXTENDED_PARAMETER::default();
+    parameter.Anonymous1._bitfield = MemExtendedParameterAddressRequirements as u64;
+    parameter.Anonymous2.Pointer = (&raw mut requirements).cast();
+    // SAFETY: a fresh allocation; the parameter points at `requirements`,
+    // which outlives the call.
+    let at = unsafe { VirtualAlloc2(std::ptr::null_mut(), std::ptr::null(), len, kind, protect, &mut parameter, 1) } as usize;
+    (at != 0).then_some(at)
+}
+
 /// Fresh zeroed memory in [4 GiB, 2^37) (where the directory of memory by
 /// address reaches, `MEMORY_PAGES`), write-watched as the title's own
-/// pools are (copies then take only written pages).
+/// pools are (copies then take only written pages): from the kept room while it lasts
+/// (`VICTORY_KEEP_ROOM=1`; never given back, as nothing here is), then a fresh allocation.
 pub(crate) fn reserve(len: usize) -> Option<usize> {
     use windows_sys::Win32::System::Memory::{
         MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_RESERVE, MemExtendedParameterAddressRequirements,
-        PAGE_READWRITE, VirtualAlloc2,
+        PAGE_READWRITE, VirtualAlloc, VirtualAlloc2,
     };
-    const MEM_WRITE_WATCH: u32 = 0x20_0000;
+    let room = room();
+    if room != 0 {
+        let len = len.max(1).next_multiple_of(64 << 10);
+        let mut used = ROOM_USED.lock().unwrap_or_else(|e| e.into_inner());
+        if ROOM - *used >= len {
+            let at = room + *used;
+            // SAFETY: pages of our own reservation that nothing holds yet.
+            if !unsafe { VirtualAlloc(at as *const _, len, MEM_COMMIT, PAGE_READWRITE) }.is_null() {
+                *used += len;
+                return Some(at);
+            }
+        }
+    }
     let mut requirements = MEM_ADDRESS_REQUIREMENTS {
         LowestStartingAddress: (1usize << 32) as *mut _,
         HighestEndingAddress: ((1usize << 37) - 1) as *mut _,

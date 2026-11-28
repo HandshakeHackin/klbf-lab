@@ -115,6 +115,30 @@ pub const USER_NAN_SLOT: u32 = 0x107;
 /// built (the structure builder is off). A node test then answers as for a
 /// structure with nothing in it.
 pub const USER_BVH_EMPTY: u32 = 0x108;
+/// (`VICTORY_GROUPS_SPLIT=1`) `RootType::Other` code of a user-data dword the host sets: the
+/// number of groups in X before this part of a dispatch the host split into parts of at most
+/// 65,535 groups (D3D12's most in a dimension; the console takes 32-bit counts). The program's
+/// group id in X is its host group id plus it. 0 for an unsplit dispatch.
+pub const USER_GROUP_OFFSET: u32 = 0x109;
+
+/// `VICTORY_GROUPS_SPLIT=1` (default off; part of the translation, the shader cache keys on it):
+/// every compute program reads its group id in X as the host's plus [`USER_GROUP_OFFSET`], so
+/// that the host can run a dispatch of more than 65,535 groups in X as several.
+pub fn groups_split() -> bool {
+    groups_split_mode() != 0
+}
+
+/// `VICTORY_GROUPS_SPLIT`: 0 off (default); 1 every indirect dispatch record clamped in parts
+/// (costly: none batched); 2 only those of programs found asking for more than 65,535 groups
+/// (the host probes each program now and then, one execution a list at most).
+pub fn groups_split_mode() -> u8 {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_GROUPS_SPLIT").as_deref().map(str::trim) {
+        Ok("1") => 1,
+        Ok("2") => 2,
+        _ => 0,
+    })
+}
 /// (Fox T, `VICTORY_NAN_METER=1`) The root UAV `u<SLOT_NAN>` in
 /// [`ROOT_CBV_SPACE`]: per program ([`USER_NAN_SLOT`]) four dwords: NaNs and
 /// infinities stored through typed views (images, typed buffers), NaNs and

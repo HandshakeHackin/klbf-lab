@@ -2,6 +2,9 @@
 //! contents back, and runs the frame as often as asked, with its time on
 //! the card and experiments on it (`super::edit`).
 
+#[cfg(windows)]
+#[allow(unused_imports)]
+use crate::drawmeter::CountBarriers as _;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
@@ -1471,11 +1474,11 @@ impl Player {
             // SAFETY: an open list; live resources.
             unsafe {
                 for all in early.chunks(1000) {
-                    list.ResourceBarrier(all);
+                    list.barriers_counted(all);
                 }
-                list.ResourceBarrier(&[alias()]);
+                list.barriers_counted(&[alias()]);
                 for all in into.chunks(1000) {
-                    list.ResourceBarrier(all);
+                    list.barriers_counted(all);
                 }
             }
         })?;
@@ -1526,7 +1529,7 @@ impl Player {
         self.worker.run(|list| {
             for all in back.chunks(1000) {
                 // SAFETY: an open list; live resources.
-                unsafe { list.ResourceBarrier(all) };
+                unsafe { list.barriers_counted(all) };
             }
         })?;
         if missing > 0 {
@@ -2362,7 +2365,7 @@ impl Player {
                     },
                 }]);
             } else {
-                list.ResourceBarrier(&[alias(), uav_barrier(None)]);
+                list.barriers_counted(&[alias(), uav_barrier(None)]);
             }
         }
     }
@@ -3365,7 +3368,7 @@ fn to_rect(r: [i32; 4]) -> RECT {
 unsafe fn barriers(list: &ID3D12GraphicsCommandList, all: &[D3D12_RESOURCE_BARRIER]) {
     for some in all.chunks(1000) {
         // SAFETY: the caller's.
-        unsafe { list.ResourceBarrier(some) };
+        unsafe { list.barriers_counted(some) };
     }
 }
 

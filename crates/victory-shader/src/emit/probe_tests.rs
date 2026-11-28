@@ -36,6 +36,7 @@ fn probe() {
             root_indexed_views: Vec::new(),
             half_views: Vec::new(),
             table_reads: None,
+            wave: Default::default(),
         };
         let (root, pso) = match host.compute_pipeline(&shader) {
             Ok(made) => made,
