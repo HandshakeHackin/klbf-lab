@@ -175,8 +175,11 @@ function Get-KlbfRestartArgs($Bound) {
 function Get-KlbfShortcutSpec([string]$BuildDir = $PSScriptRoot, [string]$Victory = '') {
     $ico = Join-Path $BuildDir 'klbf-lab.ico'
     if (-not (Test-Path -LiteralPath $ico)) { $ico = Join-Path $BuildDir 'apps\victory\klbf-lab.ico' }
+    # (v26.11.6) "KLBF Lab.exe" when the folder has it: no console flash
+    $exe = Join-Path $BuildDir 'KLBF Lab.exe'
+    $cmd = Join-Path $BuildDir 'KLBF Lab.cmd'
     @{
-        target = Join-Path $BuildDir 'KLBF Lab.cmd'
+        target = $(if (Test-Path -LiteralPath $exe) { $exe } else { $cmd })
         arguments = ''
         workdir = $BuildDir
         icon = $ico

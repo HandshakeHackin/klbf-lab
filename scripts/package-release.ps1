@@ -33,19 +33,23 @@ Copy-Item -LiteralPath (Join-Path $Source 'apps\victory\klbf-lab.ico') -Destinat
 # The starter, the same text the launcher writes beside a desktop shortcut
 . (Join-Path $Source 'launcher-menu.ps1')
 Set-Content -LiteralPath (Join-Path $stage 'KLBF Lab.cmd') -Value (Get-KlbfStarterText) -Encoding ascii
+# (v26.11.6) "KLBF Lab.exe" (apps/klbf-start, built beside victory.exe): the same start with no console flash.
+$starter = Join-Path (Split-Path -Parent $Victory) 'klbf-start.exe'
+if (Test-Path -LiteralPath $starter) { Copy-Item -LiteralPath $starter -Destination (Join-Path $stage 'KLBF Lab.exe') }
 
 Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Encoding ascii -Value @"
 KLBF Lab $Tag (Windows, 64-bit)
 
 1. Extract anywhere.
-2. Open the "KLBF Lab" folder and double-click "KLBF Lab.cmd" (Windows may hide the ".cmd" part). Later, use the desktop shortcut it can create.
+2. Open the "KLBF Lab" folder and double-click "KLBF Lab" (the icon with the flask). Later, use the desktop shortcut it can create.
+   "KLBF Lab.cmd" does the same if the .exe is blocked.
 3. Choose your game folder (your own copy).
 4. Play.
 
 Windows SmartScreen: KLBF Lab is not signed. If Windows says it protected your PC, click
 "More info" then "Run anyway". If it asks whether to open "KLBF Lab", click Open.
 
-If it doesn't start (nothing happens after double-clicking "KLBF Lab.cmd"):
+If it doesn't start (nothing happens after double-clicking "KLBF Lab"):
 1. Right-click the zip, Properties, tick "Unblock", OK, then extract it again.
 2. Or right-click play.ps1, "Run with PowerShell".
 When the launcher itself fails, a message says why, and the details are in
