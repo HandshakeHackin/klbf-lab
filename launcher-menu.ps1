@@ -1154,7 +1154,16 @@ function Get-KlbfBenchShareText($Result) {
     $fps = $Result.fps.avg; $set = $Result.settings
     $en = [Globalization.CultureInfo]::InvariantCulture
     $fg = [bool]$set.frame_generation
-    $head = if ($fg) { [string]::Format($en, '{0:0} FPS (base {1:0})', $fps * 2, $fps) } else { [string]::Format($en, '{0:0.0} FPS', $fps) }
+    $head = [string]::Format($en, '{0:0.0} FPS', $fps)
+    $low = [string]::Format($en, '1% low {0:0.0}', $Result.fps.low_1pct)
+    if ($fg) {
+        $head = if ($null -ne $Result.fps_shown.avg) {
+            [string]::Format($en, '{0:0.0} FPS (base {1:0.0})', $Result.fps_shown.avg, $fps)
+        } else { "base $head" }
+        $low = if ($null -ne $Result.fps_shown.low_1pct) {
+            [string]::Format($en, '1% low {0:0.0} (base {1:0.0})', $Result.fps_shown.low_1pct, $Result.fps.low_1pct)
+        } else { "base $low" }
+    }
     $up = switch ($set.upscaler_kind) {
         'fsr' {
             $v = [string]$set.upscaler_version
@@ -1169,7 +1178,7 @@ function Get-KlbfBenchShareText($Result) {
     $k = Get-KlbfGpuKind ([string]$Result.gpu)
     $card = if ($k.gen) { $k.gen } else { 'GPU' }
     @(
-        "KLBF Lab Bench BM-v1$(if ($Result.where) { " ($($Result.where))" }): $head, 1% low $([string]::Format($en, '{0:0.0}', $Result.fps.low_1pct))"
+        "KLBF Lab Bench BM-v1$(if ($Result.where) { " ($($Result.where))" }): $head, $low"
         (@("Profile $($set.profile)", $up, $res, "frame generation $(if ($fg) { 'on' } else { 'off' })") | Where-Object { $_ }) -join ' - '
         "$card, $([math]::Round([double]$Result.gpu_vram_gb)) GB VRAM, $([math]::Round([double]$Result.ram_gb)) GB RAM"
         "$($Result.stamp) - KLBF Lab $($Result.sha)"
