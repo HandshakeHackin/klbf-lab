@@ -47,12 +47,13 @@ mod tests {
         fn f(_: usize, len: usize) {
             GOT.fetch_add(len as u64, Relaxed);
         }
-        on_title_memory_unmapped(f);
+        // (A test that made the host first registered the host's own: only the count is ours then.)
+        let ours = UNMAPPED.set(f).is_ok();
         let before = UNMAPPED_SEEN[1].load(Relaxed);
         title_memory_unmapped(0x1000_0000, 0x1_0000);
         title_memory_unmapped(0x1000_0000, 0);
         assert_eq!(UNMAPPED_SEEN[1].load(Relaxed) - before, 0x1_0000);
-        assert!(GOT.load(Relaxed) >= 0x1_0000);
+        assert!(!ours || GOT.load(Relaxed) >= 0x1_0000);
     }
 }
 
