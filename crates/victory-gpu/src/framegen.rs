@@ -26,7 +26,7 @@
 //! FSR 3.1 frame generation of the same DLL is picked by hand ([`fsr3_providers`]),
 //! never none. F7 pauses it and starts it again ([`toggle`]): paused, each
 //! present is the real frame only, so nothing (the interface included) is
-//! interpolated. Both ideas from computermakemegta6 (BigCheese)'s
+//! interpolated. Both ideas from BigCheese's
 //! VIctory-BigCheese v2.1, written again here.
 
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering};
