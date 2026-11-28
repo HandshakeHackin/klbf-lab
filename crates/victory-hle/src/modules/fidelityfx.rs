@@ -50,6 +50,12 @@ pub fn enabled() -> bool {
 /// frame generation's `KLBF_FRAMEGEN`) and the title uses its own upscaler (the caption then says
 /// "Title upscaler"), instead of a title that cannot upscale. Call it before anything reads them.
 pub fn check_at_start() {
+    check_fsr();
+    // (KLBF Lab) NVIDIA DLSS (KLBF_DLSS, KLBF_DLSS_FG) hooks this redirect: checked once FSR is.
+    victory_gpu::streamline::check_at_start();
+}
+
+fn check_fsr() {
     let Some(path) = path() else { return };
     let why = match load(&path) {
         Err(e) => Some(e),
@@ -278,6 +284,11 @@ extern "system" fn ffxCreateContext(context: *mut *mut c_void, desc: *mut u8, _a
             has_backend = true;
             swap_device(&mut patches, node, 16, 24, device);
         }
+        if ty == CREATE_UPSCALE {
+            // (KLBF Lab) NVIDIA DLSS reads its inputs as the context's flags say (HDR, inverted depth,
+            // auto exposure, display-size motion vectors). SAFETY: flags at +16, as below.
+            victory_gpu::streamline::context_flags(unsafe { node.add(16).cast::<u32>().read_unaligned() });
+        }
         if ty == CREATE_UPSCALE && victory_gpu::framegen::on() {
             // (KLBF Lab) Frame generation is made from the upscaler's flags (depth and motion
             // vector bits) and its largest render size.
@@ -495,7 +506,14 @@ extern "system" fn ffxDispatch(context: *mut *mut c_void, desc: *mut u8) -> u32 
                     }
                 }
             }
-            code = (api.dispatch)(context, desc);
+            // (KLBF Lab) NVIDIA DLSS in AMD FSR's place (KLBF_DLSS=1); FSR if DLSS records nothing.
+            let dlss = ty == DISPATCH_UPSCALE && dlss_upscale(pass.command_list(), desc, resources);
+            code = if dlss { OK } else { (api.dispatch)(context, desc) };
+            if code == OK && ty == DISPATCH_UPSCALE {
+                // (KLBF_DLSS_FG) Its depth and motion vectors for DLSS Frame Generation.
+                let (textures, camera) = dlss_inputs(desc, resources);
+                victory_gpu::streamline::tag(pass.command_list(), textures[1], textures[2], &camera);
+            }
             if code == OK && ty == DISPATCH_UPSCALE {
                 // (KLBF Lab, 27/11) Its render and upscaled sizes (`ffxDispatchDescUpscale`'s words 4..8
                 // from +360), for the bench card and the window's caption.
@@ -516,6 +534,50 @@ extern "system" fn ffxDispatch(context: *mut *mut c_void, desc: *mut u8) -> u32 
         tracing::warn!(code, "ffxDispatch on the host DLL");
     }
     code
+}
+
+/// (KLBF Lab) The host textures of an upscale description patched to the host's, with the D3D12
+/// states they were moved to, and its camera (`ffxDispatchDescUpscale`'s words from +360).
+///
+/// # Safety
+/// `desc` is an upscale description whose resources are patched to the host's.
+unsafe fn dlss_inputs(desc: *mut u8, resources: &[(usize, bool)]) -> ([(*mut c_void, u32); 7], victory_gpu::streamline::plan::Camera) {
+    // SAFETY: as the caller says; `ffx_upscale.h`'s layout.
+    unsafe {
+        let textures = std::array::from_fn(|i| {
+            let at = resources[i].0;
+            (desc.add(at).cast::<*mut c_void>().read_unaligned(), d3d12_state(desc.add(at + RESOURCE_STATE).cast::<u32>().read_unaligned()))
+        });
+        let word = |i: usize| desc.add(360 + 4 * i).cast::<u32>().read_unaligned();
+        let float = |i: usize| f32::from_bits(word(i));
+        let camera = victory_gpu::streamline::camera(
+            [float(0), float(1)],
+            [float(2), float(3)],
+            [word(4), word(5)],
+            [word(6), word(7)],
+            float(13),
+            float(14),
+            float(15),
+            desc.add(408).read() != 0,
+        );
+        (textures, camera)
+    }
+}
+
+/// (KLBF Lab, `KLBF_DLSS=1`) DLSS Super Resolution records the upscale on `list`; `false`: AMD FSR does.
+///
+/// # Safety
+/// As [`dlss_inputs`].
+unsafe fn dlss_upscale(list: *mut c_void, desc: *mut u8, resources: &[(usize, bool)]) -> bool {
+    if !victory_gpu::streamline::upscaling() {
+        return false;
+    }
+    // SAFETY: as the caller says.
+    let (textures, camera) = unsafe { dlss_inputs(desc, resources) };
+    // SAFETY: preExposure, word 11.
+    let pre_exposure = f32::from_bits(unsafe { desc.add(360 + 44).cast::<u32>().read_unaligned() });
+    // (The output is marked written on the host already: `Pass::texture` with `write`.)
+    victory_gpu::streamline::upscale(list, &textures, &camera, pre_exposure)
 }
 
 /// (KLBF Lab, `KLBF_FRAMEGEN=1`) The frame generation prepare, on the upscale's host list right

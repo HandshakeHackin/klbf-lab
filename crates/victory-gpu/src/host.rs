@@ -1167,10 +1167,15 @@ fn create() -> windows::core::Result<Host> {
         let messages = debug
             .then(|| device.cast::<ID3D12InfoQueue>().ok())
             .flatten();
-        let queue: ID3D12CommandQueue = device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
-            Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
-            ..Default::default()
-        })?;
+        // (KLBF Lab) NVIDIA DLSS is given the device; with its frame generation the direct queue is
+        // made through Streamline's device proxy (the native one behind it runs everything).
+        let queue: ID3D12CommandQueue = match crate::streamline::device_made(&device) {
+            Some(queue) => queue,
+            None => device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
+                Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+                ..Default::default()
+            })?,
+        };
         let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE)?;
         let event = CreateEventW(None, false, false, None)?;
         let rtvs: ID3D12DescriptorHeap =
@@ -10628,6 +10633,7 @@ impl Host {
         if (p.width, p.height, p.format) != (width, height, format) {
             // Presents sent ahead hold back buffers until they have run.
             settle_now(WHY_SYNC);
+            crate::streamline::resizing();
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
                 p.swap_chain
@@ -10882,10 +10888,14 @@ impl Host {
             if p.framegen {
                 crate::framegen::before_present();
             }
+            // (KLBF Lab) NVIDIA DLSS Frame Generation: its markers, and on for a frame that tagged
+            // its depth and motion vectors; Streamline's swap chain is given no do-not-wait flag either.
+            let dlss_fg = crate::streamline::before_present([p.width, p.height]);
             let _ = crate::shell::present_maybe(DXGI_PRESENT_DO_NOT_WAIT.0, |flags| {
-                let flags = if p.framegen { 0 } else { flags };
+                let flags = if p.framegen || dlss_fg { 0 } else { flags };
                 p.swap_chain.Present(0, DXGI_PRESENT(flags))
             });
+            crate::streamline::after_present();
             if p.framegen {
                 crate::framegen::after_present(p.swap_chain.GetLastPresentCount().ok());
             }
@@ -10940,6 +10950,8 @@ impl Host {
                 None
             };
             let framegen = made.is_some();
+            // (KLBF Lab) Or NVIDIA DLSS Frame Generation's, made through Streamline's proxies.
+            let made = made.or_else(|| crate::streamline::swap_chain(hwnd, &desc, &factory));
             let swap_chain = match made {
                 Some(chain) => chain,
                 None => factory

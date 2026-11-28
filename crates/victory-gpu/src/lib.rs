@@ -21,6 +21,8 @@ pub mod external; // KLBF Lab: FSR port (VICTORY_FSR_DLL)
 #[cfg(windows)]
 pub mod framegen; // KLBF Lab: AMD frame generation (KLBF_FRAMEGEN=1, from gleaf-6)
 #[cfg(windows)]
+pub mod streamline; // KLBF Lab: NVIDIA DLSS through Streamline (KLBF_DLSS, KLBF_DLSS_FG; from foxhound)
+#[cfg(windows)]
 mod port; // KLBF Lab: renderer port 1 (VICTORY_PORT_CONSTANTS, from rodrion-vi)
 #[cfg(windows)]
 pub mod klbf_bench; // KLBF Lab Bench BM-v1 (PastiiJay/klbf-lab)
