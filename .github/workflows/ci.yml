@@ -1,9 +1,8 @@
-name: CI
+name: Full Windows workspace with the v26.11.6 depth fix
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches: ['verify/v26.11.6-workspace-depth']
 
 permissions:
   contents: read
