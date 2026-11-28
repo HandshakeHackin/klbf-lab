@@ -68,6 +68,10 @@ pub(crate) struct Pending {
     /// (`VICTORY_PASS_TIMES`), made on first use ([`Pending::label`]).
     #[cfg(feature = "diagnostics")]
     label: OnceLock<Arc<str>>,
+    /// (CHECK6960/Victory-Nvidia-optimized) True once a non-screen pipeline exhausted
+    /// a frame's wait budget while still compiling so later repeat draws skip waiting
+    /// until it finishes (`KLBF_PIPELINE_NOBLOCK=1`).
+    missed_wait: AtomicBool,
 }
 
 fn named(shaders: &[Arc<Shader>], name: &[u8]) -> bool {
@@ -189,6 +193,7 @@ impl Pending {
             screen,
             scene_input,
             left_out,
+            missed_wait: AtomicBool::new(false),
             shaders,
             graphics,
             queue_state: AtomicU8::new(NOT_QUEUED),
@@ -287,14 +292,28 @@ pub(crate) fn hashes(p: &Pending) -> String {
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
+/// `KLBF_PIPELINE_NOBLOCK=1` (off): an off-screen pipeline still being made is waited
+/// for 80 ms a frame instead of 500, and once it took half of that it is not waited
+/// for again until made. After CHECK6960/Victory-Nvidia-optimized (GPL-3.0).
+fn no_block() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_PIPELINE_NOBLOCK").is_some_and(|v| v == "1"))
+}
+
+/// Default non-screen wait budget in milliseconds (`default`), or an explicit `VICTORY_PIPELINE_WAIT_MS`.
+fn parse_wait_budget_ms(env: Option<&str>, default: u64) -> u64 {
+    env.and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 /// Waiting allowed per title frame, over all threads.
 fn wait_budget() -> Duration {
     static BUDGET: OnceLock<Duration> = OnceLock::new();
     *BUDGET.get_or_init(|| {
-        let millis = std::env::var("VICTORY_PIPELINE_WAIT_MS")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(500);
+        let millis = parse_wait_budget_ms(
+            std::env::var("VICTORY_PIPELINE_WAIT_MS").ok().as_deref(),
+            if no_block() { 80 } else { 500 },
+        );
         tracing::info!(millis, "host pipeline wait budget per frame");
         Duration::from_millis(millis)
     })
@@ -347,6 +366,12 @@ fn queue_moving() -> bool {
 fn capped(waited: u64, cap: u64, moving: bool) -> bool {
     waited >= cap && !moving
 }
+
+/// Draws and dispatches whose wait was skipped on repeat frames after a
+/// non-screen pipeline exhausted an earlier frame's wait budget while still
+/// compiling (`KLBF_PIPELINE_NOBLOCK=1`).
+static SKIPPED_REPEAT: AtomicU64 = AtomicU64::new(0);
+
 
 /// Pipelines queued and not made yet (for the frame line).
 pub(crate) fn waiting() -> u64 {
@@ -462,6 +487,10 @@ fn shared_budget() -> bool {
 fn wait(p: &Pending, frame: u64) {
     let screen = p.screen && screens_first();
     let budget = if screen { screen_budget() } else { wait_budget() };
+    wait_within(p, frame, screen, budget, shared_budget(), no_block());
+}
+
+fn wait_within(p: &Pending, frame: u64, screen: bool, budget: Duration, shared: bool, noblock: bool) {
     if budget.is_zero() {
         return;
     }
@@ -474,11 +503,14 @@ fn wait(p: &Pending, frame: u64) {
     if !screen && capped(p.waited_ms.load(Ordering::Relaxed), wait_cap_ms(), queue_moving()) {
         return;
     }
+    if !screen && noblock && p.missed_wait.load(Ordering::Acquire) {
+        SKIPPED_REPEAT.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     // The frame the budget belongs to, and what was waited of it (or is
     // taken by a thread waiting now); of the passes over the screen too.
     static SPENT: [Mutex<(u64, Duration)>; 2] = [const { Mutex::new((u64::MAX, Duration::ZERO)) }; 2];
     let spent_of = &SPENT[usize::from(screen)];
-    let shared = shared_budget();
     let left = {
         let mut spent = spent_of.lock().unwrap_or_else(|e| e.into_inner());
         if spent.0 != frame {
@@ -506,6 +538,11 @@ fn wait(p: &Pending, frame: u64) {
     drop(held);
     let waited = started.elapsed().min(left);
     p.waited_ms.fetch_add(waited.as_millis() as u64, Ordering::Relaxed);
+    if !screen && noblock && p.made.get().is_none() && waited >= budget / 2 {
+        // Avoid paying the wait budget repeatedly across consecutive frames
+        // while a multi-second compile runs in the background.
+        p.missed_wait.store(true, Ordering::Release);
+    }
     if screen && waited > Duration::from_millis(500) {
         tracing::info!(
             ms = waited.as_millis() as u64,
@@ -1066,5 +1103,41 @@ mod tests {
         assert!(Arc::ptr_eq(&queue.pop(true, 1).unwrap(), &screen));
         assert!(queue.pop(true, 1).is_none());
         assert!(Arc::ptr_eq(&queue.pop(false, 1).unwrap(), &world));
+    }
+
+    #[test]
+    fn parse_wait_budget_defaults_to_80_and_reads_overrides() {
+        assert_eq!(parse_wait_budget_ms(None, 80), 80);
+        assert_eq!(parse_wait_budget_ms(None, 500), 500);
+        assert_eq!(parse_wait_budget_ms(Some(" 120 "), 80), 120);
+        assert_eq!(parse_wait_budget_ms(Some("0"), 80), 0);
+        assert_eq!(parse_wait_budget_ms(Some("bad"), 80), 80);
+    }
+
+    #[test]
+    fn missed_wait_skips_repeat_frames_for_non_screen_only() {
+        let mut world = Pending::new(Vec::new(), None);
+        world.screen = false;
+        let mut screen = Pending::new(Vec::new(), None);
+        screen.screen = true;
+
+        let budget = Duration::from_millis(20);
+        wait_within(&world, 900_001, false, budget, true, true);
+        assert!(world.missed_wait.load(Ordering::Acquire));
+
+        let before = SKIPPED_REPEAT.load(Ordering::Relaxed);
+        let repeat = Instant::now();
+        wait_within(&world, 900_002, false, budget, true, true);
+        assert!(repeat.elapsed() < budget);
+        assert!(SKIPPED_REPEAT.load(Ordering::Relaxed) > before);
+
+        wait_within(&screen, 900_003, true, Duration::from_millis(10), true, true);
+        assert!(!screen.missed_wait.load(Ordering::Acquire));
+
+        // Off (the default): never marked.
+        let mut off = Pending::new(Vec::new(), None);
+        off.screen = false;
+        wait_within(&off, 900_004, false, budget, true, false);
+        assert!(!off.missed_wait.load(Ordering::Acquire));
     }
 }
