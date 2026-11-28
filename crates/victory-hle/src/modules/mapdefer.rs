@@ -180,6 +180,7 @@ pub(crate) fn on() -> bool {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn test_on(on: bool) {
     TEST_ON.with(|t| t.set(on));
 }
