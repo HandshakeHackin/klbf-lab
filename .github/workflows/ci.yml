@@ -1,33 +1,55 @@
-name: CI
-
+name: Check the RX 9060 XT benchmark caption on both Windows shells
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/recorded-benchmark-fps']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  powershell:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - uses: actions/checkout@v5
+        with:
+          path: release
+          ref: 6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088
+      - name: Load the exact public result attached to issue 156
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/user-attachments/files/35552055/KLBF-Bench-BM-v1-20261128-2235-d072b8a2.json'
+          Invoke-WebRequest -Uri $url -OutFile result.json
+          if ((Get-FileHash result.json).Hash -ne '30829598a20c6386cc0cb8675aae6111fb3077ccdf7457dc7975b6b2de433df2') { throw 'Result file hash changed' }
+      - name: Compare the released and proposed captions
+        shell: powershell
+        run: |
+          Copy-Item ./tests/benchmark-share-fps.ps1 ./release/tests/
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -File ./release/tests/benchmark-share-fps.ps1 -ResultFile result.json -ExpectOriginal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe -NoProfile -File ./tests/benchmark-share-fps.ps1 -ResultFile result.json
+          exit $LASTEXITCODE
+  pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          path: release
+          ref: 6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088
+      - name: Load the exact public result attached to issue 156
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/user-attachments/files/35552055/KLBF-Bench-BM-v1-20261128-2235-d072b8a2.json'
+          Invoke-WebRequest -Uri $url -OutFile result.json
+          if ((Get-FileHash result.json).Hash -ne '30829598a20c6386cc0cb8675aae6111fb3077ccdf7457dc7975b6b2de433df2') { throw 'Result file hash changed' }
+      - name: Compare the released and proposed captions
+        shell: pwsh
+        run: |
+          Copy-Item ./tests/benchmark-share-fps.ps1 ./release/tests/
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -File ./release/tests/benchmark-share-fps.ps1 -ResultFile result.json -ExpectOriginal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe -NoProfile -File ./tests/benchmark-share-fps.ps1 -ResultFile result.json
+          exit $LASTEXITCODE
