@@ -1017,12 +1017,13 @@ mod tests {
     fn a_copy_on_pages_is_mapped_and_gives_its_pages_back() {
         let _card = crate::pool::tests::CARD_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let Some(host) = crate::host::host() else { return };
+        // A full BC1 mip chain large enough to stay within the 25% reserved/placed limit on WARP.
         let desc = D3D12_RESOURCE_DESC {
             Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-            Width: 1024,
-            Height: 512,
+            Width: 2048,
+            Height: 2048,
             DepthOrArraySize: 1,
-            MipLevels: 11,
+            MipLevels: 12,
             Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_BC1_UNORM,
             SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             ..Default::default()

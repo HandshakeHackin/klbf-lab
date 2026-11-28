@@ -748,10 +748,10 @@ mod tests {
     fn a_moved_copy_keeps_its_texels() {
         let _card = crate::pool::tests::CARD_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let Some(host) = crate::host::host() else { return };
-        let desc = |format, levels| D3D12_RESOURCE_DESC {
+        let desc = |size, format, levels| D3D12_RESOURCE_DESC {
             Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-            Width: 512,
-            Height: 512,
+            Width: u64::from(size),
+            Height: size,
             DepthOrArraySize: 1,
             MipLevels: levels,
             Format: format,
@@ -760,8 +760,9 @@ mod tests {
         };
         // One level; and block-compressed with every level, a packed tail
         // among the tiles moved.
-        moved_keeps(host, desc(DXGI_FORMAT_R8G8B8A8_UNORM, 1));
-        moved_keeps(host, desc(windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_BC1_UNORM, 10));
+        moved_keeps(host, desc(512, DXGI_FORMAT_R8G8B8A8_UNORM, 1));
+        // Keep the full BC1 chain within the allocator's rounding limit on WARP.
+        moved_keeps(host, desc(2048, windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_BC1_UNORM, 12));
     }
 
     fn moved_keeps(host: &crate::host::Host, desc: D3D12_RESOURCE_DESC) {
