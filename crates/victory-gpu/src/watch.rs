@@ -3814,8 +3814,6 @@ pub(crate) fn lost(what: &'static str, at: usize, len: usize) {
 /// place is under way and none begins ([`title_memory_reading`]). Taken
 /// around the whole change, the unmapping and the mapping again.
 pub fn title_memory_remapping() -> Remapping {
-    // For the title's own threads ([`came_back`]).
-    install();
     let met = MET.load(std::sync::atomic::Ordering::Relaxed);
     if met != 0 {
         static SAID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3834,6 +3832,9 @@ pub fn title_memory_remapping() -> Remapping {
 /// away or makes, even for a moment (the rest of a view unmapped and mapped
 /// again), must be in `ranges`.
 pub fn title_memory_remapping_in(ranges: &[(usize, usize)]) -> Remapping {
+    // For the title's own threads ([`came_back`]): a fault in the gap waits
+    // for the change. (The runtime's mapping calls come here directly.)
+    install();
     let asked = std::time::Instant::now();
     let changing = if fine::on() {
         Changing::Fine(fine::write(ranges))
