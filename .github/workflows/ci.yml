@@ -1,33 +1,111 @@
-name: CI
-
+name: Verify shipped v26.11.6 launcher behavior
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/v26.11.6-release-payload']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  powershell:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - name: Retrieve independent preparation and menu test fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 47810d81eccc2de708275bb7b204aa1e872630fe
+          git show FETCH_HEAD:tests/preparation-exit-log.ps1 > tests/preparation-exit-log.ps1
+          git fetch --no-tags --depth=1 origin 101ad9feccfd36dc830331de38cce7d646ee088a
+          git show FETCH_HEAD:tests/benchmark-menu-session.ps1 > tests/benchmark-menu-session.ps1
+      - name: Fetch release assets and verify their SHA-256 fingerprints
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packages = @(
+            @{ Name = 'KLBF-Lab-win64.zip'; Sha256 = '18c845e9005ac0229d580d190cd6137c8ed92021d82da932215d0508b10a36ac'; Dir = 'updater' }
+            @{ Name = 'KLBF-Lab.zip'; Sha256 = '4ed4327c4a14912dfd4a1667c8885f8ca919aa1ddd2580cd809738a174f7d19a'; Dir = 'manual' }
+          )
+          foreach ($package in $packages) {
+              $zip = Join-Path $env:RUNNER_TEMP $package.Name
+              Invoke-WebRequest ("https://github.com/PastiiJay/klbf-lab/releases/download/v26.11.6/" + $package.Name) -OutFile $zip
+              $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+              if ($actual -ne $package.Sha256) { throw "Unexpected fingerprint for $($package.Name): $actual" }
+              Write-Host "$($package.Name) SHA-256 $actual"
+              Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP $package.Dir)
+          }
+      - name: Exercise Copy JSON, new Start choices, and preparation diagnostics in both packages
+        shell: powershell
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          foreach ($name in 'manual/KLBF Lab', 'updater') {
+            $root = Join-Path $env:RUNNER_TEMP $name
+            $dir = New-Item -ItemType Directory (Join-Path $root 'tests') -Force
+            foreach ($test in 'launcher-start', 'preparation-exit-log', 'benchmark-clipboard') {
+              Copy-Item "./tests/$test.ps1" $dir
+              Write-Host "Package $name, test $test"
+              & $exe -NoProfile -STA -File (Join-Path $dir "$test.ps1")
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+      - name: Check ordinary Play after benchmark on both packages
+        shell: powershell
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          foreach ($name in 'manual/KLBF Lab', 'updater') {
+            $root = Join-Path $env:RUNNER_TEMP $name
+            & $exe -NoProfile -STA -File ./tests/benchmark-menu-session.ps1 -Source $root
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+  pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - name: Retrieve independent preparation and menu test fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 47810d81eccc2de708275bb7b204aa1e872630fe
+          git show FETCH_HEAD:tests/preparation-exit-log.ps1 > tests/preparation-exit-log.ps1
+          git fetch --no-tags --depth=1 origin 101ad9feccfd36dc830331de38cce7d646ee088a
+          git show FETCH_HEAD:tests/benchmark-menu-session.ps1 > tests/benchmark-menu-session.ps1
+      - name: Fetch release assets and verify their SHA-256 fingerprints
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packages = @(
+            @{ Name = 'KLBF-Lab-win64.zip'; Sha256 = '18c845e9005ac0229d580d190cd6137c8ed92021d82da932215d0508b10a36ac'; Dir = 'updater' }
+            @{ Name = 'KLBF-Lab.zip'; Sha256 = '4ed4327c4a14912dfd4a1667c8885f8ca919aa1ddd2580cd809738a174f7d19a'; Dir = 'manual' }
+          )
+          foreach ($package in $packages) {
+              $zip = Join-Path $env:RUNNER_TEMP $package.Name
+              Invoke-WebRequest ("https://github.com/PastiiJay/klbf-lab/releases/download/v26.11.6/" + $package.Name) -OutFile $zip
+              $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+              if ($actual -ne $package.Sha256) { throw "Unexpected fingerprint for $($package.Name): $actual" }
+              Write-Host "$($package.Name) SHA-256 $actual"
+              Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP $package.Dir)
+          }
+      - name: Exercise Copy JSON, new Start choices, and preparation diagnostics in both packages
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          foreach ($name in 'manual/KLBF Lab', 'updater') {
+            $root = Join-Path $env:RUNNER_TEMP $name
+            $dir = New-Item -ItemType Directory (Join-Path $root 'tests') -Force
+            foreach ($test in 'launcher-start', 'preparation-exit-log', 'benchmark-clipboard') {
+              Copy-Item "./tests/$test.ps1" $dir
+              Write-Host "Package $name, test $test"
+              & $exe -NoProfile -STA -File (Join-Path $dir "$test.ps1")
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+      - name: Check ordinary Play after benchmark on both packages
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          foreach ($name in 'manual/KLBF Lab', 'updater') {
+            $root = Join-Path $env:RUNNER_TEMP $name
+            & $exe -NoProfile -STA -File ./tests/benchmark-menu-session.ps1 -Source $root
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
