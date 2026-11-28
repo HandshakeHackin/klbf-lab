@@ -1714,7 +1714,11 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         try { & $fClear $c.info.cache; $c.cacheGB = 0; $c.clearCache.Text = 'Clear shader cache (0 GB)'; $c.clearCache.Enabled = $false; $c.status.Text = 'Shaders: not prepared yet (Play offers it).' }
         catch { $c.status.Text = "$_" }
     }.GetNewClosure())
-    if ($c.screens.Count) { & $c.place } else { $f.StartPosition = 'CenterScreen' }
+    if ($c.screens.Count) {
+        & $c.place
+        # WinForms can adjust a fixed dialog's size when it first creates the native scrollbars.
+        $f.add_Shown({ & $c.place }.GetNewClosure())
+    } else { $f.StartPosition = 'CenterScreen' }
     @{ form = $f; c = $c }
 }
 
