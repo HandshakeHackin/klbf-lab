@@ -841,6 +841,18 @@ fn scripted_now(elapsed_ms: u64) -> u32 {
     buttons
 }
 
+/// The player pressed a real button: `VICTORY_AUTO_INPUT` stops for good.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn auto_input_stop() {
+    if let Some(script) = AUTO_INPUT.as_ref() {
+        let mut script = lock(script);
+        if !script.stopped && script.i < script.steps.len() {
+            script.stopped = true;
+            tracing::info!("auto input: stopped, the player pressed a button");
+        }
+    }
+}
+
 /// Pad buttons the auto inputs hold now (`VICTORY_AUTO_A`, `VICTORY_AUTO_INPUT`).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn auto_buttons() -> u32 {
@@ -1707,6 +1719,11 @@ mod host {
             }
             // The auto press likewise reaches a real first pad, which hides
             // the stand-in.
+            // (v26.11.6) A button pressed on the real pad: the player has taken over, the script
+            // stops for good (else a step waiting for a screen that never comes taps A in the game).
+            if slot == 0 && pad.buttons != 0 {
+                super::auto_input_stop();
+            }
             if slot == 0 {
                 pad.buttons |= super::auto_buttons();
             }
