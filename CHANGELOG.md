@@ -13,6 +13,8 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
   none of its switches was on by default. The earlier Op-lite base stays.
 
 ### Launcher
+- First start: the built-in (console) upscaler by default instead of AMD FSR, which can flash black planes from
+  the character on water and in low sun. AMD FSR and NVIDIA DLSS stay one click away; a saved choice is kept.
 - The start script (Start: autosave or a slot) stops as soon as a button is pressed on the pad: a step waiting
   for a screen that never came kept pressing A in the game.
 - launcher.log records each preparation step's process, exit code and last progress when shader translation
