@@ -75,6 +75,8 @@ mod indirect;
 #[cfg(windows)]
 mod inplace;
 #[cfg(windows)]
+mod kept; // KLBF_SHRINK_KEPT=1 (off): room only a burst needed, given back
+#[cfg(windows)]
 mod land;
 pub mod list;
 pub mod object;

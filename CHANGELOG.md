@@ -17,6 +17,9 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
   audio DSP convolution (`VICTORY_DSP_CONVOLVE=1`; our phone-voice passthrough stays the default).
   Kept ours instead: keyboard and mouse, FSR upscaler port, ambient stand-in and water reflections. Left out
   for now: the NVIDIA DLSS / 1440p path (it takes the same upscaler calls as our FSR port).
+- fxceless ([victory-fork](https://github.com/fxceless/victory-fork), GPL-3.0): static samplers in one kept order.
+- CHECK6960 ([Victory-Nvidia-optimized](https://github.com/CHECK6960/Victory-Nvidia-optimized), GPL-3.0): shorter, non-blocking pipeline wait.
+- LibsMQG ([hle-d3d12-amd](https://github.com/LibsMQG/hle-d3d12-amd), GPL-3.0): lazy lists, kept room given back, pool discard switches.
 
 crossducking (RAZDA4A-XEN) and nathanbzrr: thanks for the code this release takes in (GPL-3.0).
 
@@ -32,6 +35,15 @@ crossducking (RAZDA4A-XEN) and nathanbzrr: thanks for the code this release take
 - `KLBF_EMERGENCY_RECLAIM=1`: with under 2.5 GB of free commit, or the shared GPU memory at 88 % of its
   budget, idle command memory and spare chunks are freed at once, before an allocation can fail with
   0x8007000E. From crossducking (RAZDA4A-XEN).
+
+### Stutter and memory (all off: set the switch to try)
+- `KLBF_SAMPLER_ORDER=1`: static samplers get the same place in the driver's table at every start, so the
+  driver's shader cache answers instead of compiling hundreds of pipelines again after each start.
+- `KLBF_PIPELINE_NOBLOCK=1`: a pipeline off the screen still being built is waited for 80 ms a frame, not
+  500, and not again until it is built (`VICTORY_PIPELINE_WAIT_MS` still sets the wait).
+- `KLBF_LIST_LAZY=1`: our command lists hold a driver list only while they record.
+- `KLBF_SHRINK_KEPT=1`: room only a burst needed is given back.
+- `KLBF_POOL_DISCARD_FRESH=1`, `KLBF_POOL_DISCARD_SOFT=1`: two finer rules for pool pages given back.
 
 ## v26.11.4 (27 Nov 2026)
 

@@ -7977,8 +7977,10 @@ impl HostList {
             fills.wait(0);
         }
         *self.deferred() = Deferred::default();
-        self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        // Cleared, a table keeps the room of the list's biggest recording;
+        // `KLBF_SHRINK_KEPT=1` makes one that only a burst needed anew.
+        crate::kept::clear_table(&mut self.states.lock().unwrap_or_else(|e| e.into_inner()));
+        crate::kept::clear_table(&mut self.twins.lock().unwrap_or_else(|e| e.into_inner()));
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
         self.indirects.lock().unwrap_or_else(|e| e.into_inner()).clear();
