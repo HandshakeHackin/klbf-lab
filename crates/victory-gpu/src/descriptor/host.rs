@@ -4910,7 +4910,7 @@ fn buffer_srv(
             // SAFETY: a live buffer and a slot of our heap.
             buffer_srv_made(&host.device, &shadow.buffer, &desc, twin);
             let start = unsafe { shadow.buffer.GetGPUVirtualAddress() } + first * 4;
-            if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
+            if by > 0 && !(is_cpu_staged_slot(twin) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 null_buffer_view(twin);
             }
@@ -5033,7 +5033,7 @@ fn buffer_uav(
                     .CreateUnorderedAccessView(&shadow.buffer, None::<&ID3D12Resource>, Some(&desc), twin);
                 shadow.buffer.GetGPUVirtualAddress() + first * 4
             };
-            if by > 0 && !(staged(false, 1).is_some_and(|s| s.ptr == twin.ptr) && move_raw(twin, start, count.saturating_mul(4), by)) {
+            if by > 0 && !(is_cpu_staged_slot(twin) && move_raw(twin, start, count.saturating_mul(4), by)) {
                 TWINS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 null_buffer_view(twin);
             }
@@ -7706,6 +7706,7 @@ impl ListViews {
                 .ok()?;
             let step = host.device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as usize;
             let start = heap.GetCPUDescriptorHandleForHeapStart().ptr;
+            LIST_VIEWS_RANGE.with(|r| r.set((start, start + step * Self::SLOTS as usize)));
             Some(ListViews { recording: 0, fills: None, lists: 0, heap, step, start, made: Default::default() })
         }
     }
@@ -7719,6 +7720,25 @@ impl ListViews {
 
 thread_local! {
     static LIST_VIEWS: std::cell::RefCell<Option<ListViews>> = const { std::cell::RefCell::new(None) };
+    /// `(start, end)` CPU handle range of this thread's non-shader-visible `ListViews` heap,
+    /// readable without borrowing `LIST_VIEWS` so `move_raw` can safely patch unaligned raw twins
+    /// built in `make_listed_into` instead of zeroing them to `null_buffer_view`.
+    static LIST_VIEWS_RANGE: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// True when `at` belongs to one of this thread's private CPU-only descriptor heaps
+/// (`staged(false, 1)` or `ListViews`), where `move_raw` may safely patch the AMD descriptor.
+/// From crossducking (RAZDA4A-XEN) Wave 11. `KLBF_RAW_VIEW_FIX=0`: only the staged slot (as before).
+#[inline]
+fn is_cpu_staged_slot(at: D3D12_CPU_DESCRIPTOR_HANDLE) -> bool {
+    if staged(false, 1).is_some_and(|s| s.ptr == at.ptr) {
+        return true;
+    }
+    if !crate::toggled!("KLBF_RAW_VIEW_FIX") {
+        return false;
+    }
+    let (start, end) = LIST_VIEWS_RANGE.with(std::cell::Cell::get);
+    start != 0 && at.ptr >= start && at.ptr < end
 }
 
 /// The view the record `words` names, as this thread made it for `recording`.

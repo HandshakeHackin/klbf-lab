@@ -55,6 +55,13 @@ fn sample_commit(now: u64) -> u64 {
     AVAILABLE_COMMIT.load(Ordering::Relaxed)
 }
 
+/// (crossducking, RAZDA4A-XEN) `KLBF_EMERGENCY_RECLAIM=1` (off): free commit under 2.5 GiB,
+/// or the shared GPU memory at 88 % of its budget or more ([`crate::host::Host::video_memory`]).
+pub(crate) fn emergency_pressure(shared: Option<(u64, u64)>) -> bool {
+    let shared_full = shared.is_some_and(|(budget, used)| budget > 0 && u128::from(used) * 100 >= u128::from(budget) * 88);
+    sample_commit(crate::host::coarse_ms()) < 2560 * MIB || shared_full
+}
+
 fn has_upload_reserve(commit: u64, bake: bool) -> bool {
     // Keep a protective floor against Rust/game OOM aborts without starving
     // bindless world textures or one-shot ped decoration bakes when steady-state

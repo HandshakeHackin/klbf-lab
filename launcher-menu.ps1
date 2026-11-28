@@ -113,7 +113,7 @@ function Test-KlbfLostSaves([string]$Data, [string[]]$From = (Get-KlbfOldHomes))
 function Get-KlbfDefaults {
     [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1; borderless = $false
         # (low-end beta) Experimental switches, all off: Experimental tab, play.ps1's -HeapSkip and siblings
-        heapSkip = $false; heapSkipVerify = $false; rebarUpload = $false; refreshCoalesce = $false; pagePool = $false }
+        heapSkip = $false; heapSkipVerify = $false; rebarUpload = $false; refreshCoalesce = $false; pagePool = $false; safe8gb = $false; emergencyReclaim = $false }
 }
 
 # (low-end beta) The experimental choices: play.ps1 switch, environment variable, the tab's text and tooltip.
@@ -123,6 +123,8 @@ $script:KlbfExperimental = [ordered]@{
     rebarUpload = @{ switch = 'RebarUpload'; text = 'ReBAR upload (KLBF_REBAR_UPLOAD), needs Resizable BAR / SAM'; tip = 'Uploads go straight into the card''s memory; no effect without Resizable BAR.' }
     refreshCoalesce = @{ switch = 'RefreshCoalesce'; text = 'Refresh coalesce (KLBF_REFRESH_COALESCE)'; tip = 'Joins buffer refreshes that touch into one.' }
     pagePool = @{ switch = 'PagePool'; text = '16 GB memory pool (VICTORY_PAGE_POOL)'; tip = 'Shares texture memory pages to use less RAM on 16 GB PCs.' }
+    safe8gb = @{ switch = 'Safe8GB'; text = '8 GB VRAM safe mode (KLBF_8GB_SAFE)'; tip = 'Stops texture uploads at 65% of the card budget instead of 90%, for 8 GB cards.' }
+    emergencyReclaim = @{ switch = 'EmergencyReclaim'; text = 'Emergency memory reclaim (KLBF_EMERGENCY_RECLAIM)'; tip = 'Frees idle command memory when free commit is under 2.5 GB or shared GPU memory is at 88%.' }
 }
 
 # Any object (a parsed JSON) over the defaults: unknown or invalid values keep the default.
@@ -1400,7 +1402,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.save.Enabled = $null -ne $c.saved.SelectedItem
 
     # (low-end beta) Experimental tab: untested switches, each off by default, one per run for A/B
-    $g = & $group $expPage 'Experimental (untested, all off by default)' 4 160
+    $g = & $group $expPage 'Experimental (untested, all off by default)' 4 212
     $c.exp = @{}
     $y = 22
     foreach ($k in $script:KlbfExperimental.Keys) {
@@ -1412,7 +1414,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
         $y += 26
     }
     $c.exp.heapSkip.add_CheckedChanged({ $c.exp.heapSkipVerify.Enabled = $c.exp.heapSkip.Checked }.GetNewClosure())
-    $note = & $label $expPage 'Turn on one at a time and compare with all off: same save, same route, same length.' 6 170 480 36
+    $note = & $label $expPage 'Turn on one at a time and compare with all off: same save, same route, same length.' 6 222 480 36
     $note.ForeColor = $soft
 
     # Saves tab
@@ -1772,6 +1774,7 @@ function Get-KlbfFormChoice($c) {
         borderless = [bool]($c.mode.SelectedIndex -eq 1)
         heapSkip = [bool]$c.exp.heapSkip.Checked; heapSkipVerify = [bool]$c.exp.heapSkipVerify.Checked
         rebarUpload = [bool]$c.exp.rebarUpload.Checked; refreshCoalesce = [bool]$c.exp.refreshCoalesce.Checked; pagePool = [bool]$c.exp.pagePool.Checked
+        safe8gb = [bool]$c.exp.safe8gb.Checked; emergencyReclaim = [bool]$c.exp.emergencyReclaim.Checked
         display = $(if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -eq $c.primaryIndex) { -1 } else { [int]$c.display.SelectedIndex })
     })
 }
