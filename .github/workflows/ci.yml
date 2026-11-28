@@ -1,33 +1,43 @@
-name: CI
-
+name: Verify the proposed Windows launcher and GPU changes together
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/nov28-launcher-gpu-integration']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  combined:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
+        with:
+          ref: 6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088
+      - name: Apply reviewed changes to an untouched v26.11.5 tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          for change in b41211d001abfb90a01c828db412682043bbffe4 4c49ec1d60ae5a5a231acadd01cfff182ff6b7a4 96668cc4fb808c434b276bd1b5e81533bcfde99f d153cf6620dd90bbe713288e14be503fb4000324 256b6a475fab72421497ec205077797a2b0eab5d; do
+            git fetch --no-tags --depth=1 origin "$change"
+            git diff --binary "$base" "$change" | git apply --index
+          done
+          git diff --cached --check
+          git diff --cached --stat
+      - name: Exercise the combined launcher on Windows PowerShell and PowerShell 7
+        shell: pwsh
+        run: |
+          foreach ($exe in 'powershell.exe', 'pwsh.exe') {
+            foreach ($test in 'launcher-logs', 'preparation-exit-log', 'benchmark-clipboard', 'settings-work-area') {
+              Write-Host "Running $test with $exe"
+              & $exe -NoProfile -STA -File "./tests/$test.ps1"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy
+      - name: Strict Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
+      - name: Strict Clippy with all features
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
+      - name: Full Windows workspace
         run: cargo test --workspace --locked
