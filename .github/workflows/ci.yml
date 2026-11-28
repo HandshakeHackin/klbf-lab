@@ -1,33 +1,61 @@
-name: CI
-
+name: Bench state across ordinary launches
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/v26.11.3-benchmark-session']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  powershell:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+        with:
+          ref: 6f53d9ad1d94c198f2a0c5135c54b796cabab1e5
+      - shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'bench-session'
+          New-Item -ItemType Directory $root | Out-Null
+          New-Item -ItemType File (Join-Path $root 'game_scarlett_master.exe') | Out-Null
+          $stub = Join-Path $root 'record.cmd'
+          $env:BENCH_TEST_RECORD = Join-Path $root 'record.txt'
+          @('@echo off','> "%BENCH_TEST_RECORD%" echo mode=[%KLBF_BENCH%] player=[%KLBF_BENCH_PLAYER%] length=[%KLBF_BENCH_LENGTH%]','exit /b 0') | Set-Content $stub -Encoding ascii
+          $opts = @{ Game=$root; Victory=$stub; Cache=(Join-Path $root 'cache'); Data=(Join-Path $root 'data'); NoMenu=$true; NoPrecompile=$true; SkipShaderCheck=$true }
+          & .\play.ps1 @opts
+          $before = (Get-Content $env:BENCH_TEST_RECORD).Trim()
+          if ($before -ne 'mode=[] player=[] length=[]') { throw "unexpected fresh control: $before" }
+          try { & .\play.ps1 @opts -Bench -BenchPlayer fixture -BenchLength 15; throw 'missing rejection' }
+          catch { if ($_.Exception.Message -notlike '*shaders are not translated*') { throw } }
+          & .\play.ps1 @opts
+          $after = (Get-Content $env:BENCH_TEST_RECORD).Trim()
+          Write-Host "ordinary launch before benchmark: $before"
+          Write-Host "ordinary launch after rejected benchmark: $after"
+          if ($after -ne 'mode=[bm-v1] player=[fixture] length=[medium]') { throw 'leak did not reproduce' }
+  pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 6f53d9ad1d94c198f2a0c5135c54b796cabab1e5
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'bench-session'
+          New-Item -ItemType Directory $root | Out-Null
+          New-Item -ItemType File (Join-Path $root 'game_scarlett_master.exe') | Out-Null
+          $stub = Join-Path $root 'record.cmd'
+          $env:BENCH_TEST_RECORD = Join-Path $root 'record.txt'
+          @('@echo off','> "%BENCH_TEST_RECORD%" echo mode=[%KLBF_BENCH%] player=[%KLBF_BENCH_PLAYER%] length=[%KLBF_BENCH_LENGTH%]','exit /b 0') | Set-Content $stub -Encoding ascii
+          $opts = @{ Game=$root; Victory=$stub; Cache=(Join-Path $root 'cache'); Data=(Join-Path $root 'data'); NoMenu=$true; NoPrecompile=$true; SkipShaderCheck=$true }
+          & .\play.ps1 @opts
+          $before = (Get-Content $env:BENCH_TEST_RECORD).Trim()
+          if ($before -ne 'mode=[] player=[] length=[]') { throw "unexpected fresh control: $before" }
+          try { & .\play.ps1 @opts -Bench -BenchPlayer fixture -BenchLength 15; throw 'missing rejection' }
+          catch { if ($_.Exception.Message -notlike '*shaders are not translated*') { throw } }
+          & .\play.ps1 @opts
+          $after = (Get-Content $env:BENCH_TEST_RECORD).Trim()
+          Write-Host "ordinary launch before benchmark: $before"
+          Write-Host "ordinary launch after rejected benchmark: $after"
+          if ($after -ne 'mode=[bm-v1] player=[fixture] length=[medium]') { throw 'leak did not reproduce' }
