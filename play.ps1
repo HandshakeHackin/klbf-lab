@@ -328,7 +328,7 @@ if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'op
 # -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
 # screens and Continue pressed by themselves (the most recent save loads, any place); touch nothing.
 if ($Bench) {
-    $env:KLBF_BENCH = 'bm-v1'; $env:KLBF_BENCH_PLAYER = $BenchPlayer; $env:KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $env:KLBF_BENCH_LENGTH) { $env:KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
+    $set.KLBF_BENCH = 'bm-v1'; $set.KLBF_BENCH_PLAYER = $BenchPlayer; $set.KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $set.KLBF_BENCH_LENGTH) { $set.KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
     if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
     $set.VICTORY_AUTO_INPUT = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A,d>=1000'
     Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing until the card shows. Your card is saved in bench-results beside victory.exe;'
@@ -349,7 +349,15 @@ $set.KLBF_LOG_DIR = Get-KlbfLogDir
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
-foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
+# Apply benchmark-only values for the game below. Preflight can fail or return to Settings.
+$benchEnvironment = @{}
+foreach ($k in $set.Keys) {
+    if ($Bench -and $k -in 'KLBF_BENCH', 'KLBF_BENCH_PLAYER', 'KLBF_BENCH_LENGTH', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_SAVE_ID', 'KLBF_BENCH_WHERE', 'VICTORY_AUTO_INPUT') {
+        $benchEnvironment[$k] = $set[$k]
+    } else {
+        Set-Item -Path "Env:$k" -Value $set[$k]
+    }
+}
 if ($PrintEnv) {
     $mode = if ($Fsr) { 'Profile S (run --console series-s), VICTORY_FSR_DLL=' + (Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll') } else { 'Profile X' }
     Write-Output "mode: $mode"
@@ -451,7 +459,19 @@ if ($Fsr) {
     $env:VICTORY_FSR_DLL = $fsrDll
     $runArgs += '--console', 'series-s'
 }
-$code = Invoke-KlbfLogged $Victory $runArgs (Get-KlbfLogDir)
+$previous = @{}
+try {
+    foreach ($k in $benchEnvironment.Keys) {
+        $previous[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+        Set-Item -Path "Env:$k" -Value $benchEnvironment[$k]
+    }
+    $code = Invoke-KlbfLogged $Victory $runArgs (Get-KlbfLogDir)
+} finally {
+    foreach ($k in $previous.Keys) {
+        if ($null -eq $previous[$k]) { Remove-Item -LiteralPath "Env:$k" -ErrorAction SilentlyContinue }
+        else { Set-Item -Path "Env:$k" -Value $previous[$k] }
+    }
+}
 # (27/11) In the game F10 (Settings) and F11 (Restart) end it with exit code 10 or 11: the settings window
 # (its Play starts the game again), or the same start again; the saves are backed up again at that start.
 # ponytail: a new play.ps1 per relaunch (nested), fine for a session's few dozen restarts.
