@@ -42,6 +42,9 @@
 #              (needs -Hooks).
 # -Tout        everything at once, for a test: -FsrX (quality unless -FsrQuality), -FrameGen, -Hooks and -TexTrim,
 #              with the DLLs of -FfxDir. Each switch stays usable alone for A/B.
+# -HeapSkip (KLBF_HEAP_SKIP=1, -HeapSkipVerify adds KLBF_HEAP_SKIP_VERIFY=1), -RebarUpload (KLBF_REBAR_UPLOAD=1),
+#              -RefreshCoalesce (KLBF_REFRESH_COALESCE=1), -PagePool (VICTORY_PAGE_POOL=1): the low-end beta's
+#              experimental switches (Settings, Experimental tab), untested, each off unless given.
 # -NoPrecompile  skip the step below
 # -OnlyPrecompile  do the step below and stop, without starting the game
 # -More        other settings, last word: -More @{ VICTORY_LOG = 'warn' }
@@ -77,6 +80,11 @@ param(
     [switch]$Hooks,
     [switch]$NoHooks,
     [switch]$TexTrim,
+    [switch]$HeapSkip,
+    [switch]$HeapSkipVerify,
+    [switch]$RebarUpload,
+    [switch]$RefreshCoalesce,
+    [switch]$PagePool,
     [switch]$Tout,
     [switch]$NoPrecompile,
     [switch]$OnlyPrecompile,
@@ -244,7 +252,7 @@ if ($menuAction -eq 'bench' -and $picked.benchSave) {
 
 # Settings left in this window by an earlier start go: only what is below counts.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -ne 'VICTORY_HALF_VIEWS' -and $_.Name -ne 'VICTORY_AUTO_INPUT' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
-Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_WHERE', 'KLBF_BENCH_SAVE_ID' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+Get-ChildItem Env: | Where-Object { $_.Name -in 'KLBF_X_FSR', 'KLBF_X_FSR_QUALITY', 'KLBF_X_OUTPUT', 'KLBF_FRAMEGEN', 'KLBF_TEX_TRIM', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_WHERE', 'KLBF_BENCH_SAVE_ID', 'KLBF_HEAP_SKIP', 'KLBF_HEAP_SKIP_VERIFY', 'KLBF_REBAR_UPLOAD', 'KLBF_REFRESH_COALESCE' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 
 $set = [ordered]@{
     VICTORY_GAME_DIR  = $Game
@@ -304,6 +312,11 @@ if ($TexTrim) {
     if (-not $Hooks -or $NoHooks) { throw '-TexTrim needs -Hooks (KLBF_TEX_TRIM refuses without VICTORY_GPU_ONLY=1).' }
     $set.KLBF_TEX_TRIM = '1'
 }
+# (low-end beta) The experimental switches, each set only when asked
+if ($HeapSkip) { $set.KLBF_HEAP_SKIP = '1'; if ($HeapSkipVerify) { $set.KLBF_HEAP_SKIP_VERIFY = '1' } }
+if ($RebarUpload) { $set.KLBF_REBAR_UPLOAD = '1' }
+if ($RefreshCoalesce) { $set.KLBF_REFRESH_COALESCE = '1' }
+if ($PagePool) { $set.VICTORY_PAGE_POOL = '1' }
 if ($Output) { $set.KLBF_X_OUTPUT = $Output }
 if ($FsrX) {
     # (KLBF Lab, 27/11) The title's FidelityFX path in Series X, to the PC FSR DLL
@@ -353,7 +366,7 @@ foreach ($k in $set.Keys) { Set-Item -Path "Env:$k" -Value $set[$k] }
 if ($PrintEnv) {
     $mode = if ($Fsr) { 'Profile S (run --console series-s), VICTORY_FSR_DLL=' + (Join-Path $FfxDir 'amd_fidelityfx_upscaler_dx12.dll') } else { 'Profile X' }
     Write-Output "mode: $mode"
-    $on = @(@('Fsr', 'FsrX', 'FrameGen', 'Hooks', 'TexTrim') | Where-Object { (Get-Variable $_).Value })
+    $on = @(@('Fsr', 'FsrX', 'FrameGen', 'Hooks', 'TexTrim', 'HeapSkip', 'HeapSkipVerify', 'RebarUpload', 'RefreshCoalesce', 'PagePool') | Where-Object { (Get-Variable $_).Value })
     if ($FsrX) { $on += "FsrQuality=$FsrQuality" }
     if ($Output) { $on += "Output=$Output" }
     Write-Output ('switches: ' + ($on -join ' '))

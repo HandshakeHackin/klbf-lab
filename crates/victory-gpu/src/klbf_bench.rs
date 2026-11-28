@@ -944,6 +944,10 @@ impl Launch {
     fn read() -> Launch {
         let on = |k: &str| std::env::var(k).is_ok_and(|v| v.trim() == "1");
         let mut exp: Vec<String> = std::env::vars().filter_map(|(k, v)| exp_switch(&k, &v)).collect();
+        // (low-end beta) The launcher's Experimental tab also sets this one, not a `KLBF_*` switch
+        if on("VICTORY_PAGE_POOL") {
+            exp.push("page-pool".into());
+        }
         exp.sort();
         Launch {
             display: if on("KLBF_BORDERLESS") { "borderless fullscreen" } else { "window" },

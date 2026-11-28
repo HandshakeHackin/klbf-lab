@@ -241,6 +241,59 @@ fn short_flags() -> D3D12_HEAP_FLAGS {
     if short_no_wait() { D3D12_HEAP_FLAG_NONE } else { not_resident() }
 }
 
+/// `KLBF_REFRESH_COALESCE=1` (off by default): a refresh asked right after one of the same host copy whose
+/// range it touches or overlaps widens that one instead of being a step of its own
+/// ([`HostList::defer_refresh`]). Idea from gleaf-6.
+fn refresh_coalesce() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_REFRESH_COALESCE").is_some_and(|v| v == "1"))
+}
+
+/// The range (address, bytes) covering `last` and `new` if they touch or overlap.
+fn coalesced(last: (usize, usize), new: (usize, usize)) -> Option<(usize, usize)> {
+    let (last_end, new_end) = (last.0 + last.1, new.0 + new.1);
+    (new.0 <= last_end && last.0 <= new_end).then(|| {
+        let from = last.0.min(new.0);
+        (from, last_end.max(new_end) - from)
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn refreshes_coalesce_only_when_they_touch() {
+    assert_eq!(coalesced((100, 50), (150, 10)), Some((100, 60)), "right after");
+    assert_eq!(coalesced((100, 50), (80, 20)), Some((80, 70)), "right before");
+    assert_eq!(coalesced((100, 50), (120, 10)), Some((100, 50)), "inside");
+    assert_eq!(coalesced((100, 50), (90, 100)), Some((90, 100)), "around");
+    assert_eq!(coalesced((100, 50), (151, 10)), None, "a gap after");
+    assert_eq!(coalesced((100, 50), (0, 99)), None, "a gap before");
+}
+
+/// `KLBF_REBAR_UPLOAD=1` (off by default): [`Host::upload_buffer`] makes its buffers in the card's own memory,
+/// written by the CPU through a resizable BAR (`D3D12_HEAP_TYPE_GPU_UPLOAD`, [`Host::mapped_card_buffer`]), so
+/// the card reads them without crossing the bus; the upload heap stays the fallback (no ReBAR / SAM, too big,
+/// card memory short). Idea from Paradoxo321's rodrion-vi.
+fn rebar_upload() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("KLBF_REBAR_UPLOAD").is_some_and(|v| v == "1"))
+}
+
+/// Whether an upload buffer of `size` bytes may go in card memory ([`rebar_upload`]): up to 32 MiB, and the
+/// card's memory ([`Host::video_memory`]: budget, used) stays under 80 % of its budget, as for windows.
+fn card_upload_fits(size: u64, video: Option<[u64; 4]>) -> bool {
+    size <= 32 << 20 && video.is_some_and(|[budget, used, ..]| used.saturating_add(size) <= budget / 10 * 8)
+}
+
+#[cfg(test)]
+#[test]
+fn card_uploads_are_small_and_leave_room() {
+    let gib = 1u64 << 30;
+    assert!(card_upload_fits(1 << 20, Some([8 * gib, 4 * gib, 0, 0])));
+    assert!(!card_upload_fits((32 << 20) + 1, Some([8 * gib, 0, 0, 0])), "over 32 MiB");
+    assert!(!card_upload_fits(1 << 20, Some([10 * gib, 8 * gib, 0, 0])), "card memory at 80 %");
+    assert!(!card_upload_fits(1 << 20, None), "budget unknown");
+}
+
 /// [`resident`] then, if `map`, [`mapped`], for a short-lived buffer ([`short_no_wait`]).
 fn short_wait(device: &ID3D12Device, b: &ID3D12Resource, map: bool) -> windows::core::Result<()> {
     if short_no_wait() {
@@ -7575,9 +7628,20 @@ impl HostList {
         let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
         let new = deferred.refreshed.insert(key);
         if new {
-            deferred
-                .copies
-                .push(Step::Refresh(shadow.clone(), address, len));
+            // (KLBF_REFRESH_COALESCE) Touching or overlapping the last step's range of the same copy: that step
+            // grows to cover both. Only the last step: a `Copy` or `Run` after it keeps the two apart (refreshes
+            // spliced in later by `take_coming` are refreshes too, whose order does not matter).
+            if refresh_coalesce()
+                && let Some(Step::Refresh(last, at, bytes)) = deferred.copies.last_mut()
+                && std::sync::Arc::ptr_eq(last, shadow)
+                && let Some((from, to)) = coalesced((*at, *bytes), (address, len))
+            {
+                (*at, *bytes) = (from, to);
+            } else {
+                deferred
+                    .copies
+                    .push(Step::Refresh(shadow.clone(), address, len));
+            }
         }
         #[cfg(feature = "diagnostics")]
         refresh_asked(new, len);
@@ -9943,6 +10007,14 @@ impl Host {
     }
 
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        // (KLBF_REBAR_UPLOAD) Straight into the card's memory when the CPU can map it; the upload heap otherwise.
+        if rebar_upload()
+            && self.mapped_card_memory()
+            && card_upload_fits(size, self.video_memory())
+            && let Some(made) = self.mapped_card_buffer(size, false)
+        {
+            return Some(made);
+        }
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
