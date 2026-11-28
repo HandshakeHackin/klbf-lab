@@ -6,6 +6,18 @@ and what it lacks. Every switch below is an environment variable; "off" means it
 Base: Op-lite's victory-scarlett (Series X profile, sea fixed; no longer public, our tree keeps its history),
 itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AMD work. GPL-3.0.
 
+## v26.11.5
+
+### Credits
+- Op-lite (via FilipGra24/OP-lite): the work of 28 Nov taken as is, every new switch off by default:
+  mimalloc allocator (`--features mimalloc`) and the `diagfast` profile; descriptor fills on our own threads
+  (`VICTORY_FILL_ASIDE=1`); guards without their lock (`VICTORY_GUARDS_FAST=1`); memory leak fixes
+  (`VICTORY_PLACED_PAD_IGNORE=1`, `VICTORY_OWNERLESS_VIEWS`, `VICTORY_LISTS_OPEN=1`, `VICTORY_BATCH_KEEP=1`);
+  physical pages in smaller sections (`VICTORY_SECTION_PAGES`); texture recheck (`VICTORY_TEX_RECHECK=1`);
+  audio DSP convolution (`VICTORY_DSP_CONVOLVE=1`; our phone-voice passthrough stays the default).
+  Kept ours instead: keyboard and mouse, FSR upscaler port, ambient stand-in and water reflections. Left out
+  for now: the NVIDIA DLSS / 1440p path (it takes the same upscaler calls as our FSR port).
+
 ## v26.11.4 (27 Nov 2026)
 
 Thanks to the testers whose reports led to this release: Domi, INGLIP, deydey103, Solar, pacoravan,
