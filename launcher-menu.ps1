@@ -1034,6 +1034,22 @@ function Copy-KlbfSave($From, $To, [string]$SavesRoot, [string]$Dir = (Get-KlbfB
     $backup
 }
 
+# (28/11) A save one place up ($By -1) or down (+1) in the game's Load list. The game is given every save
+# with its manifest's date and lists the manual ones newest first (the autosave first, never moved): so the
+# two saves trade dates, each place keeping its own, a second apart at least (the game reads whole seconds).
+function Move-KlbfSave([string]$SavesRoot, $Save, [int]$By) {
+    $list = @(Get-KlbfSaves $SavesRoot | Where-Object { -not $_.auto })
+    $i = [array]::IndexOf(@($list | ForEach-Object dir), $Save.dir); $j = $i + $By
+    if ($Save.auto -or $i -lt 0 -or $j -lt 0 -or $j -ge $list.Count) { throw 'That save cannot move there.' }
+    $dates = @($list | ForEach-Object { $_.date.AddTicks(-($_.date.Ticks % 10000000)) })
+    $list[$i], $list[$j] = $list[$j], $list[$i]
+    $prev = $null
+    for ($k = 0; $k -lt $list.Count; $k++) {
+        $d = $dates[$k]; if ($prev -and $d -ge $prev) { $d = $prev.AddSeconds(-1) }; $prev = $d
+        foreach ($f in (Get-ChildItem -LiteralPath $list[$k].version -File)) { $f.LastWriteTime = $d }
+    }
+}
+
 # (28/11) The menu presses VICTORY_AUTO_INPUT plays: Continue with saves (the bench's, which loads the newest
 # save), and through the start screens into a new game with no save (-AutoStart's).
 $script:KlbfKeys = @{
@@ -1457,9 +1473,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.savesList.View = 'Details'; $c.savesList.FullRowSelect = $true; $c.savesList.HeaderStyle = 'Nonclickable'
     $c.savesList.BackColor = Get-KlbfColor $script:KlbfTheme.field; $c.savesList.ForeColor = Get-KlbfColor $script:KlbfTheme.text
     # (27/11) In-game names (the title's mission names) hidden until Show names, every time the window opens
-    foreach ($h in @(@('Slot', 90), @('Name in the game', 190), @('Date', 120), @('Size', 70))) { [void]$c.savesList.Columns.Add($h[0], $h[1]) }
+    foreach ($h in @(@('Slot', 80), @('Name in the game', 150), @('Date', 115), @('Size', 70))) { [void]$c.savesList.Columns.Add($h[0], $h[1]) }
     $c.showNames = $false
-    [void](& $add $savesPage $c.savesList 6 8 480 250)
+    [void](& $add $savesPage $c.savesList 6 8 420 250)
+    # (28/11) Beside the clicked slot: move it up or down the game's list (Move-KlbfSave); not the autosave
+    $c.moveUp = & $btn $savesPage ([string][char]0x25B2) 430 8 26 22
+    $c.moveDown = & $btn $savesPage ([string][char]0x25BC) 460 8 26 22
+    $c.moveUp.Visible = $c.moveDown.Visible = $false
     $note = & $label $savesPage ("Numbered as the game's Load menu lists them: the autosave first, then the newest first. " +
         'All saves are backed up before every launch and every bench (the last 10 are kept).') 6 264 480 54
     $note.ForeColor = $soft
@@ -1581,7 +1601,7 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     # A closure sees variables, not this file's functions: they go in as variables.
     $fUpdate = ${function:Update-KlbfForm}; $fSet = ${function:Set-KlbfFormChoice}; $fGet = ${function:Get-KlbfFormChoice}
     $fPath = ${function:Get-KlbfPresetPath}; $fRead = ${function:Read-KlbfSettings}; $fSave = ${function:Save-KlbfSettings}
-    $fSaves = ${function:Update-KlbfSavesTab}; $fBackup = ${function:Backup-KlbfSaves}; $fRestore = ${function:Restore-KlbfSaves}
+    $fSaves = ${function:Update-KlbfSavesTab}; $fMoveButtons = ${function:Update-KlbfMoveButtons}; $fBackup = ${function:Backup-KlbfSaves}; $fRestore = ${function:Restore-KlbfSaves}
     $fCopy = ${function:Copy-KlbfSave}; $fSaveName = ${function:Get-KlbfSaveName}; $fReport = ${function:Get-KlbfBugReport}; $fLog = ${function:Get-KlbfLatestLog}
     $fGamePath = ${function:Set-KlbfGamePath}; $fGuide = ${function:Show-KlbfBenchGuide}; $repo = $script:KlbfRepo; $backupDir = Get-KlbfBackupDir
     $update = { & $fUpdate $c }.GetNewClosure()
@@ -1687,6 +1707,23 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     }.GetNewClosure())
     $fShare = ${function:Get-KlbfBenchShareText}
     $c.showNamesBtn.add_Click({ $c.showNames = -not $c.showNames; & $fSaves $c }.GetNewClosure())
+    $c.savesList.add_SelectedIndexChanged({ & $fMoveButtons $c }.GetNewClosure())
+    $c.running = { [bool](Get-Process -Name victory -ErrorAction SilentlyContinue) }
+    $fMove = ${function:Move-KlbfSave}
+    $c.moveBy = { param($by)
+        $i = if ($c.savesList.SelectedIndices.Count) { $c.savesList.SelectedIndices[0] } else { -1 }
+        if ($i -lt 0) { return }
+        if (& $c.running) { $c.savesNote.Text = 'The game is running: close it, then move the save.'; return }
+        # All saves backed up once, before the first move in this window
+        if (-not $c.movedBackup) { $c.movedBackup = & $fBackup $c.savesRoot; if (-not $c.movedBackup) { $c.savesNote.Text = 'No backup: nothing moved.'; return } }
+        $s = $c.saves[$i]
+        try { & $fMove $c.savesRoot $s $by } catch { $c.savesNote.Text = "$_"; return }
+        $c.keepSelected = $s.dir
+        & $fSaves $c
+        $c.savesNote.Text = "Moved: now $(& $fSaveName (@($c.saves | Where-Object dir -eq $s.dir)[0]) $false). All saves were backed up first."
+    }.GetNewClosure()
+    $c.moveUp.add_Click({ & $c.moveBy -1 }.GetNewClosure())
+    $c.moveDown.add_Click({ & $c.moveBy 1 }.GetNewClosure())
     $c.copyImage.add_Click({
         try { & $c.clipboardImage $c.benchPic.Image; $c.quickNote.Text = 'Card copied: paste it anywhere.' } catch { $c.quickNote.Text = 'Could not copy the image.' }
     }.GetNewClosure())
@@ -1756,6 +1793,9 @@ function Update-KlbfSavesTab($c) {
         [void]$c.savesList.Items.Add($it)
         [void]$c.copyFrom.Items.Add((Get-KlbfSaveName $s)); [void]$c.copyTo.Items.Add((Get-KlbfSaveName $s))
     }
+    # (28/11) The moved save stays selected
+    if ($c.keepSelected) { $k = [array]::IndexOf(@($c.saves | ForEach-Object dir), $c.keepSelected); if ($k -ge 0) { $c.savesList.Items[$k].Selected = $true; $c.savesList.Items[$k].EnsureVisible() }; $c.keepSelected = $null }
+    Update-KlbfMoveButtons $c
     $c.showNamesBtn.Text = "$(if ($c.showNames) { 'Hide names' } else { 'Show names' })" 
     if (-not $c.saves) { $c.savesNote.Text = $(if ($c.savesRoot) { 'No saves yet.' } else { 'No saves folder yet: it appears after the first save in the game.' }) }
     # Start beside Play: the game menu, a new game, the autosave, then every slot (a gone save: the game menu)
@@ -1764,6 +1804,20 @@ function Update-KlbfSavesTab($c) {
     $c.startValues = @('menu', 'new'); $c.startList.Items.Clear(); [void]$c.startList.Items.AddRange(@('Game menu', 'New game'))
     foreach ($s in $c.saves) { $c.startValues += $(if ($s.auto) { 'auto' } else { Split-Path -Leaf $s.dir }); [void]$c.startList.Items.Add((Get-KlbfSaveName $s)) }
     $c.startList.SelectedIndex = [math]::Max(0, [array]::IndexOf($c.startValues, $want))
+}
+
+# (28/11) The up and down buttons on the selected slot's row; none for the autosave or no selection.
+function Update-KlbfMoveButtons($c) {
+    $i = if ($c.savesList.SelectedIndices.Count) { $c.savesList.SelectedIndices[0] } else { -1 }
+    $s = if ($i -ge 0) { $c.saves[$i] }
+    $c.moveShown = [bool]($s -and -not $s.auto) # (Visible reads false while the window is hidden)
+    $c.moveUp.Visible = $c.moveDown.Visible = $c.moveShown
+    if (-not $c.moveShown) { return }
+    $manual = @($c.saves | Where-Object { -not $_.auto })
+    $c.moveUp.Enabled = $manual[0].dir -ne $s.dir; $c.moveDown.Enabled = $manual[-1].dir -ne $s.dir
+    $r = $c.savesList.GetItemRect($i)
+    $y = $c.savesList.Top + [math]::Max(0, [math]::Min($r.Top - 3, $c.savesList.Height - 22))
+    $c.moveUp.Top = $c.moveDown.Top = $y
 }
 
 # The game folder kept in $c.gamePath; the box shows it only after Show ("(hidden)" otherwise).

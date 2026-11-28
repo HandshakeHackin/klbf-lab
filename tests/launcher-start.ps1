@@ -62,6 +62,38 @@ try {
     $m.c.startList.SelectedIndex = 3
     Check 'window: a slot picked gives its folder' ((Get-KlbfFormChoice $m.c).start -eq 'SARC2~0000000000000003')
     $m.form.Dispose()
+
+    # (28/11) Move up / down: two saves trade places in the game's list by their manifests' dates
+    $order = { (@(Get-KlbfSaves $root) | ForEach-Object { (Split-Path -Leaf $_.dir).Substring(0, 5) }) -join ',' }
+    Check 'before: auto, SARC2, SARC1' ((& $order) -eq 'SARC0,SARC2,SARC1')
+    Move-KlbfSave $root (@(Get-KlbfSaves $root)[2]) -1
+    Check 'Slot 2 moved up: now Slot 1' ((& $order) -eq 'SARC0,SARC1,SARC2')
+    $man = Get-ChildItem -Path (Join-Path $root '*\*\*\v1\manifest') | Sort-Object LastWriteTime -Descending | ForEach-Object { $_.Directory.Parent.Name.Substring(0, 5) }
+    Check 'the game sees it: manifests in that order' (($man -join ',') -eq 'SARC1,SARC0,SARC2')
+    Check 'the autosave never moves' ($(try { Move-KlbfSave $root (@(Get-KlbfSaves $root)[0]) 1; $false } catch { $true }))
+    Check 'no place below the last' ($(try { Move-KlbfSave $root (@(Get-KlbfSaves $root)[2]) 1; $false } catch { $true }))
+    # Same date (saves copied together): still a real order, a second apart
+    $same = (Get-Date).AddDays(-1)
+    foreach ($s in @(Get-KlbfSaves $root | Where-Object { -not $_.auto })) { Get-ChildItem -LiteralPath $s.version -File | ForEach-Object { $_.LastWriteTime = $same } }
+    $first = Split-Path -Leaf @(Get-KlbfSaves $root)[1].dir
+    Move-KlbfSave $root (@(Get-KlbfSaves $root)[2]) -1
+    $after = @(Get-KlbfSaves $root)
+    Check 'same dates: moved anyway' ((Split-Path -Leaf $after[2].dir) -eq $first -and ($after[1].date - $after[2].date).TotalSeconds -ge 1)
+
+    # The window: refused while the game runs; else backed up once, moved, and the save stays selected
+    $m = New-KlbfMenuForm (Get-KlbfDefaults) $hw '' @{ data = $data; windows = 'Windows 11' }
+    $null = $m.c.savesList.Handle # a shown window has it; selection needs it
+    $m.c.savesList.Items[1].Selected = $true; Update-KlbfMoveButtons $m.c
+    Check 'window: buttons on a slot' ($m.c.moveShown -and -not $m.c.moveUp.Enabled -and $m.c.moveDown.Enabled)
+    $was = Split-Path -Leaf $m.c.saves[1].dir
+    $m.c.running = { $true }; & $m.c.moveBy 1
+    Check 'window: refused while the game runs' ($m.c.savesNote.Text -match 'running' -and (Split-Path -Leaf @(Get-KlbfSaves $root)[1].dir) -eq $was)
+    $m.c.running = { $false }; & $m.c.moveBy 1
+    Check 'window: moved down, still selected' ((Split-Path -Leaf $m.c.saves[2].dir) -eq $was -and $m.c.savesList.SelectedIndices[0] -eq 2)
+    Check 'window: backed up first' ([bool]$m.c.movedBackup -and (Test-Path -LiteralPath $m.c.movedBackup))
+    $m.c.savesList.Items[0].Selected = $true; $m.c.savesList.Items[2].Selected = $false; Update-KlbfMoveButtons $m.c
+    Check 'window: no buttons on the autosave' (-not $m.c.moveShown)
+    $m.form.Dispose()
 } finally {
     Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue
 }
