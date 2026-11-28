@@ -1,33 +1,51 @@
-name: CI
-
+name: Verify launcher preparation failure diagnostics
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/preparation-diagnostic-windows']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  powershell:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - uses: actions/checkout@v5
+        with:
+          path: baseline
+          ref: 6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088
+      - name: Check v26.11.5 with the same child processes
+        shell: powershell
+        run: |
+          Copy-Item ./tests/preparation-exit-log.ps1 ./baseline/tests/
+          ./baseline/tests/preparation-exit-log.ps1 -ExpectOriginal
+      - name: Check process IDs, exit status and progress after the patch
+        shell: powershell
+        run: |
+          ./tests/preparation-exit-log.ps1
+      - name: Run existing launcher log checks
+        shell: powershell
+        run: |
+          ./tests/launcher-logs.ps1
+  pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          path: baseline
+          ref: 6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088
+      - name: Check v26.11.5 with the same child processes
+        shell: pwsh
+        run: |
+          Copy-Item ./tests/preparation-exit-log.ps1 ./baseline/tests/
+          ./baseline/tests/preparation-exit-log.ps1 -ExpectOriginal
+      - name: Check process IDs, exit status and progress after the patch
+        shell: pwsh
+        run: |
+          ./tests/preparation-exit-log.ps1
+      - name: Run existing launcher log checks
+        shell: pwsh
+        run: |
+          ./tests/launcher-logs.ps1
