@@ -8,7 +8,7 @@ itself from [Marvisak/VIctory](https://github.com/Marvisak/VIctory), plus our AM
 
 ## v26.11.4 (27 Nov 2026)
 
-Thanks to the testers whose reports led to this release: Neffffffff, Domi, INGLIP, deydey103, Solar, pacoravan,
+Thanks to the testers whose reports led to this release: Domi, INGLIP, deydey103, Solar, pacoravan,
 Dominic, MalarkZA, Aphantasiac, KingKaom and wilsonwilsonlg.
 
 ### Stability
