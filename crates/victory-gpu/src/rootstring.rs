@@ -476,6 +476,49 @@ mod tests {
     }
 
     #[test]
+    fn static_sampler_defaults_match_the_native_hlsl_compiler() {
+        use windows::core::Interface;
+
+        let mut cases = std::collections::BTreeSet::from([
+            "StaticSampler(s0)".to_owned(),
+            "StaticSampler(s1, comparisonFunc=COMPARISON_ALWAYS, borderColor=STATIC_BORDER_COLOR_TRANSPARENT_BLACK)".to_owned(),
+        ]);
+        for signature in builtin_signatures() {
+            for entry in split_top(&signature) {
+                let entry = entry.trim();
+                if entry.starts_with("StaticSampler(") {
+                    cases.insert(entry.to_owned());
+                }
+            }
+        }
+        for entry in cases {
+            let source = format!("#define RS \"{entry}\"\n");
+            let compiled = crate::host::compile(
+                &source, windows::core::s!("RS"), windows::core::s!("rootsig_1_0"),
+            ).expect("native HLSL root signature compilation");
+            let parsed = parse(&entry).expect("parse static sampler");
+            let ours = &parsed.samplers[0];
+            let mut raw = std::ptr::null_mut();
+            // SAFETY: the input blob lives through creation. A successful call returns
+            // one owned deserializer, which keeps its descriptor and sampler array alive.
+            let reader = unsafe {
+                D3D12CreateRootSignatureDeserializer(
+                    compiled.as_ptr().cast(), compiled.len(),
+                    &ID3D12RootSignatureDeserializer::IID, &mut raw,
+                ).expect("native root signature deserialization");
+                ID3D12RootSignatureDeserializer::from_raw(raw)
+            };
+            let desc = unsafe { &*reader.GetRootSignatureDesc() };
+            assert_eq!(desc.NumStaticSamplers, 1);
+            let native = unsafe { &*desc.pStaticSamplers };
+            println!("{entry}: parser comparison/border = {:?}/{:?}, native = {:?}/{:?}",
+                ours.ComparisonFunc, ours.BorderColor, native.ComparisonFunc, native.BorderColor);
+            assert_eq!((ours.ComparisonFunc, ours.BorderColor),
+                (native.ComparisonFunc, native.BorderColor), "{entry}");
+        }
+    }
+
+    #[test]
     fn recognizes_supported_filter_constants() {
         let cases = [
             ("FILTER_MIN_MAG_MIP_POINT", D3D12_FILTER_MIN_MAG_MIP_POINT),
