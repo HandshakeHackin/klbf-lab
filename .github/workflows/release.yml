@@ -61,10 +61,18 @@ jobs:
           # failed). The updater reads the first "SHA-256 of the zip: <hash>": it stays the flat zip's.
           $notes = @(
             'Download KLBF-Lab.zip, extract it, open the "KLBF Lab" folder, double-click "KLBF Lab", choose your own game folder. No game files are included.'
-            'KLBF-Lab-win64.zip is the same files, for the automatic update.'
             ''
-            'SHA-256 of the zip: ${{ steps.pkg.outputs.sha }} (KLBF-Lab-win64.zip)'
-            'SHA-256 of KLBF-Lab.zip: ${{ steps.pkg.outputs.sha2 }}'
+            '### Check your download'
+            'Two zips, two different fingerprints (SHA-256). Compare the one **you downloaded**:'
+            ''
+            '| File | For | SHA-256 |'
+            '|---|---|---|'
+            '| `KLBF-Lab.zip` | people (files in a "KLBF Lab" folder) | `${{ steps.pkg.outputs.sha2 }}` |'
+            '| `KLBF-Lab-win64.zip` | the automatic update (same files, no folder) | `${{ steps.pkg.outputs.sha }}` |'
+            ''
+            'In PowerShell, in the folder of the zip: `Get-FileHash .\KLBF-Lab.zip -Algorithm SHA256`. Already extracted? `SHA256SUMS.txt` inside lists every file: [docs/klbf/VERIFY.md](https://github.com/PastiiJay/klbf-lab/blob/main/docs/klbf/VERIFY.md) (also how to build it yourself).'
+            ''
+            'SHA-256 of the zip: ${{ steps.pkg.outputs.sha }} (KLBF-Lab-win64.zip: the line the automatic update reads, keep it as is)'
           ) -join "`n"
           Set-Content -LiteralPath notes.md -Value $notes -Encoding utf8NoBOM
           gh release create "${{ github.ref_name }}" "${{ steps.pkg.outputs.zip2 }}" "${{ steps.pkg.outputs.zip }}" --prerelease --latest=false --title "KLBF Lab ${{ github.ref_name }}" --notes-file notes.md
