@@ -1,6 +1,6 @@
 ﻿//! Two presented planes as one image: the console's display puts the second
 //! (the interface) over the first (the scene), each scaled to the screen.
-//! Grand Theft Auto VI presents so on Series S.
+//! The title presents so on Series S.
 
 #[cfg(windows)]
 #[allow(unused_imports)]

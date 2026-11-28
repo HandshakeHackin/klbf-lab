@@ -433,7 +433,7 @@ overlay); `resource.rs:2384` `is_resource` (1ad6e67).
 
 ### Does Series X present two planes?
 
-Not answered by these commits. The only statements are the author's: `compose.rs:1-3` "Grand Theft Auto VI presents so
+Not answered by these commits. The only statements are the author's: `compose.rs:1-3` "The title presents so
 on Series S", and our own shortlist line 247 ("only Series S presents two planes", from an earlier fork review —
 another fork also has a `compose.rs`). Neither tree contains a measurement of the `planes` argument in Series X mode.
 Ours reads plane 0 only (`queue.rs:126`, `1371`) and never logs `planes`. **Free test (5 lines, no behaviour
