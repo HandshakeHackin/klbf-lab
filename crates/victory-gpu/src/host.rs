@@ -531,6 +531,7 @@ static SWEEP_LOOKS: Mutex<()> = Mutex::new(());
 /// `VICTORY_IDLE_EVICT_NOW_MS` (100) ms; skipped while the sweep itself looks.
 /// The answer of the second asking, `None` if nothing was done.
 #[cfg(windows)]
+#[allow(dead_code)] // (Op-lite 28 Nov: not wired in yet)
 pub(crate) fn let_go_idle_now() -> Option<bool> {
     static ON: OnceLock<bool> = OnceLock::new();
     static GAP: OnceLock<u64> = OnceLock::new();
@@ -4235,7 +4236,7 @@ fn blame_stale(stale: &[(std::sync::Arc<crate::shadow::Shadow>, usize, usize)]) 
 /// title memory read, took `us`.
 #[cfg(feature = "diagnostics")]
 fn blamed(why: usize, us: u64) {
-    let (named, refused) = std::mem::replace(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()), (None, ""));
+    let (named, refused) = std::mem::take(&mut *BLAMED.lock().unwrap_or_else(|e| e.into_inner()));
     let (key, at) = match (why, named) {
         (WHY_READ | WHY_STALE, Some(named)) => named,
         (WHY_READ, None) => (("a host copy of what a copy done on the card wrote", refused, 0, 0, 0), 0),
@@ -10235,6 +10236,7 @@ enum Touch {
     /// The copy is given to shaders.
     Write(usize),
     /// Title memory is written.
+    #[allow(dead_code)]
     Title,
     Nothing,
     /// Another part of the submission begins.
@@ -11076,7 +11078,7 @@ impl Batch {
         #[cfg(feature = "diagnostics")]
         if skip && self.refreshes.len() > 1 {
             let n = KEPT_EARLY.fetch_add(1, Ordering::Relaxed) + 1;
-            if n.is_power_of_two() || n % 10_000 == 0 {
+            if n.is_power_of_two() || n.is_multiple_of(10_000) {
                 tracing::info!(n, "asks ahead left out with the submission's asking standing (VICTORY_ASK_KEPT_EARLY=1), since the start");
             }
         }
@@ -12622,6 +12624,7 @@ fn title_window() -> Option<HWND> {
 }
 
 /// (fox DLSS) The direct queue's timestamp ticks per second (0 without a host).
+#[allow(dead_code)] // (Op-lite 28 Nov: not wired in yet)
 pub(crate) fn timestamp_frequency() -> u64 {
     // SAFETY: a plain query.
     host().and_then(|h| unsafe { h.queue.GetTimestampFrequency() }.ok()).unwrap_or(0)

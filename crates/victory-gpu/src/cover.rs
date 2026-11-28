@@ -78,9 +78,9 @@ fn written(p: &crate::pipeline::host::HostPipeline, tables: &[(u8, u64)]) -> Vec
             }
             let Some(&(_, table)) = tables.iter().find(|r| r.0 == u.slot) else { continue };
             if let Some(View::Unordered(resource, ..)) = crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4)
-                && !out.contains(&(resource as usize))
+                && !out.contains(&{ resource })
             {
-                out.push(resource as usize);
+                out.push(resource);
             }
         }
     }

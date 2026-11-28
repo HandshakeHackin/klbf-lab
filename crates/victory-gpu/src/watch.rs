@@ -71,7 +71,7 @@ impl Journal {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30);
             static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
             let n = NOTES.fetch_add(1, Relaxed);
-            if n % 4096 == 0 {
+            if n.is_multiple_of(4096) {
                 let s = START.get_or_init(std::time::Instant::now).elapsed().as_secs();
                 if s >= NEXT.load(Relaxed) {
                     NEXT.store(s + 30, Relaxed);

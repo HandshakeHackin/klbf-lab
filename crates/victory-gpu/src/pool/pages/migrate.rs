@@ -680,7 +680,7 @@ pub(crate) fn line() -> String {
         if STOPPED.load(Ordering::Relaxed) { ", STOPPED" } else { "" },
         s[S_MOVED],
         s[S_TILES],
-        s[S_TILES] * PAGE >> 20,
+        (s[S_TILES] * PAGE) >> 20,
         s[S_BYTES] >> 20,
         s[S_VERIFIED],
         s[S_MISMATCH],

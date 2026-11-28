@@ -23,6 +23,7 @@ pub mod external; // KLBF Lab: FSR port (VICTORY_FSR_DLL)
 #[cfg(windows)]
 pub mod framegen; // KLBF Lab: AMD frame generation (KLBF_FRAMEGEN=1, from gleaf-6)
 #[cfg(windows)]
+#[allow(dead_code)] // (Op-lite 28 Nov: not wired in yet)
 mod port; // KLBF Lab: renderer port 1 (VICTORY_PORT_CONSTANTS, from rodrion-vi)
 #[cfg(windows)]
 pub mod klbf_bench; // KLBF Lab Bench BM-v1 (PastiiJay/klbf-lab)
@@ -60,6 +61,7 @@ pub mod fence;
 pub mod frame;
 pub mod chunks; // (fox port A) F21 arena chunk meter (VICTORY_CHUNK_METER)
 #[cfg(windows)] pub mod framelog; // (fox port A) frame log, VICTORY_FRAME_LOG
+#[allow(dead_code)] // (Op-lite 28 Nov: not wired in yet)
 pub mod hangwatch; // (fox port A) VICTORY_HANG_WATCH_S
 pub mod lockmeter; // (coder H) F23 engine buffer lock meter (VICTORY_LOCK_METER)
 pub mod knownwrites; // (coder J) own dirty ledger for buffer copies (VICTORY_KNOWN_WRITES=verify|1)

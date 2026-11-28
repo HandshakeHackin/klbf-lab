@@ -7501,7 +7501,7 @@ fn miss_kind(view: &View) -> Option<(usize, std::time::Instant)> {
         map.insert(view.clone(), (frame, thread));
     }
     static TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    (TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 8 == 0).then(|| (kind, std::time::Instant::now()))
+    TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(8).then(|| (kind, std::time::Instant::now()))
 }
 
 /// This recording thread's number.
