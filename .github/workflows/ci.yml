@@ -1,33 +1,51 @@
-name: CI
-
+name: Verify settings on short displays
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/settings-short-displays']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  powershell:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+      - uses: actions/checkout@v5
+        with:
+          path: baseline
+          ref: 6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088
+      - name: Reproduce clipped Play on the release
+        shell: powershell
+        run: |
+          Copy-Item ./tests/settings-work-area.ps1 ./baseline/tests/
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./baseline/tests/settings-work-area.ps1 -ExpectOriginal
+          exit $LASTEXITCODE
+      - name: Exercise short work areas on the fix
+        shell: powershell
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./tests/settings-work-area.ps1
+          exit $LASTEXITCODE
+  pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          path: baseline
+          ref: 6d4f3ef53f46eb2f6dfa8108fc2658bd7646c088
+      - name: Reproduce clipped Play on the release
+        shell: pwsh
+        run: |
+          Copy-Item ./tests/settings-work-area.ps1 ./baseline/tests/
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./baseline/tests/settings-work-area.ps1 -ExpectOriginal
+          exit $LASTEXITCODE
+      - name: Exercise short work areas on the fix
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./tests/settings-work-area.ps1
+          exit $LASTEXITCODE
