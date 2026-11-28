@@ -412,7 +412,7 @@ pub(crate) fn list_meter() -> bool {
 fn line_due(next: &std::sync::atomic::AtomicU64) -> bool {
     use std::sync::atomic::Ordering::Relaxed;
     static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    if TICK.fetch_add(1, Relaxed) % 4096 != 0 {
+    if !TICK.fetch_add(1, Relaxed).is_multiple_of(4096) {
         return false;
     }
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();

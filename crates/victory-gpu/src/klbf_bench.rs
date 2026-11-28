@@ -467,7 +467,7 @@ fn fsr_version() -> &'static str {
             if m.is_null() {
                 return String::new();
             }
-            let r = FindResourceW(m, 1usize as *const u16, RT_VERSION);
+            let r = FindResourceW(m, std::ptr::dangling::<u16>(), RT_VERSION);
             let (data, size) = if r.is_null() { (std::ptr::null(), 0) } else { (LockResource(LoadResource(m, r)) as *const u8, SizeofResource(m, r) as usize) };
             let v = if data.is_null() { String::new() } else { file_version(std::slice::from_raw_parts(data, size)) };
             FreeLibrary(m);

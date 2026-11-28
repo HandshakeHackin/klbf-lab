@@ -324,6 +324,7 @@ fn budget_shift_for(switch: Option<&std::ffi::OsStr>) -> u32 {
 /// replaced).
 fn make_from(device: &ID3D12Device, source: &str) -> windows::core::Result<Clamp> {
     #[cfg(feature = "diagnostics")]
+    #[allow(unused_variables)]
     let batched = source == batch::SOURCE;
     let source =
         &format!("#define WIDEST {}u\n#define REST {}\n#define BUDGET_SHIFT {}\n{source}", widest(amd(device)), rest(), budget_shift());

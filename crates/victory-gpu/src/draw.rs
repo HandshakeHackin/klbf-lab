@@ -2883,7 +2883,7 @@ impl State {
                 };
                 #[cfg(feature = "diagnostics")]
                 let step = LayerStep::begin(list, "title memory by address made ready");
-                let ready = self.memory_ready(list, &t, compute, use_);
+                let ready = self.memory_ready(list, t, compute, use_);
                 #[cfg(feature = "diagnostics")]
                 drop(step);
                 let Some(ready) = ready else {
@@ -5494,7 +5494,7 @@ impl State {
         half: &[(u8, u32)],
         title_first: Option<u32>,
         ks: &[u32],
-        ts: &mut TableSplit,
+        #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))] ts: &mut TableSplit,
     ) {
         let list_views = crate::descriptor::host::list_views();
         if self.recording == 0 {

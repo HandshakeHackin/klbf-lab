@@ -342,7 +342,7 @@ fn step(device: &ID3D12Device, fence: &ID3D12Fence, value: &mut u64, slots: &mut
             })
             // One being emptied first (finish it), then the sparsest.
             .min_by_key(|&(emptying, u, i)| (!emptying, u, i))?;
-        if elsewhere(&*pages, pick.2) < pick.1 {
+        if elsewhere(&pages, pick.2) < pick.1 {
             return None;
         }
         if let Some(Some(h)) = pages.heaps.get_mut(pick.2)
@@ -631,7 +631,7 @@ fn one(
         keep.push(a.clone());
         keep.push(b.clone());
     }
-    Some((*value, keep, checks.map(|(a, b)| (a, b))))
+    Some((*value, keep, checks))
 }
 
 /// A buffer on the card of `bytes` for tiles on their way.
@@ -677,7 +677,7 @@ pub(crate) fn line() -> String {
         if STOPPED.load(Ordering::Relaxed) { ", STOPPED" } else { "" },
         s[S_MOVED],
         s[S_TILES],
-        s[S_TILES] * PAGE >> 20,
+        (s[S_TILES] * PAGE) >> 20,
         s[S_BYTES] >> 20,
         s[S_VERIFIED],
         s[S_MISMATCH],

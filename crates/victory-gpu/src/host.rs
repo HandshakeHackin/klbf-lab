@@ -9157,7 +9157,7 @@ impl Batch {
             }
         }
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        if N.fetch_add(1, Relaxed) % 2048 == 0 {
+        if N.fetch_add(1, Relaxed).is_multiple_of(2048) {
             tracing::info!(
                 "narrow writes (VICTORY_NARROW_WRITES), since the start: {} writes, {} refreshes left pending, {} copies kept ahead, {} compared; MUST BE 0: bytes that differ {}",
                 NARROW[0].load(Relaxed),
@@ -9457,7 +9457,7 @@ impl Batch {
 
     /// (`VICTORY_REFRESH_PAGES`) [`Batch::flush_all`] over the steps' ranges.
     fn flush_all_pages(&mut self) {
-        use std::sync::atomic::Ordering::Relaxed;
+        
         let spans = std::mem::take(&mut self.refreshes);
         let runs = std::mem::take(&mut self.runs);
         let work: Vec<(std::sync::Arc<crate::shadow::Shadow>, Vec<(usize, usize)>, (usize, usize))> =

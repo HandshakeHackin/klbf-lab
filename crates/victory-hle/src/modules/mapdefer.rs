@@ -392,7 +392,7 @@ impl Deferrer {
         {
             let _site = victory_gpu::hangwatch::at(&"map deferral: a mapping or a reader waits for pending unmaps (apply lock)");
             let _g = self.apply_lock.lock().unwrap_or_else(|e| e.into_inner());
-            while self.applied.load(Acquire) < seq && self.apply_next(why) {}
+            while self.applied.load(Acquire) < seq && self.apply_next(why) { std::hint::spin_loop() }
         }
         let ns = t.elapsed().as_nanos() as u64;
         M[WAITS].fetch_add(1, Relaxed);

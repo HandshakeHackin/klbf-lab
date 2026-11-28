@@ -90,7 +90,7 @@ pub fn run(jobs: Option<usize>, limit: Option<usize>, again: bool, used: bool, t
                             state.1 += usize::from(!there);
                             let count = state.0.len();
                             // (27/11) Every 100: the launcher's progress window counts from these.
-                            if count % 100 == 0 {
+                            if count.is_multiple_of(100) {
                                 println!("{count} of {}, {:.0} s", all.len(), began.elapsed().as_secs_f64());
                             }
                             drop(state);

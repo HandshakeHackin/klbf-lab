@@ -3249,7 +3249,7 @@ impl HostHeap {
         self.make_listed_in(recording, words, index, Some(batch))
     }
 
-    fn make_listed_in(&self, recording: u64, words: [u32; 3], index: u32, mut batch: Option<&mut CopyBatch>) -> Option<Listed> {
+    fn make_listed_in(&self, recording: u64, words: [u32; 3], index: u32, batch: Option<&mut CopyBatch>) -> Option<Listed> {
         if self.sampler {
             return None;
         }
@@ -3285,7 +3285,7 @@ impl HostHeap {
             let at = views.made.get(&words)?.at;
             let (slot0, slot1) = (views.slot(at), views.slot(at + 1));
             let made = views.made.get_mut(&words)?;
-            match batch.as_deref_mut() {
+            match batch {
                 None => {
                     self.copy_from(index, slot0);
                     if made.twin && twins {
@@ -4727,7 +4727,7 @@ fn make_twinned(
                 if crate::resource::e5_alpha_one() && crate::resource::e5_stand_in(resource) {
                     match &mut desc {
                         Some(d) => {
-                            d.Shader4ComponentMapping = 0 | 1 << 3 | 2 << 6 | 5 << 9 | 1 << 12;
+                            d.Shader4ComponentMapping = (1 << 3) | 2 << 6 | 5 << 9 | 1 << 12;
                             crate::resource::E5_VIEWS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                         None => {
