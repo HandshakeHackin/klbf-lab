@@ -1,33 +1,111 @@
-name: CI
-
+name: Verify the two remaining launcher PRs on released v26.11.6
 on:
-  pull_request:
   push:
-    branches: [main]
-
+    branches: ['verify/v26.11.6-launcher-prs']
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  check:
+  powershell:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v5
-      # The version and components pinned in rust-toolchain.toml.
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Clippy, diagnostics build
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
-      - name: Tests
-        run: cargo test --workspace --locked
+        with:
+          ref: 75022ba0ba6bacafac9bdd28755f10338caf5938
+          path: release
+      - uses: actions/checkout@v5
+        with:
+          ref: c2f9af4f0fb46f522385a3414b817d5d27a39af9
+          path: display
+      - uses: actions/checkout@v5
+        with:
+          ref: d7a268402fa09c848d21c0c3e22726c72808a223
+          path: caption
+      - name: Load public RX 9060 XT data and confirm both release baselines
+        shell: powershell
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/user-attachments/files/35552055/KLBF-Bench-BM-v1-20261128-2235-d072b8a2.json' -OutFile result.json
+          if ((Get-FileHash result.json).Hash -ne '30829598a20c6386cc0cb8675aae6111fb3077ccdf7457dc7975b6b2de433df2') { throw 'Result file hash changed' }
+          Copy-Item ./display/tests/settings-work-area.ps1 ./release/tests/
+          Copy-Item ./caption/tests/benchmark-share-fps.ps1 ./release/tests/
+          & $exe -NoProfile -STA -File ./release/tests/settings-work-area.ps1 -ExpectOriginal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe -NoProfile -File ./release/tests/benchmark-share-fps.ps1 -ResultFile result.json -ExpectOriginal
+          exit $LASTEXITCODE
+      - name: Check the two individual PR heads
+        shell: powershell
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./display/tests/settings-work-area.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe -NoProfile -File ./caption/tests/benchmark-share-fps.ps1 -ResultFile result.json
+          exit $LASTEXITCODE
+      - name: Combine both independent launcher changes
+        working-directory: display
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 75022ba0ba6bacafac9bdd28755f10338caf5938 d7a268402fa09c848d21c0c3e22726c72808a223
+          git diff 75022ba0ba6bacafac9bdd28755f10338caf5938 d7a268402fa09c848d21c0c3e22726c72808a223 | git apply --index
+          git diff --cached --check
+      - name: Exercise both fixes and the shipped Start and Copy JSON controls together
+        shell: powershell
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          foreach ($test in 'settings-work-area', 'benchmark-clipboard', 'launcher-start', 'benchmark-share-fps') {
+            & $exe -NoProfile -STA -File "./display/tests/$test.ps1"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+  pwsh:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 75022ba0ba6bacafac9bdd28755f10338caf5938
+          path: release
+      - uses: actions/checkout@v5
+        with:
+          ref: c2f9af4f0fb46f522385a3414b817d5d27a39af9
+          path: display
+      - uses: actions/checkout@v5
+        with:
+          ref: d7a268402fa09c848d21c0c3e22726c72808a223
+          path: caption
+      - name: Load public RX 9060 XT data and confirm both release baselines
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/user-attachments/files/35552055/KLBF-Bench-BM-v1-20261128-2235-d072b8a2.json' -OutFile result.json
+          if ((Get-FileHash result.json).Hash -ne '30829598a20c6386cc0cb8675aae6111fb3077ccdf7457dc7975b6b2de433df2') { throw 'Result file hash changed' }
+          Copy-Item ./display/tests/settings-work-area.ps1 ./release/tests/
+          Copy-Item ./caption/tests/benchmark-share-fps.ps1 ./release/tests/
+          & $exe -NoProfile -STA -File ./release/tests/settings-work-area.ps1 -ExpectOriginal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe -NoProfile -File ./release/tests/benchmark-share-fps.ps1 -ResultFile result.json -ExpectOriginal
+          exit $LASTEXITCODE
+      - name: Check the two individual PR heads
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          & $exe -NoProfile -STA -File ./display/tests/settings-work-area.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $exe -NoProfile -File ./caption/tests/benchmark-share-fps.ps1 -ResultFile result.json
+          exit $LASTEXITCODE
+      - name: Combine both independent launcher changes
+        working-directory: display
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 75022ba0ba6bacafac9bdd28755f10338caf5938 d7a268402fa09c848d21c0c3e22726c72808a223
+          git diff 75022ba0ba6bacafac9bdd28755f10338caf5938 d7a268402fa09c848d21c0c3e22726c72808a223 | git apply --index
+          git diff --cached --check
+      - name: Exercise both fixes and the shipped Start and Copy JSON controls together
+        shell: pwsh
+        run: |
+          $exe = (Get-Process -Id $PID).Path
+          foreach ($test in 'settings-work-area', 'benchmark-clipboard', 'launcher-start', 'benchmark-share-fps') {
+            & $exe -NoProfile -STA -File "./display/tests/$test.ps1"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
