@@ -17,7 +17,7 @@ jobs:
         run: |
           set -euo pipefail
           base=$(git rev-parse HEAD)
-          for change in b41211d001abfb90a01c828db412682043bbffe4 4c49ec1d60ae5a5a231acadd01cfff182ff6b7a4 96668cc4fb808c434b276bd1b5e81533bcfde99f d153cf6620dd90bbe713288e14be503fb4000324 256b6a475fab72421497ec205077797a2b0eab5d; do
+          for change in b41211d001abfb90a01c828db412682043bbffe4 4c49ec1d60ae5a5a231acadd01cfff182ff6b7a4 96668cc4fb808c434b276bd1b5e81533bcfde99f d153cf6620dd90bbe713288e14be503fb4000324 256b6a475fab72421497ec205077797a2b0eab5d d34587ccff5d37a9b12d97d01d72dd76a853234e; do
             git fetch --no-tags --depth=1 origin "$change"
             git diff --binary "$base" "$change" | git apply --index
           done
@@ -29,7 +29,7 @@ jobs:
         shell: pwsh
         run: |
           foreach ($exe in 'powershell.exe', 'pwsh.exe') {
-            foreach ($test in 'launcher-logs', 'preparation-exit-log', 'benchmark-clipboard', 'settings-work-area') {
+            foreach ($test in 'launcher-logs', 'preparation-exit-log', 'benchmark-clipboard', 'settings-work-area', 'benchmark-share-fps') {
               Write-Host "Running $test with $exe"
               & $exe -NoProfile -STA -File "./tests/$test.ps1"
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -41,5 +41,12 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Strict Clippy with all features
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Repeat the previously failing GPU watch test in isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in {1..8}; do
+            cargo test --locked -p victory-gpu --lib watch::tests::a_write_through_another_view_is_reported_at_the_guarded_one -- --exact
+          done
       - name: Full Windows workspace
         run: cargo test --workspace --locked
