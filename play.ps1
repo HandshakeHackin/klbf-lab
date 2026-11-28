@@ -252,6 +252,9 @@ if ($menuAction -eq 'bench' -and $picked.benchSave) {
     $Data = New-KlbfBenchData $Data $picked.benchSave
     Write-Host "KLBF Lab Bench: save $benchLabel, alone in a copy of your data ($Data)"
 }
+# (28/11) Settings' Start beside Play: a new game, the autosave or a slot, pressed for you (Get-KlbfStartPlan)
+$startPlan = if (-not $explicit -and -not $Bench) { Get-KlbfStartPlan $choice.start (Get-KlbfSavesRoot $Data) } else { $null }
+if ($startPlan.note) { Write-Host $startPlan.note }
 
 # Settings left in this window by an earlier start go: only what is below counts.
 Get-ChildItem Env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -ne 'VICTORY_HALF_VIEWS' -and $_.Name -ne 'VICTORY_AUTO_INPUT' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
@@ -340,7 +343,12 @@ if ($FrameGen) {
 if (-not $NoProbeRays -and -not $RayTracing) { $set.VICTORY_PROBE_RAYS = '1' }
 if ($RayTracing) { $set.VICTORY_BVH_BUILDER = '1' }
 if ($AutoStart) {
-    $set.VICTORY_AUTO_INPUT = 'd>=15,rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w1.5,A,w0.7,Down,w0.5,A,w0.7,Down,w0.5,A'
+    $set.VICTORY_AUTO_INPUT = $script:KlbfKeys.newGame
+}
+if ($startPlan.keys) {
+    $set.VICTORY_AUTO_INPUT = $startPlan.keys
+    # Continue's presses as the bench plays them: the movies jump to their end
+    if ($startPlan.save -and -not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
 }
 if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'open' } else { $SkipMovies }) }
 # -Bench (KLBF Lab Bench BM-v1, docs/klbf/BENCH-BM-V1.md): the bench on, the movies skipped, and the start
@@ -348,7 +356,7 @@ if ($SkipMovies) { $set.VICTORY_SKIP_MOVIES = $(if ($SkipMovies -eq 'all') { 'op
 if ($Bench) {
     $set.KLBF_BENCH = 'bm-v1'; $set.KLBF_BENCH_PLAYER = $BenchPlayer; $set.KLBF_BENCH_LENGTH = @{ '5' = 'short'; '15' = 'medium'; '30' = 'long'; '60' = 'marathon' }[$BenchLength]; if (-not $set.KLBF_BENCH_LENGTH) { $set.KLBF_BENCH_LENGTH = $BenchLength.ToLower() }
     if (-not $SkipMovies) { $set.VICTORY_SKIP_MOVIES = 'end' }
-    $set.VICTORY_AUTO_INPUT = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A,d>=1000'
+    $set.VICTORY_AUTO_INPUT = "$($script:KlbfKeys.continue),d>=1000"
     Write-Host 'KLBF Lab Bench BM-v1: Continue is pressed for you, then touch nothing until the card shows. Your card is saved in bench-results beside victory.exe;'
     Write-Host 'post it with the form: https://github.com/PastiiJay/klbf-lab/issues/new?template=bench-bm-v1.yml'
 }
@@ -367,10 +375,11 @@ $set.KLBF_LOG_DIR = Get-KlbfLogDir
 if ($saved -and $saved.display -ge 0) { $set.KLBF_WINDOW_MONITOR = [string]$saved.display }
 if ($saved -and $saved.borderless) { $set.KLBF_BORDERLESS = '1' }
 foreach ($k in $More.Keys) { $set[$k] = [string]$More[$k] }
-# Apply benchmark-only values for the game below. Preflight can fail or return to Settings.
+# Apply benchmark-only values (and the menu presses, 28/11) for the game below only: a later start from F10's
+# Settings runs in this process. Preflight can fail or return to Settings.
 $benchEnvironment = @{}
 foreach ($k in $set.Keys) {
-    if ($Bench -and $k -in 'KLBF_BENCH', 'KLBF_BENCH_PLAYER', 'KLBF_BENCH_LENGTH', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_SAVE_ID', 'KLBF_BENCH_WHERE', 'VICTORY_AUTO_INPUT') {
+    if ($k -eq 'VICTORY_AUTO_INPUT' -or ($Bench -and $k -in 'KLBF_BENCH', 'KLBF_BENCH_PLAYER', 'KLBF_BENCH_LENGTH', 'KLBF_BENCH_SAVE', 'KLBF_BENCH_SAVE_ID', 'KLBF_BENCH_WHERE', 'VICTORY_AUTO_INPUT')) {
         $benchEnvironment[$k] = $set[$k]
     } else {
         Set-Item -Path "Env:$k" -Value $set[$k]
@@ -459,6 +468,7 @@ if (-not $benchLabel) { try {
     $savedZip = Backup-KlbfSaves (Get-KlbfSavesRoot $Data)
     if ($savedZip) { Write-Host "Saves backed up: $savedZip" }
 } catch { Write-Warning "Saves not backed up: $_" } }
+if ($startPlan.save) { Set-KlbfNewestSave $startPlan.save }
 Write-Host ("KLBF Lab, Profile {0}, {1} build, ray tracing {2}, memory hooks {3}" -f $(if ($Fsr) { 'S' } else { 'X' }), $Build, $(if ($RayTracing) { 'on' } else { 'off' }), $(if ($Hooks -and -not $NoHooks) { 'on' } else { 'off' }))
 if ($FsrX) { Write-Host "AMD FSR (Profile X): $FsrQuality, output $(if ($Output) { $Output } else { 'the title''s' })" }
 if ($FrameGen) { Write-Host 'AMD frame generation: on (two frames shown per real one; more latency at a low base frame rate)' }

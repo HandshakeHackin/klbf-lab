@@ -113,7 +113,9 @@ function Test-KlbfLostSaves([string]$Data, [string[]]$From = (Get-KlbfOldHomes))
 function Get-KlbfDefaults {
     [ordered]@{ profile = 'X'; upscaler = 'fsr'; preset = 'performance'; output = '3840x2160'; frameGen = $true; advanced = $true; game = ''; shotsDir = ''; display = -1; borderless = $false
         # (low-end beta) Experimental switches, all off: Experimental tab, play.ps1's -HeapSkip and siblings
-        heapSkip = $false; heapSkipVerify = $false; rebarUpload = $false; refreshCoalesce = $false; pagePool = $false; safe8gb = $false; emergencyReclaim = $false }
+        heapSkip = $false; heapSkipVerify = $false; rebarUpload = $false; refreshCoalesce = $false; pagePool = $false; safe8gb = $false; emergencyReclaim = $false
+        # (28/11) How Play starts: the game's menu, a new game, the autosave, or a save (Get-KlbfStartPlan)
+        start = 'menu' }
 }
 
 # (low-end beta) The experimental choices: play.ps1 switch, environment variable, the tab's text and tooltip.
@@ -140,6 +142,7 @@ function ConvertTo-KlbfChoice($o) {
     if ($o.game -is [string]) { $c.game = $o.game }
     if ($o.shotsDir -is [string]) { $c.shotsDir = $o.shotsDir }
     if ($o.borderless -is [bool]) { $c.borderless = $o.borderless }
+    if ($o.start -is [string] -and $o.start -match '^(menu|new|auto|SARC.*~[0-9a-f]{16})$') { $c.start = $o.start }
     foreach ($k in $script:KlbfExperimental.Keys) { if ($o.$k -is [bool]) { $c[$k] = $o.$k } }
     if (($o.display -is [int] -or $o.display -is [long]) -and $o.display -ge -1 -and $o.display -lt 16) { $c.display = [int]$o.display }
     $c
@@ -1031,6 +1034,34 @@ function Copy-KlbfSave($From, $To, [string]$SavesRoot, [string]$Dir = (Get-KlbfB
     $backup
 }
 
+# (28/11) The menu presses VICTORY_AUTO_INPUT plays: Continue with saves (the bench's, which loads the newest
+# save), and through the start screens into a new game with no save (-AutoStart's).
+$script:KlbfKeys = @{
+    continue = 'rep(A,2,d>=15),rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w2,A,w1.5,A'
+    newGame = 'd>=15,rep(A,1,d<10),w3,d>=20,w1,rep(A,1,d>=35),w1.5,Down,w7,Down,w0.6,A,w1.5,A,w0.7,Down,w0.5,A,w0.7,Down,w0.5,A'
+}
+
+# (28/11) What Play does with Settings' Start ($Start: 'menu', 'new', 'auto' or a save's folder name):
+# @{ keys (VICTORY_AUTO_INPUT, '' = the game's menu for the player); save (to make the newest first); note }.
+# A save is loaded by making it the newest (Set-KlbfNewestSave), then Continue. New game is pressed only with
+# no save at all: with saves the menu's New game place is not known yet, so the player picks it.
+function Get-KlbfStartPlan([string]$Start, [string]$SavesRoot) {
+    $saves = @(Get-KlbfSaves $SavesRoot)
+    if ($Start -eq 'new') {
+        if (-not $saves) { return @{ keys = $script:KlbfKeys.newGame; save = $null; note = 'Start: new game.' } }
+        return @{ keys = ''; save = $null; note = 'Start: new game. You have saves: pick New game in the game''s menu.' }
+    }
+    $s = if ($Start -eq 'auto') { $saves | Where-Object auto | Select-Object -First 1 } elseif ($Start -and $Start -ne 'menu') { $saves | Where-Object { (Split-Path -Leaf $_.dir) -eq $Start } | Select-Object -First 1 }
+    if ($s) { return @{ keys = $script:KlbfKeys.continue; save = $s; note = "Start: $(Get-KlbfSaveName $s), made the newest, then Continue." } }
+    @{ keys = ''; save = $null; note = $(if ($Start -and $Start -ne 'menu') { 'Start: that save is gone, the game''s menu instead.' } else { '' }) }
+}
+
+# The save dated now (its version's files: the game dates a save by its manifest, the Saves tab by its data).
+function Set-KlbfNewestSave($Save) {
+    $now = Get-Date
+    foreach ($f in (Get-ChildItem -LiteralPath $Save.version -File)) { $f.LastWriteTime = $now }
+}
+
 # ---- Run logs, report a bug and the bench ----
 
 # (27/11) The game's logs: <home>\logs (Saved Games\KLBF Lab\logs): run-<date>.log for each start (the last
@@ -1522,8 +1553,13 @@ function New-KlbfMenuForm($Choice, $Hardware, [string]$ShaderStatus = '', $Info 
     $c.prepare = & $btn $f 'Prepare shaders' (& $col 0) 806 156 36
     $c.bench = & $btn $f 'Run benchmark' (& $col 1) 806 156 36
     $c.bug = & $btn $f 'Report a bug' (& $col 2) 806 156 36
-    $c.bugNote = & $label $f '' (& $col 0) 848 322 35
-    $c.bugNote.ForeColor = $soft
+    $c.bugNote = & $label $f '' (& $col 0) 848 156 36
+    $c.bugNote.ForeColor = $soft; $c.bugNote.Font = New-KlbfFont 8
+    # (28/11) Beside Play: how it starts (Get-KlbfStartPlan), filled with the saves by Update-KlbfSavesTab
+    $startLabel = & $label $f 'Start' (& $col 1) 848 156 16
+    $startLabel.ForeColor = $soft; $startLabel.Font = New-KlbfFont 8
+    $c.startList = & $combo $f (& $col 1) 866 156
+    $c.tips.SetToolTip($c.startList, 'Game menu: as usual. New game, Autosave or a slot (numbered as the game''s menu): the save is made the newest, then Continue is pressed for you. Saves are backed up first.')
     # (27/11) Bottom left, opposite Play: the version (small, grey), and the update line when Show-KlbfMenu's
     # check finds a newer release (Set-KlbfUpdateLine)
     $c.versionLabel = & $label $f (Get-KlbfVersionText $c.version) 16 884 84 18
@@ -1722,6 +1758,12 @@ function Update-KlbfSavesTab($c) {
     }
     $c.showNamesBtn.Text = "$(if ($c.showNames) { 'Hide names' } else { 'Show names' })" 
     if (-not $c.saves) { $c.savesNote.Text = $(if ($c.savesRoot) { 'No saves yet.' } else { 'No saves folder yet: it appears after the first save in the game.' }) }
+    # Start beside Play: the game menu, a new game, the autosave, then every slot (a gone save: the game menu)
+    if (-not $c.startList) { return }
+    $want = if ($c.startList.SelectedIndex -ge 0) { $c.startValues[$c.startList.SelectedIndex] } else { [string]$c.startWant }
+    $c.startValues = @('menu', 'new'); $c.startList.Items.Clear(); [void]$c.startList.Items.AddRange(@('Game menu', 'New game'))
+    foreach ($s in $c.saves) { $c.startValues += $(if ($s.auto) { 'auto' } else { Split-Path -Leaf $s.dir }); [void]$c.startList.Items.Add((Get-KlbfSaveName $s)) }
+    $c.startList.SelectedIndex = [math]::Max(0, [array]::IndexOf($c.startValues, $want))
 }
 
 # The game folder kept in $c.gamePath; the box shows it only after Show ("(hidden)" otherwise).
@@ -1761,6 +1803,8 @@ function Set-KlbfFormChoice($c, $Choice) {
     $c.fg.Checked = $Choice.frameGen; $c.adv.Checked = $Choice.advanced
     foreach ($k in $c.exp.Keys) { $c.exp[$k].Checked = [bool]$Choice.$k }
     $c.exp.heapSkipVerify.Enabled = $c.exp.heapSkip.Checked
+    $c.startWant = [string]$Choice.start
+    if ($c.startValues) { $c.startList.SelectedIndex = [math]::Max(0, [array]::IndexOf($c.startValues, $c.startWant)) }
     Update-KlbfForm $c
 }
 
@@ -1779,6 +1823,7 @@ function Get-KlbfFormChoice($c) {
         rebarUpload = [bool]$c.exp.rebarUpload.Checked; refreshCoalesce = [bool]$c.exp.refreshCoalesce.Checked; pagePool = [bool]$c.exp.pagePool.Checked
         safe8gb = [bool]$c.exp.safe8gb.Checked; emergencyReclaim = [bool]$c.exp.emergencyReclaim.Checked
         display = $(if ($c.display.SelectedIndex -lt 0 -or $c.display.SelectedIndex -eq $c.primaryIndex) { -1 } else { [int]$c.display.SelectedIndex })
+        start = $(if ($c.startList -and $c.startList.SelectedIndex -ge 0) { [string]$c.startValues[$c.startList.SelectedIndex] } else { [string]$c.startWant })
     })
 }
 
